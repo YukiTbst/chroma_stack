@@ -9,7 +9,11 @@
   const clamp = (v, a, b) => v < a ? a : (v > b ? b : v);
   const fmt = (v, d = 1) => Number(v).toFixed(d);
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  const WORK_MAX = 640;
+  // Working-grid long side. The nozzle sets the line width, but the motion
+  // system can place boundaries far finer than a pixel, so the grid is a
+  // user-selectable quality lever shared by preview, layers, 3D and 3MF.
+  const WORK_RESOLUTIONS = [640, 1280, 2560];
+  let workMax = WORK_RESOLUTIONS[0];
 
   const state = {
     imageData: null,
@@ -354,9 +358,9 @@
     const sw = source.width || source.naturalWidth;
     const sh = source.height || source.naturalHeight;
     if (!sw || !sh) throw new Error('图片尺寸为空');
-    // Downsample large images to WORK_MAX, but also give small line-art images
-    // a high-quality working raster instead of hard-cutting 300px staircases.
-    const scale = Math.min(1.8, WORK_MAX / Math.max(sw, sh));
+    // Downsample large images to the working grid, but also give small line-art
+    // images a high-quality working raster instead of hard-cutting staircases.
+    const scale = Math.min(1.8, workMax / Math.max(sw, sh));
     const w = Math.max(1, Math.round(sw * scale));
     const h = Math.max(1, Math.round(sh * scale));
     const canvas = document.createElement('canvas');
@@ -370,6 +374,7 @@
     const imageData = ctx.getImageData(0, 0, w, h);
     state.workingCanvas = canvas;
     state.imageData = imageData;
+    state.sourceImage = source;
     state.imageName = name || '未命名';
     state.plan = null;
     state.layer = 0;
@@ -397,6 +402,7 @@
 
   function makeSyntheticSample() {
     imageLoadSerial++;
+    state.sourceImage = null; // not re-renderable at another resolution
     const c = document.createElement('canvas');
     c.width = 720; c.height = 480;
     const ctx = c.getContext('2d');
@@ -1506,6 +1512,20 @@
     });
     $('smoothMm').addEventListener('change', (e) => {
       e.target.value = state.smoothMm.toFixed(1);
+    });
+    const workRes = $('workRes');
+    workRes.value = String(workMax);
+    $('workResValue').textContent = workMax + 'px';
+    workRes.addEventListener('change', (e) => {
+      const next = Number(e.target.value) || WORK_RESOLUTIONS[0];
+      workMax = WORK_RESOLUTIONS.includes(next) ? next : WORK_RESOLUTIONS[0];
+      $('workResValue').textContent = workMax + 'px';
+      if (!state.sourceImage) {
+        if (state.imageData) toast('当前画布不是文件图片，重新导入图片后分辨率档位才对它生效');
+        return;
+      }
+      const name = state.imageName;
+      setImage(state.sourceImage, name);
     });
     $('lineWidthMm').addEventListener('input', (e) => {
       state.lineWidthMm = clamp(Number(e.target.value) || 0.42, 0.2, 1.2);

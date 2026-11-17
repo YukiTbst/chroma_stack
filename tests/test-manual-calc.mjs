@@ -40,7 +40,9 @@ assert.ok(!html.includes('松开后自动重算'), 'brush help no longer promise
 assert.ok(html.includes('松开后标记修改，点击计算生效'), 'brush help explains the manual workflow');
 assert.ok(app.includes("lineProtect: 'strong'"), 'web default promotes continuous dark strokes to direct filament for crisp text');
 assert.ok(html.includes('value="strong" selected'), 'strong line protection is the selected default in the UI');
-assert.ok(app.includes('Math.min(1.8, WORK_MAX / Math.max(sw, sh))'), 'small images receive a high-quality working raster instead of staying at low resolution');
+assert.ok(app.includes('Math.min(1.8, workMax / Math.max(sw, sh))'), 'small images receive a high-quality working raster instead of staying at low resolution');
+assert.ok(app.includes('const WORK_RESOLUTIONS = [640, 1280, 2560]'), 'working resolution offers 1x/2x/4x presets');
+assert.ok(/<select[^>]*id="workRes"[\s\S]*?value="1280"[\s\S]*?value="2560"/.test(html), 'resolution selector exposes 2x and 4x options');
 assert.ok(app.includes("$('smoothMm').addEventListener('change'"), 'out-of-range smoothness is normalized on commit');
 const beginBrush = app.slice(app.indexOf('function beginBrush'), app.indexOf('function moveBrush'));
 assert.ok(beginBrush.includes('markDirty(false)'), 'starting a brush stroke immediately disables stale exports');

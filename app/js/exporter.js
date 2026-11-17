@@ -659,11 +659,14 @@
   function build3MFParts(plan, options = {}) {
     if (!plan) throw new Error('没有可导出的方案');
     // Native resolution is the correctness default: the web preview and 3MF
-    // must share the same per-pixel recipes and exposed top colours. Compact
-    // downsampling remains available only when explicitly requested.
+    // must share the same per-pixel recipes and exposed top colours. Export
+    // fidelity is capped at a 1280 long side (~0.117 mm/px at 150 mm width,
+    // which already matches the A1's XY positioning limit): a 2560 analysis
+    // grid is for preview/layer inspection, and meshing it would block the
+    // page for minutes and multiply the file size with no printable gain.
     const exportMax = options.exportMax != null
       ? Math.max(80, Math.min(1024, Number(options.exportMax) || 300))
-      : Math.max(plan.w, plan.h);
+      : Math.max(plan.w, plan.h) > 1280 ? 1280 : Math.max(plan.w, plan.h);
     const scale = Math.min(1, exportMax / Math.max(plan.w, plan.h));
     const ew = Math.max(1, Math.round(plan.w * scale));
     const eh = Math.max(1, Math.round(plan.h * scale));
@@ -705,46 +708,66 @@
     if (!objects.length) throw new Error('没有可导出的几何体（检查纯色区/渐变区层数）');
     const assemblyId = nextId++;
 
-    const parts = [];
-    parts.push('<?xml version="1.0" encoding="UTF-8"?>');
-    parts.push('<model unit="millimeter" xml:lang="zh-CN" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:BambuStudio="http://schemas.bambulab.com/package/2021" xmlns:slic3rpe="http://schemas.slic3r.org/3mf/2017/06">');
-    parts.push(' <metadata name="Application">ChromaStack</metadata>');
-    parts.push(' <metadata name="BambuStudio:3mfVersion">1</metadata>');
-    parts.push(` <metadata name="slic3rpe:layer_height">${plan.layerHeight}</metadata>`);
-    parts.push(' <resources>');
-    parts.push('  <basematerials id="1">');
-    for (const p of palette) parts.push(`   <base name="${escapeXml(p.name)}" displaycolor="#${p.hex.replace('#', '').toUpperCase()}FF" />`);
-    parts.push('  </basematerials>');
+    // Encode the model XML in bounded chunks: at 1280+ grids the full string
+    // exceeds V8's maximum string length ("Invalid string length"), so each
+    // object is joined+encoded before the next one is appended.
+    const encoder = new TextEncoder();
+    const byteParts = [];
+    let textLines = [];
+    const flushText = () => {
+      if (!textLines.length) return;
+      byteParts.push(encoder.encode(textLines.join('\n') + '\n'));
+      textLines = [];
+    };
+    const pushLine = s => textLines.push(s);
+    pushLine('<?xml version="1.0" encoding="UTF-8"?>');
+    pushLine('<model unit="millimeter" xml:lang="zh-CN" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:BambuStudio="http://schemas.bambulab.com/package/2021" xmlns:slic3rpe="http://schemas.slic3r.org/3mf/2017/06">');
+    pushLine(' <metadata name="Application">ChromaStack</metadata>');
+    pushLine(' <metadata name="BambuStudio:3mfVersion">1</metadata>');
+    pushLine(` <metadata name="slic3rpe:layer_height">${plan.layerHeight}</metadata>`);
+    pushLine(' <resources>');
+    pushLine('  <basematerials id="1">');
+    for (const p of palette) pushLine(`   <base name="${escapeXml(p.name)}" displaycolor="#${p.hex.replace('#', '').toUpperCase()}FF" />`);
+    pushLine('  </basematerials>');
     for (const obj of objects) {
-      parts.push(`  <object id="${obj.id}" type="model" pid="1" pindex="${obj.filament}" name="${escapeXml(obj.name)}">`);
-      parts.push('   <mesh>');
-      parts.push('    <vertices>');
+      pushLine(`  <object id="${obj.id}" type="model" pid="1" pindex="${obj.filament}" name="${escapeXml(obj.name)}">`);
+      pushLine('   <mesh>');
+      pushLine('    <vertices>');
       for (let i = 0; i < obj.positions.length; i += 3) {
-        parts.push(`     <vertex x="${round(obj.positions[i], 4)}" y="${round(obj.positions[i + 1], 4)}" z="${round(obj.positions[i + 2], 4)}" />`);
+        pushLine(`     <vertex x="${round(obj.positions[i], 4)}" y="${round(obj.positions[i + 1], 4)}" z="${round(obj.positions[i + 2], 4)}" />`);
       }
-      parts.push('    </vertices>');
-      parts.push('    <triangles>');
+      pushLine('    </vertices>');
+      pushLine('    <triangles>');
       for (let i = 0; i < obj.indices.length; i += 3) {
         // Triangle-level colour is what Bambu Studio's standard-3MF colour
         // parser reads. Object-level pid/pindex alone is treated as plain
         // geometry, and the whole model falls back to the slicer's default
         // two filaments (the "why only 2 filaments?" symptom).
-        parts.push(`     <triangle v1="${obj.indices[i]}" v2="${obj.indices[i + 1]}" v3="${obj.indices[i + 2]}" pid="1" pindex="${obj.filament}" />`);
+        pushLine(`     <triangle v1="${obj.indices[i]}" v2="${obj.indices[i + 1]}" v3="${obj.indices[i + 2]}" pid="1" pindex="${obj.filament}" />`);
       }
-      parts.push('    </triangles>');
-      parts.push('   </mesh>');
-      parts.push('  </object>');
+      pushLine('    </triangles>');
+      pushLine('   </mesh>');
+      pushLine('  </object>');
+      flushText();
     }
-    parts.push(`  <object id="${assemblyId}" type="model" name="ChromaStack_Model">`);
-    parts.push('   <components>');
-    for (const obj of objects) parts.push(`    <component objectid="${obj.id}" />`);
-    parts.push('   </components>');
-    parts.push('  </object>');
-    parts.push(' </resources>');
-    parts.push(' <build>');
-    parts.push(`  <item objectid="${assemblyId}" />`);
-    parts.push(' </build>');
-    parts.push('</model>');
+    pushLine(`  <object id="${assemblyId}" type="model" name="ChromaStack_Model">`);
+    pushLine('   <components>');
+    for (const obj of objects) pushLine(`    <component objectid="${obj.id}" />`);
+    pushLine('   </components>');
+    pushLine('  </object>');
+    pushLine(' </resources>');
+    pushLine(' <build>');
+    pushLine(`  <item objectid="${assemblyId}" />`);
+    pushLine(' </build>');
+    pushLine('</model>');
+    flushText();
+    let modelBytes = null;
+    {
+      const total = byteParts.reduce((s, b) => s + b.length, 0);
+      modelBytes = new Uint8Array(total);
+      let off = 0;
+      for (const b of byteParts) { modelBytes.set(b, off); off += b.length; }
+    }
 
     const assemblyFaces = objects.reduce((s, obj) => s + obj.indices.length / 3, 0);
     const modelSettings = `<?xml version="1.0" encoding="UTF-8"?>
@@ -826,7 +849,7 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
     const files = [
       { name: '[Content_Types].xml', data: contentTypes },
       { name: '_rels/.rels', data: rels },
-      { name: '3D/3dmodel.model', data: parts.join('\n') },
+      { name: '3D/3dmodel.model', data: modelBytes },
       { name: 'Metadata/model_settings.config', data: modelSettings },
       { name: 'Metadata/project_settings.config', data: JSON.stringify(projectSettings, null, 2) },
       { name: 'Metadata/chromastack.json', data: JSON.stringify(meta, null, 2) }

@@ -8,7 +8,7 @@
 <meta http-equiv="Expires" content="0">
 <title>叠彩 ChromaStack · 混合彩绘 3D 打印规划器</title>
 <link rel="icon" type="image/x-icon" href="favicon.ico">
-<link rel="stylesheet" href="css/app.css?v=20261118m10">
+<link rel="stylesheet" href="css/app.css?v=20261118m11">
 </head>
 <body>
 <header class="app-header">
@@ -196,6 +196,9 @@
         <button data-view="three">3D</button>
       </div>
       <div class="stage-tools">
+        <label class="tool-slider tool-number" title="工作分辨率（长边像素）：分析、预览、分层、3D 与 3MF 共用同一像素网格。1×=640px，2×=1280px，4×=2560px。4× 仅用于预览/分层核对，3MF 导出自适应封顶在 2×（约 0.117 mm/px，已到 A1 的 XY 定位极限）；4× 计算更慢。切换后按原图重新载入并重算。">
+          <span>分辨率</span><select id="workRes"><option value="640" selected>1×</option><option value="1280">2×</option><option value="2560">4×</option></select><b id="workResValue">640px</b>
+        </label>
         <label class="tool-slider tool-number" title="结构平滑尺寸（mm）：小于该尺寸的孤立色块会被合并。有效像素半径按成品宽度换算，并与喷嘴线宽一起决定可打印细节。输入后点击计算生效。">
           <span>平滑</span><input type="number" id="smoothMm" min="0" max="3" step="0.1" value="0.8"><i>mm</i><b id="smoothValue">—</b>
         </label>
@@ -407,19 +410,19 @@
 
 <div class="toast" id="toast" hidden></div>
 
-<script src="js/color.js?v=20261118m10"></script>
-<script src="js/data-filaments.js?v=20261118m10"></script>
-<script src="js/data-lut.js?v=20261118m10"></script>
-<script src="js/earcut.js?v=20261118m10"></script>
-<script src="js/engine.js?v=20261118m10"></script>
-<script src="js/zip.js?v=20261118m10"></script>
-<script src="js/exporter.js?v=20261118m10"></script>
-<script src="js/calibration.js?v=20261118m10"></script>
-<script src="js/batch-calibration.js?v=20261118m10"></script>
-<script src="js/matrix-calibration.js?v=20261118m10"></script>
-<script src="js/view3d.js?v=20261118m10"></script>
-<script src="js/profiles.js?v=20261118m10"></script>
-<script src="js/settings.js?v=20261118m10"></script>
-<script src="js/app.js?v=20261118m10"></script>
+<script src="js/color.js?v=20261118m11"></script>
+<script src="js/data-filaments.js?v=20261118m11"></script>
+<script src="js/data-lut.js?v=20261118m11"></script>
+<script src="js/earcut.js?v=20261118m11"></script>
+<script src="js/engine.js?v=20261118m11"></script>
+<script src="js/zip.js?v=20261118m11"></script>
+<script src="js/exporter.js?v=20261118m11"></script>
+<script src="js/calibration.js?v=20261118m11"></script>
+<script src="js/batch-calibration.js?v=20261118m11"></script>
+<script src="js/matrix-calibration.js?v=20261118m11"></script>
+<script src="js/view3d.js?v=20261118m11"></script>
+<script src="js/profiles.js?v=20261118m11"></script>
+<script src="js/settings.js?v=20261118m11"></script>
+<script src="js/app.js?v=20261118m11"></script>
 </body>
 </html>

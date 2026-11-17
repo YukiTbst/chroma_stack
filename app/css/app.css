@@ -410,6 +410,7 @@ input[type="range"]::-moz-range-thumb { width: 12px; height: 12px; border-radius
 .tool-slider input { width: 72px; }
 .tool-slider b { color: #f0e7d7; font-size: 10px; font-weight: 600; min-width: 24px; text-align: right; }
 .tool-slider.tool-number input[type="number"] { width: 62px; padding: 4px 5px; border: 1px solid #46545a; border-radius: 5px; background: rgba(255,255,255,.07); color: #f0e7d7; font: 600 11px var(--font-body); }
+.tool-slider.tool-number select { width: 58px; padding: 4px 4px; border: 1px solid #46545a; border-radius: 5px; background: rgba(255,255,255,.07); color: #f0e7d7; font: 600 11px var(--font-body); }
 .tool-number i { color: #8fa0a2; font-size: 10px; font-style: normal; }
 .analyze-stage { flex: 0 0 auto; }
 .btn.dirty { box-shadow: 0 0 0 2px rgba(224,155,70,.3); }
