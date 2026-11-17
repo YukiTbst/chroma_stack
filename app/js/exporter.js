@@ -272,23 +272,6 @@
     return out;
   }
 
-  function fillDiagonalPinches(mask, w, h) {
-    const out = new Uint8Array(mask);
-    for (let pass = 0; pass < 4; pass++) {
-      let changed = false;
-      for (let y = 0; y < h - 1; y++) {
-        for (let x = 0; x < w - 1; x++) {
-          const i = y * w + x;
-          const a = out[i], b = out[i + 1], c = out[i + w], d = out[i + w + 1];
-          if (a && d && !b && !c) { out[i + 1] = 1; changed = true; }
-          else if (b && c && !a && !d) { out[i] = 1; changed = true; }
-        }
-      }
-      if (!changed) break;
-    }
-    return out;
-  }
-
   function validateLocalEdges(indices, startIdx) {
     const edges = new Map();
     for (let i = startIdx; i < indices.length; i += 3) {
@@ -414,7 +397,7 @@
         const cross = (p1.x - p0.x) * (p2.y - p1.y) - (p1.y - p0.y) * (p2.x - p1.x);
         if (Math.abs(cross) > 1e-9) out.push(p1);
       }
-      if (out.length >= 3) loops.push(simplifyClosed(out, 0.55));
+      if (out.length >= 3) loops.push(simplifyClosed(out, 0.35));
     }
     if (!loops.length) return false;
     // containment depth: even = outer, odd = hole
@@ -536,11 +519,9 @@
   function meshPrismLegacy(mask, w, h, pixelSize, z0, z1, positions, indices, depth = 0) {
     const earcutFn = (root.earcut && (root.earcut.default || root.earcut)) || CS.earcut;
     if (typeof earcutFn !== 'function') throw new Error('earcut 未加载');
-    // 3x3 close removes sub-line-width pinches/notches that would otherwise
-    // create non-manifold wall junctions. The on-screen preview stays exact.
-    mask = morphMask(mask, w, h, 1, true);
-    mask = morphMask(mask, w, h, 1, false);
-    mask = fillDiagonalPinches(mask, w, h);
+    // Never morph the mask here: a 3x3 close would seal 1-px white gaps and
+    // bold thin strokes. If the traced skeleton turns out non-manifold the
+    // caller rebuilds this prism with exact per-cell tiling instead.
     const rawLoops = traceLoops(mask, w, h).map(simplifyLoop).filter(l => Math.abs(loopArea(l)) > 1e-9);
     if (!rawLoops.length) return;
     const outers = [], holes = [];
@@ -652,15 +633,9 @@
       for (const n of edgeCounts.values()) if (n !== 2) { nonManifold = true; break; }
     }
     if (nonManifold) {
-      if (depth < 1) {
-        // A 1-pixel dilation separates point-contact boundaries. It is only
-        // used for the rare prism that the cap/wall skeleton cannot resolve.
-        positions.length = startPos * 3;
-        indices.length = startIdx;
-        const grown = morphMask(mask, w, h, 1, true);
-        return meshPrism(grown, w, h, pixelSize, z0, z1, positions, indices, depth + 1);
-      }
-      // guaranteed-watertight per-cell tiling as a last resort
+      // Exact per-cell tiling: the footprint stays bit-identical to the mask,
+      // so thin strokes and 1-px white gaps survive. (An earlier fallback grew
+      // the mask by 1 px, which visibly bolded text and sealed letter gaps.)
       positions.length = startPos * 3;
       indices.length = startIdx;
       vmap.clear();
