@@ -330,5 +330,5 @@
     return { layout, markers, results, whiteBalance: { white, gains, hd: whiteFit.hd, residual: whiteFit.error }, score };
   }
 
-  CS.batchCalibration = { buildBatchLayout, buildBatchCalibration3MF, buildBatchCalibrationBlob, analyzeBatchPhoto, detectMarkers, homography, solveLinear, transmission };
+  CS.batchCalibration = { buildBatchLayout, buildBatchCalibration3MF, buildBatchCalibrationBlob, analyzeBatchPhoto, detectMarkers, homography, solveLinear, transmission, searchScalar, sampleMedian };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

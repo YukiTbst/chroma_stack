@@ -22,6 +22,7 @@ node tests/test-background.mjs  # 边界背景、气泡距离场、四连通、�
 node tests/test-settings.mjs   # 标定快照纯度、profile 层委托、工程参数不落地、UI 接线
 node tests/test-profile-api.mjs # 起真实 API 进程：CRUD/校验/原子写；浏览器层迁移、跨设备共享、离线镜像、删除回退
 node tests/test-batch-calibration.mjs # 单色/Z金字塔、四点透视、非不透明参考下的白平衡与实色/HD/TD联合拟合
+node tests/test-matrix-calibration.mjs # 75mm矩阵板：与已打印3MF元数据逐格对齐、透视+噪声+90°旋转下HD/实色/增益恢复、跨色格ΔE交叉验证
 ```
 
 3MF 用 trimesh 验证：
@@ -54,3 +55,4 @@ python -m http.server 8123
 13. 打印计划包：preview.png、region_map.png、print_plan.json/md、layer_maps/、README.txt。
 14. 导入白底贴纸线稿：线稿保护应为“已保护 x% 细线”；切“关闭”时细线可能变碎，切“强”时深色描边变为连续纯色。照片/油画应显示“未检测到线稿”。
 15. 「耗材 / AMS」顶部标定 Profile：新建/切换/重命名/删除；改一个 TD 后状态变“已同步”，刷新页面仍保留；另一设备选同一 profile 应看到相同 TD。断网（或改 `chromastack.api-base` 到坏地址）刷新应显示“离线 · 修改暂存本机”。
+16. 「批量标定 → 上传多色矩阵照片识别」：上传 75 mm 矩阵板照片（或合成图），弹窗绿圈应落在四角黑白定位点、方框落在单色锚点格；摘要含混色交叉验证 ΔE；应用后四种耗材 TD 更新且刷新保留。拍金字塔板应报“四角黑白分布与矩阵板不符”。

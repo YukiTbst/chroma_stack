@@ -1635,6 +1635,12 @@
       e.target.value = '';
       analyzeBatchPhotoFile(file);
     });
+    $('btnMatrixPhoto').addEventListener('click', () => $('matrixPhotoInput').click());
+    $('matrixPhotoInput').addEventListener('change', e => {
+      const file = e.target.files && e.target.files[0];
+      e.target.value = '';
+      analyzeMatrixPhotoFile(file);
+    });
     $('btnApplyBatchPhoto').addEventListener('click', applyBatchPhoto);
     $('btnDownloadCalib').addEventListener('click', downloadCalibration);
     $('btnHelp').addEventListener('click', () => openModal('helpModal'));
@@ -1849,7 +1855,8 @@
       for (const s of r.samples) { ctx.strokeRect(s.x - 4, s.y - 4, 8, 8); }
       ctx.strokeStyle = '#ffe16b'; ctx.strokeRect(r.railSample.x - 5, r.railSample.y - 5, 10, 10);
     }
-    $('batchPhotoSummary').textContent = `平均识别置信度 ${(result.score * 100).toFixed(0)}% · 白平衡增益 ${result.whiteBalance.gains.map(g => g.toFixed(2)).join(' / ')}`;
+    const checks = result.matrixChecks ? ` · 混色交叉验证 ΔE 平均 ${result.matrixChecks.meanDE.toFixed(1)} / 最大 ${result.matrixChecks.maxDE.toFixed(1)}` : '';
+    $('batchPhotoSummary').textContent = `平均识别置信度 ${(result.score * 100).toFixed(0)}% · 白平衡增益 ${result.whiteBalance.gains.map(g => g.toFixed(2)).join(' / ')}${checks}`;
     $('batchPhotoResults').innerHTML = result.results.map(r => `<div class="family-item"><span class="family-swatch" style="background:${r.hex}"></span><b>${esc(r.name)}</b> · ${r.hex} · TD ${r.td.toFixed(2)} · 置信度 ${(r.score * 100).toFixed(0)}%</div>`).join('');
     openModal('batchPhotoModal');
   }
@@ -1876,6 +1883,30 @@
       } finally { URL.revokeObjectURL(url); }
     };
     img.onerror = () => { URL.revokeObjectURL(url); toast('标定照片读取失败'); };
+    img.src = url;
+  }
+
+  function analyzeMatrixPhotoFile(file) {
+    if (!file) return;
+    const palette = currentCalibrationPalette();
+    const url = URL.createObjectURL(file), img = new Image();
+    img.onload = () => {
+      try {
+        const scale = Math.min(1, 1600 / Math.max(img.naturalWidth, img.naturalHeight));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(img.naturalWidth * scale); canvas.height = Math.round(img.naturalHeight * scale);
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const result = CS.matrixCalibration.analyzeMatrixPhoto(imageData, palette);
+        showBatchPhotoResult(result, imageData);
+        $('matrixCalibStatus').textContent = `矩阵识别完成：混色交叉验证平均 ΔE ${result.matrixChecks.meanDE.toFixed(1)}、最大 ${result.matrixChecks.maxDE.toFixed(1)}。请在弹窗核对采样框与定位点后应用。`;
+      } catch (e) {
+        console.error(e);
+        toast('矩阵照片识别失败：' + (e.message || e));
+      } finally { URL.revokeObjectURL(url); }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); toast('矩阵照片读取失败'); };
     img.src = url;
   }
 

@@ -17,11 +17,13 @@
     const calibrations = clone(state.filamentCalibrations || {});
     for (const p of state.tdPalette || []) {
       const key = filamentKey(p);
-      calibrations[key] = {
+      // Merge over the existing record so photo provenance (score, updatedAt)
+      // survives; identity and measured values always follow the palette.
+      calibrations[key] = Object.assign({}, calibrations[key], {
         id: p.id || '', name: p.name, brand: p.brand || '', material: p.material || 'PLA',
         hex: p.hex, td: p.td,
         source: (calibrations[key] && calibrations[key].source) || 'manual'
-      };
+      });
     }
     return {
       calibrations,
