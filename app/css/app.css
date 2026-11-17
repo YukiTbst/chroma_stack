@@ -97,6 +97,15 @@ svg { display: block; }
 .chip.active { background: var(--ink); color: #f7f1e6; border-color: var(--ink); }
 .row-actions { display: flex; gap: 8px; margin-top: 10px; }
 
+/* ---------- calibration profile bar ---------- */
+.profile-bar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin-top: 10px; }
+.profile-field { flex: 1 1 150px; margin-top: 0; }
+.profile-actions { display: flex; gap: 6px; }
+#profileSyncStatus { flex-basis: 100%; }
+.sync-ok { color: var(--teal); }
+.sync-syncing { color: #9b6324; }
+.sync-off { color: #b04335; }
+
 /* ---------- layout ---------- */
 .workspace {
   height: calc(100vh - 74px);

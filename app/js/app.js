@@ -97,11 +97,13 @@
   }
 
   /* ---------------- init ---------------- */
-  function init() {
+  async function init() {
     state.tdPalette = defaultTdPalette();
-    restoreSettings(CS.settings.load());
+    CS.profiles.onStatus = updateProfileStatus;
+    restoreSettings(await CS.profiles.init());
     syncControlsFromState();
     bindEvents();
+    renderProfileBar();
     updateBackgroundUI();
     const ok3d = !!(CS.view3d && CS.view3d.init($('threeCanvas')));
     if (!ok3d) {
@@ -146,7 +148,7 @@
     renderLegend(null);
     updateMetrics(null);
     CS.settings.save(state);
-    window.addEventListener('pagehide', () => CS.settings.save(state));
+    window.addEventListener('pagehide', () => { CS.settings.save(state); CS.profiles.flush(true); });
     autoLoadSample();
     const ro = new ResizeObserver(() => {
       clearTimeout(resizeTimer);
@@ -221,7 +223,7 @@
   }
 
   function resetSettings() {
-    if (!window.confirm('重置当前耗材的标定值并清除已保存标定？其他打印参数保持不变。')) return;
+    if (!window.confirm('重置当前 profile 的耗材标定值并清除服务器上的标定数据？其他打印参数保持不变。')) return;
     const db = (CS.FILAMENT_DB && CS.FILAMENT_DB.filaments) || [];
     for (const p of state.tdPalette) {
       const base = db.find(f => (p.id && f.id === p.id) || (f.name === p.name && f.brand === p.brand && f.material === p.material));
@@ -231,7 +233,92 @@
     CS.settings.clear();
     syncControlsFromState();
     markDirty(false);
-    toast('已重置并清除标定；其他参数未改动');
+    toast('已重置当前 profile 的标定；其他参数未改动');
+  }
+
+  /* ---------------- calibration profiles (server-backed) ---------------- */
+  function updateProfileStatus(status, detail) {
+    const el = $('profileSyncStatus');
+    if (el) {
+      if (status === 'syncing') { el.textContent = '同步中…'; el.className = 'tiny sync-syncing'; el.title = ''; }
+      else if (status === 'synced') {
+        el.textContent = '已同步 ' + new Date().toTimeString().slice(0, 5);
+        el.className = 'tiny sync-ok';
+        el.title = detail ? 'Profile：' + detail : '标定已保存到服务器';
+      } else {
+        el.textContent = '离线 · 修改暂存本机';
+        el.className = 'tiny sync-off';
+        el.title = detail || '无法连接标定服务器';
+      }
+    }
+    const online = CS.profiles.isOnline();
+    for (const id of ['btnNewProfile', 'btnRenameProfile', 'btnDeleteProfile']) if ($(id)) $(id).disabled = !online;
+    if ($('profileSelect')) $('profileSelect').disabled = !online;
+  }
+
+  function renderProfileBar() {
+    const sel = $('profileSelect');
+    if (!sel) return;
+    const list = CS.profiles.list();
+    sel.innerHTML = list.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
+    sel.value = CS.profiles.activeId() || '';
+    updateProfileStatus(CS.profiles.isOnline() ? 'synced' : 'offline');
+  }
+
+  function adoptProfileData(data) {
+    restoreSettings(data);
+    syncControlsFromState();
+    renderProfileBar();
+    markDirty(true);
+  }
+
+  async function switchProfile(id) {
+    if (!id || id === CS.profiles.activeId()) { renderProfileBar(); return; }
+    try {
+      adoptProfileData(await CS.profiles.switchTo(id));
+      toast('已切换标定 profile，点击计算应用到当前画面');
+    } catch (e) {
+      toast('切换 profile 失败：' + (e.message || e));
+      renderProfileBar();
+    }
+  }
+
+  async function createProfile() {
+    const name = window.prompt('新 profile 名称（例如：A1 mini · PLA Basic）', '');
+    if (name == null) return;
+    if (!name.trim()) { toast('名称不能为空'); return; }
+    try {
+      const p = await CS.profiles.create(name.trim(), CS.settings.snapshot(state));
+      adoptProfileData(await CS.profiles.switchTo(p.id));
+      toast(`已新建并切换到「${p.name}」，复制了当前标定作为起点`);
+    } catch (e) { toast('新建 profile 失败：' + (e.message || e)); }
+  }
+
+  async function renameProfile() {
+    const id = CS.profiles.activeId();
+    const meta = CS.profiles.list().find(p => p.id === id);
+    if (!meta) return;
+    const name = window.prompt('重命名 profile', meta.name);
+    if (name == null) return;
+    if (!name.trim()) { toast('名称不能为空'); return; }
+    try {
+      await CS.profiles.rename(id, name.trim());
+      renderProfileBar();
+      toast('已重命名');
+    } catch (e) { toast('重命名失败：' + (e.message || e)); }
+  }
+
+  async function deleteProfile() {
+    const id = CS.profiles.activeId();
+    const meta = CS.profiles.list().find(p => p.id === id);
+    if (!meta) return;
+    if (!window.confirm(`删除 profile「${meta.name}」及其全部标定参数？此操作不可恢复。`)) return;
+    try {
+      const res = await CS.profiles.remove(id);
+      if (res.data) adoptProfileData(res.data);
+      renderProfileBar();
+      toast('已删除 profile');
+    } catch (e) { toast('删除失败：' + (e.message || e)); }
   }
 
   /* ---------------- image loading ---------------- */
@@ -1456,6 +1543,10 @@
     $('btnAnalyze').addEventListener('click', () => analyze());
     $('btnAnalyzeStage').addEventListener('click', () => analyze());
     $('btnResetSettings').addEventListener('click', resetSettings);
+    $('profileSelect').addEventListener('change', e => switchProfile(e.target.value));
+    $('btnNewProfile').addEventListener('click', createProfile);
+    $('btnRenameProfile').addEventListener('click', renameProfile);
+    $('btnDeleteProfile').addEventListener('click', deleteProfile);
 
     document.querySelectorAll('#viewTabs button').forEach(b => b.addEventListener('click', () => {
       state.view = b.dataset.view;

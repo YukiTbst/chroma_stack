@@ -1,9 +1,11 @@
-/* Versioned filament-calibration persistence. No project parameters, image or
-   analysis cache is stored. Calibration follows the filament model, not a project. */
+/* Filament-calibration persistence. Data lives on the server in calibration
+   profiles (see profiles.js); the browser only keeps the active-profile
+   pointer and an offline mirror. No project parameters, image or analysis
+   cache is stored. Calibration follows the filament model, not a project. */
 (function (root) {
   'use strict';
   const CS = root.CS = root.CS || {};
-  const KEY = 'chromastack.filament-calibrations.v1';
+  const KEY = 'chromastack.filament-calibrations.v1'; // legacy browser-only store, migrated on first run
   const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
 
   function filamentKey(p) {
@@ -28,34 +30,27 @@
     };
   }
 
+  /* Queues a debounced push to the active server profile. Returns false only
+     when the profile layer is missing entirely (should not happen in app). */
   function save(state) {
+    if (!CS.profiles) { CS.settingsLastError = 'profiles module missing'; return false; }
     try {
-      if (!root.localStorage) return false;
-      root.localStorage.setItem(KEY, JSON.stringify({ version: 1, data: snapshot(state) }));
-      return true;
+      return CS.profiles.save(snapshot(state));
     } catch (e) {
       CS.settingsLastError = String(e && e.message || e);
       return false;
     }
   }
 
+  /* Synchronous read of the last known profile data (server load or offline
+     mirror). App init uses CS.profiles.init() for the authoritative load. */
   function load() {
-    try {
-      if (!root.localStorage) return null;
-      const raw = root.localStorage.getItem(KEY);
-      if (!raw) return null;
-      const payload = JSON.parse(raw);
-      if (!payload || payload.version !== 1 || !payload.data || typeof payload.data !== 'object') return null;
-      return payload.data;
-    } catch (e) {
-      CS.settingsLastError = String(e && e.message || e);
-      return null;
-    }
+    return CS.profiles ? CS.profiles.cachedData() : null;
   }
 
+  /* Clears calibration content of the active server profile. */
   function clear() {
-    try { if (root.localStorage) root.localStorage.removeItem(KEY); }
-    catch (e) { CS.settingsLastError = String(e && e.message || e); }
+    if (CS.profiles) CS.profiles.clearActive().catch(e => { CS.settingsLastError = String(e && e.message || e); });
   }
 
   CS.settings = { KEY, filamentKey, snapshot, save, load, clear };

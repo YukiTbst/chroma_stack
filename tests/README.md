@@ -19,7 +19,8 @@ node tests/test-layer-consistency.mjs # 原生逐层一致：黑色短配方结�
 node tests/test-view3d.mjs      # 3D 正反方向、真实材料侧壁和 X 剖面缓冲
 node tests/test-manual-calc.mjs  # 参数/耗材统一手动计算、连续加料不逐次分析、平滑数字输入
 node tests/test-background.mjs  # 边界背景、气泡距离场、四连通、内部空腔切换、低层支撑、异形3D/3MF
-node tests/test-settings.mjs   # 仅耗材标定持久化、LUT分区、异常存储、工程参数不落地
+node tests/test-settings.mjs   # 标定快照纯度、profile 层委托、工程参数不落地、UI 接线
+node tests/test-profile-api.mjs # 起真实 API 进程：CRUD/校验/原子写；浏览器层迁移、跨设备共享、离线镜像、删除回退
 node tests/test-batch-calibration.mjs # 单色/Z金字塔、四点透视、非不透明参考下的白平衡与实色/HD/TD联合拟合
 ```
 
@@ -36,7 +37,7 @@ cd app
 python -m http.server 8123
 ```
 
-打开 `http://127.0.0.1:8123/`。手工检查：
+打开 `http://127.0.0.1:8123/`。本地页面的标定 profile 默认直连部署服务器 API（`http://example.com/chromastack/api/`），与线上共用标定；可用 `localStorage.setItem('chromastack.api-base', …)` 覆盖。手工检查：
 
 1. 默认是 **TD 浮雕**，5 色；纯色区直接铺色，渐变区变高。
 2. 在「色域」视图看红色/橙色缺口；点「加入建议耗材」应重算并降低色域外比例。
@@ -52,3 +53,4 @@ python -m http.server 8123
 12. 打开「3D」标签：应能拖动旋转、滚轮缩放、调高度夸张/重置视角；切回 2D 不应报错。
 13. 打印计划包：preview.png、region_map.png、print_plan.json/md、layer_maps/、README.txt。
 14. 导入白底贴纸线稿：线稿保护应为“已保护 x% 细线”；切“关闭”时细线可能变碎，切“强”时深色描边变为连续纯色。照片/油画应显示“未检测到线稿”。
+15. 「耗材 / AMS」顶部标定 Profile：新建/切换/重命名/删除；改一个 TD 后状态变“已同步”，刷新页面仍保留；另一设备选同一 profile 应看到相同 TD。断网（或改 `chromastack.api-base` 到坏地址）刷新应显示“离线 · 修改暂存本机”。

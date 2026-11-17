@@ -8,7 +8,7 @@
 <meta http-equiv="Expires" content="0">
 <title>叠彩 ChromaStack · 混合彩绘 3D 打印规划器</title>
 <link rel="icon" type="image/x-icon" href="favicon.ico">
-<link rel="stylesheet" href="css/app.css?v=20261117pyramid">
+<link rel="stylesheet" href="css/app.css?v=20261117profiles">
 </head>
 <body>
 <header class="app-header">
@@ -23,7 +23,7 @@
   </div>
   <div class="header-actions">
     <span class="header-badge" id="engineBadge">TD 浮雕 · 自定义耗材</span>
-    <span class="header-badge" title="仅耗材标定属性保存在此浏览器，不保存工程参数或图片">标定自动保存</span>
+    <span class="header-badge" title="耗材标定保存在服务器 profile 中，手机与电脑共享；浏览器只记住当前选择的 profile">标定云端同步</span>
     <button class="btn ghost" id="btnResetSettings" title="重置当前耗材标定并清除已保存标定，其他参数不变">重置标定</button>
     <button class="btn ghost" id="btnHelp">原理与来源</button>
     <button class="btn primary" id="btnOpenImage">导入画稿</button>
@@ -160,6 +160,16 @@
 
     <section class="card">
       <div class="card-head"><h2>耗材 / AMS</h2><span class="tiny" id="paletteCount">0 槽</span></div>
+      <div class="profile-bar">
+        <label class="field profile-field"><span>标定 Profile</span><select id="profileSelect"></select></label>
+        <div class="profile-actions">
+          <button class="btn small" id="btnNewProfile" title="新建 profile，复制当前标定作为起点">新建</button>
+          <button class="btn small ghost" id="btnRenameProfile" title="重命名当前 profile">重命名</button>
+          <button class="btn small ghost" id="btnDeleteProfile" title="删除当前 profile 及其标定">删除</button>
+        </div>
+        <span class="tiny" id="profileSyncStatus">连接中…</span>
+      </div>
+      <p class="hint">标定参数保存在服务器，手机 / 电脑打开同一 profile 即共用一套标定；浏览器只记住当前选择。离线时修改暂存本机，恢复联网后自动同步。</p>
       <div id="paletteList" class="palette-list"></div>
       <div class="row-actions">
         <button class="btn small" id="btnAddFilament">从耗材库添加</button>
@@ -393,17 +403,18 @@
 
 <div class="toast" id="toast" hidden></div>
 
-<script src="js/color.js?v=20261117pyramid"></script>
-<script src="js/data-filaments.js?v=20261117pyramid"></script>
-<script src="js/data-lut.js?v=20261117pyramid"></script>
-<script src="js/earcut.js?v=20261117pyramid"></script>
-<script src="js/engine.js?v=20261117pyramid"></script>
-<script src="js/zip.js?v=20261117pyramid"></script>
-<script src="js/exporter.js?v=20261117pyramid"></script>
-<script src="js/calibration.js?v=20261117pyramid"></script>
-<script src="js/batch-calibration.js?v=20261117pyramid"></script>
-<script src="js/view3d.js?v=20261117pyramid"></script>
-<script src="js/settings.js?v=20261117pyramid"></script>
-<script src="js/app.js?v=20261117pyramid"></script>
+<script src="js/color.js?v=20261117profiles"></script>
+<script src="js/data-filaments.js?v=20261117profiles"></script>
+<script src="js/data-lut.js?v=20261117profiles"></script>
+<script src="js/earcut.js?v=20261117profiles"></script>
+<script src="js/engine.js?v=20261117profiles"></script>
+<script src="js/zip.js?v=20261117profiles"></script>
+<script src="js/exporter.js?v=20261117profiles"></script>
+<script src="js/calibration.js?v=20261117profiles"></script>
+<script src="js/batch-calibration.js?v=20261117profiles"></script>
+<script src="js/view3d.js?v=20261117profiles"></script>
+<script src="js/profiles.js?v=20261117profiles"></script>
+<script src="js/settings.js?v=20261117profiles"></script>
+<script src="js/app.js?v=20261117profiles"></script>
 </body>
 </html>
