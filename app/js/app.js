@@ -1860,9 +1860,11 @@
     const warn = $('batchPhotoWarn');
     if (result.matrixChecks && result.matrixChecks.meanDE > 6) {
       warn.hidden = false;
-      warn.textContent = result.matrixChecks.meanDE > 10
+      warn.textContent = matrixPhotoBad(result)
         ? '交叉验证色差过大，禁止应用：照片疑似经过 HDR/AI 场景优化/美颜（黑底被提亮、白底被压暗、颜色被加饱和），或反光/阴影严重。请关闭 HDR 与 AI 优化、用均匀漫射光重拍后再识别。'
-        : '交叉验证色差偏大：请检查反光、阴影与对焦，必要时关闭 HDR/AI 优化重拍；应用前请自行确认采样框对齐。';
+        : (result.matrixChecks.meanDE > 10
+          ? '交叉验证色差偏大，但单色锚点自洽：混色格可能受换色冲刷不足污染（如 R>K 发灰）。单色锚点解出的 HD/TD 仍可用，请核对采样框后自行决定是否应用。'
+          : '交叉验证色差偏大：请检查反光、阴影与对焦，必要时关闭 HDR/AI 优化重拍；应用前请自行确认采样框对齐。');
     } else { warn.hidden = true; warn.textContent = ''; }
     $('batchPhotoResults').innerHTML = result.results.map(r => `<div class="family-item"><span class="family-swatch" style="background:${r.hex}"></span><b>${esc(r.name)}</b> · ${r.hex} · TD ${r.td.toFixed(2)} · 置信度 ${(r.score * 100).toFixed(0)}%</div>`).join('');
     openModal('batchPhotoModal');
@@ -1917,10 +1919,20 @@
     img.src = url;
   }
 
+  /* Distinguish a radiometrically broken photo (phone HDR/AI: lifted blacks,
+     compressed whites, gain > 1) from a good photo of a board whose mixed cells
+     suffer purge contamination — the latter's single anchors are still valid. */
+  function matrixPhotoBad(result) {
+    const q = result.quality;
+    if (!q) return true;
+    const y = rgb => 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+    return q.gainsMax > 1.15 || y(q.blackBase) > 45 || q.whiteFitError > 150;
+  }
+
   function applyBatchPhoto() {
     const result = state.batchPhotoResult;
     if (!result) return;
-    if (result.matrixChecks && result.matrixChecks.meanDE > 10) {
+    if (result.matrixChecks && result.matrixChecks.meanDE > 10 && matrixPhotoBad(result)) {
       toast('交叉验证色差过大，已阻止应用：请关闭 HDR/AI 优化并用均匀漫射光重拍');
       return;
     }

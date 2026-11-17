@@ -196,6 +196,7 @@
      the mirror is written synchronously so nothing is lost on crash/offline. */
   function save(data) {
     state.pending = clone(data);
+    state.lastData = clone(data); // cached reads must reflect offline saves too
     writeMirror(state.pending);
     schedulePush();
     return true;

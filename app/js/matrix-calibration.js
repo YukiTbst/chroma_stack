@@ -143,9 +143,12 @@
   function detectMatrixMarkers(imageData) {
     const w = imageData.width, h = imageData.height;
     const comps = markerCandidates(imageData);
+    // Hand-held photos leave margin around the board, so markers can sit far
+    // from the image corners; nearest-wins plus the content gate keep clutter
+    // out even with a generous radius.
     const cornerDefs = [[0, 0], [w, 0], [w, h], [0, h]], chosen = [], used = new Set();
     for (const [cx, cy] of cornerDefs) {
-      const candidates = comps.filter(c => !used.has(c) && Math.hypot(c.cx - cx, c.cy - cy) < Math.max(w, h) * 0.3)
+      const candidates = comps.filter(c => !used.has(c) && Math.hypot(c.cx - cx, c.cy - cy) < Math.max(w, h) * 0.45)
         .sort((a, b) => Math.hypot(a.cx - cx, a.cy - cy) - Math.hypot(b.cx - cx, b.cy - cy) || b.area - a.area);
       if (!candidates.length) throw new Error('找不到四个角定位点，请让矩阵板四角完整入镜、尽量充满画面且对比清晰');
       chosen.push(candidates[0]); used.add(candidates[0]);
@@ -166,38 +169,48 @@
      decide: within each single-filament anchor group the luminance must move
      with thickness towards the filament's own colour. Opaque filaments (black)
      show almost no spread and are skipped instead of voting with noise. */
-  function chooseMarkerMap(layout, detected, imageData, palette, mapping) {
-    const labNom = {};
-    for (const code of CODES) labNom[code] = C.hexToLab(palette[mapping[code]].hex);
-    const corr = (xs, ys) => {
-      const n = xs.length, mx = xs.reduce((a, b) => a + b, 0) / n, my = ys.reduce((a, b) => a + b, 0) / n;
-      let sxy = 0, sxx = 0, syy = 0;
-      for (let i = 0; i < n; i++) { sxy += (xs[i] - mx) * (ys[i] - my); sxx += (xs[i] - mx) ** 2; syy += (ys[i] - my) ** 2; }
-      return sxx > 1e-9 && syy > 1e-9 ? sxy / Math.sqrt(sxx * syy) : 0;
-    };
+  function chooseMarkerMap(layout, detected, imageData) {
     let best = null;
     for (let rot = 0; rot < 4; rot++) for (const mirror of [false, true]) {
       const idx = i => mirror ? (rot - i + 4) % 4 : (i + rot) % 4;
       if (!detected.every((m, i) => POLARITY[idx(i)] === (m.bright ? 'B' : 'D'))) continue;
       const map = B.homography(detected.map((_, i) => layout.markers[idx(i)]), detected);
-      let score = 0, votes = 0;
-      for (const code of CODES) for (const base of ['K', 'W']) {
-        const cells = layout.cells.filter(c => c.kind === 'single' && c.filament === code && c.base === base);
-        // Thicker must look more like the filament itself: colour distance to
-        // its nominal colour shrinks with thickness. Luminance direction would
-        // fail for red/blue on black, whose luminance matches the substrate.
-        const ys = cells.map(c => {
-          const s = B.sampleMedian(imageData, map, c.cx, c.cy, 3).rgb;
-          return C.deltaE2000(labNom[code], C.hexToLab(C.rgbToHex(s[0], s[1], s[2])));
-        });
-        if (Math.max(...ys) - Math.min(...ys) < 6) continue; // opaque: no thickness signal
-        score -= corr(cells.map(c => c.layers), ys);
-        votes++;
+      // Score = differential transmission validity: under the correct pairing
+      // T(d) = (Y_white - Y_black)/(Y_baseWhite - Y_baseBlack) lands in (0,1)
+      // and decreases with thickness. Wrong pairings scramble the halves and
+      // produce out-of-range or non-monotone T. Palette-independent.
+      const WGT = [0.2126, 0.7152, 0.0722];
+      let score = 0;
+      for (const code of CODES) {
+        const cells = layout.cells.filter(c => c.kind === 'single' && c.filament === code);
+        const pairs = [];
+        for (const d of [...new Set(cells.map(c => c.layers))]) {
+          const kc = cells.find(c => c.layers === d && c.base === 'K');
+          const wc = cells.find(c => c.layers === d && c.base === 'W');
+          const ks = B.sampleMedian(imageData, map, kc.cx, kc.cy, 3).rgb;
+          const ws = B.sampleMedian(imageData, map, wc.cx, wc.cy, 3).rgb;
+          const kb = B.sampleMedian(imageData, map, kc.cx, kc.y - 0.75, 3).rgb;
+          const wb = B.sampleMedian(imageData, map, wc.cx, wc.y - 0.75, 3).rgb;
+          const mask = [0, 1, 2].filter(c => ks[c] > 2 && ks[c] < 254 && ws[c] > 2 && ws[c] < 254);
+          if (!mask.length) continue;
+          const ly = rgb => {
+            let num = 0, den = 0;
+            for (const c of mask) { num += WGT[c] * C.srgbToLinear(rgb[c] / 255); den += WGT[c]; }
+            return num / den;
+          };
+          const db = ly(wb) - ly(kb), dy = ly(ws) - ly(ks);
+          if (db < 0.05) continue;
+          const T = dy / db;
+          if (T > 0.002 && T < 0.998) pairs.push({ d, T });
+        }
+        pairs.sort((a, b) => a.d - b.d);
+        score += pairs.length;
+        for (let i = 1; i < pairs.length; i++) if (pairs[i].T < pairs[i - 1].T) score += 1;
       }
-      if (votes >= 2 && (!best || score > best.score)) best = { map, score, rot, mirror, votes };
+      if (!best || score > best.score) best = { map, score, rot, mirror };
     }
     if (!best) throw new Error('四角黑白分布与矩阵板不符：请确认拍摄的是多色矩阵板（非金字塔板）');
-    if (best.score < 1) throw new Error('定位点已找到，但格内颜色与矩阵板配方不符：请确认照片未裁切、板面干净且光线均匀');
+    if (best.score < 5) throw new Error('定位点已找到，但格内颜色与矩阵板配方不符：请确认照片未裁切、板面干净且光线均匀');
     return best;
   }
 
@@ -227,65 +240,82 @@
     return B.searchScalar(evaluate, Math.log(0.05), Math.log(10));
   }
 
-  /* Real boards add one effect the plain model misses: raised cell tops on the
-     white half catch bounce light from the white surround (and gloss), so they
-     are lit brighter than the flat base strip beside them — by a different
-     factor per half. Model obs = k_half * (O*(1-T) + base*T) in linear light.
-     For fixed HDs and k the opaque colour stays closed-form per channel, so
-     coordinate descent over {HD per filament, k per half} is cheap. */
+  /* Differential transmission estimator. At equal thickness the two halves
+     differ only by what the substrate contributes:
+       Y_white(d) - Y_black(d) = T(d) * (Y_baseWhite - Y_baseBlack)
+     so T(d) follows from luminance differences alone — opaque colour, gloss
+     veil and camera gain all cancel. Regressing log10 T against d gives HD
+     without fitting any of the corrupted unknowns. The opaque colour is then
+     solved from the 4/10-layer anchors (thin cells carry gloss/chroma noise),
+     with clipped channels censored from the linear solve. */
   function fitMatrixAnchors(anchorsByCode) {
+    const WGT = [0.2126, 0.7152, 0.0722];
     const data = {};
     for (const code of CODES) data[code] = anchorsByCode[code].map(s => ({
       d: s.thickness, half: s.base, rgb: s.rgb,
       o: s.rgb.map(v => C.srgbToLinear(v / 255)),
-      b: s.substrate.map(v => C.srgbToLinear(v / 255))
+      b: s.substrate.map(v => C.srgbToLinear(v / 255)),
+      ok: s.rgb.map(v => v > 2 && v < 254)
     }));
-    const hd = { K: 0.3, W: 0.5, R: 0.7, U: 1.0 }, k = { K: 1, W: 1 };
-    const trans = (code, h) => data[code].map(s => Math.pow(10, -s.d / h));
-    const solveO = (code, h, ks) => {
-      const T = trans(code, h), den = T.reduce((a, t) => a + (1 - t) ** 2, 0);
-      if (den < 1e-10) return null;
-      return [0, 1, 2].map(c => {
-        let num = 0;
-        for (let i = 0; i < T.length; i++) num += (1 - T[i]) * (data[code][i].o[c] / ks[data[code][i].half] - data[code][i].b[c] * T[i]);
-        return clamp(num / den, 0, 4);
-      });
-    };
-    const errCode = (code, O, h, ks) => {
-      if (!O) return Infinity;
-      const T = trans(code, h);
-      let e = 0;
-      for (let i = 0; i < T.length; i++) for (let c = 0; c < 3; c++) {
-        const pred = ks[data[code][i].half] * (O[c] * (1 - T[i]) + data[code][i].b[c] * T[i]);
-        e += (C.linearToSrgb8(pred) - data[code][i].rgb[c]) ** 2;
-      }
-      return e / (T.length * 3);
-    };
-    const Os = {};
-    for (let round = 0; round < 3; round++) {
-      for (const code of CODES) {
-        const fit = B.searchScalar(logHd => {
-          const h = Math.exp(logHd), O = solveO(code, h, k);
-          return { error: errCode(code, O, h, k), hd: h, linear: O };
-        }, Math.log(0.05), Math.log(10));
-        hd[code] = fit.hd; Os[code] = fit.linear;
-      }
-      for (const half of ['K', 'W']) {
-        const fit = B.searchScalar(logK => {
-          const ks = { ...k, [half]: Math.exp(logK) };
-          let e = 0;
-          for (const code of CODES) e += errCode(code, solveO(code, hd[code], ks), hd[code], ks);
-          return { error: e, k: Math.exp(logK) };
-        }, Math.log(0.5), Math.log(2.5));
-        k[half] = fit.k;
-      }
-    }
-    const fits = {};
+    const hd = {}, fits = {};
     for (const code of CODES) {
-      const O = solveO(code, hd[code], k);
-      fits[code] = { hd: hd[code], linear: O, error: errCode(code, O, hd[code], k), rgb: (O || [1, 1, 1]).map(v => C.linearToSrgb8(v)) };
+      const rows = data[code];
+      let sdd = 0, sdt = 0, slopeMin = 0;
+      for (const d of [...new Set(rows.map(r => r.d))]) {
+        const k = rows.find(r => r.d === d && r.half === 'K');
+        const w = rows.find(r => r.d === d && r.half === 'W');
+        if (!k || !w) continue;
+        // Both halves must be compared over the same unclipped channels,
+        // otherwise a clipped red channel on one side breaks the difference.
+        const mask = [0, 1, 2].filter(c => k.ok[c] && w.ok[c]);
+        if (!mask.length) continue;
+        const ly = lin => {
+          let num = 0, den = 0;
+          for (const c of mask) { num += WGT[c] * lin[c]; den += WGT[c]; }
+          return num / den;
+        };
+        const db = ly(w.b) - ly(k.b);
+        const dy = ly(w.o) - ly(k.o);
+        if (db < 0.05) continue;
+        if (Math.abs(dy) < 0.006) {
+          // Below the noise floor the pair only bounds T from above, i.e. the
+          // slope from below — vital for opaque filaments whose thin-cell
+          // signal is chroma noise and would otherwise set HD arbitrarily.
+          slopeMin = Math.max(slopeMin, -Math.log10(0.006 / db) / d);
+          continue;
+        }
+        const T = clamp(dy / db, 0.002, 0.998);
+        sdd += d * d; sdt += d * -Math.log10(T);
+      }
+      const slopeLS = sdd > 1e-9 ? sdt / sdd : 0;
+      hd[code] = clamp(1 / Math.max(slopeLS, slopeMin, 1e-6), 0.05, 10);
+      const thick = rows.filter(r => r.d >= 0.3);
+      const use = thick.length >= 2 ? thick : rows;
+      const T = use.map(r => Math.pow(10, -r.d / hd[code]));
+      const linear = [0, 1, 2].map(c => {
+        let num = 0, den = 0, low = 0, high = 0, n = 0;
+        for (let i = 0; i < use.length; i++) {
+          n++;
+          if (use[i].rgb[c] <= 2) low++;
+          if (use[i].rgb[c] >= 254) high++;
+          if (!use[i].ok[c]) continue;
+          num += (1 - T[i]) * (use[i].o[c] - use[i].b[c] * T[i]);
+          den += (1 - T[i]) ** 2;
+        }
+        if (den > 1e-10) return clamp(num / den, 0, 4);
+        // Fully censored channel: clipped low means the filament reflects
+        // nothing there (blue has no red); clipped high only bounds it below.
+        if (low === n) return 0;
+        if (high === n) return 1;
+        return 0.5;
+      });
+      let error = 0;
+      for (let i = 0; i < use.length; i++) for (let c = 0; c < 3; c++) {
+        error += (C.linearToSrgb8(linear[c] * (1 - T[i]) + use[i].b[c] * T[i]) - use[i].rgb[c]) ** 2;
+      }
+      fits[code] = { hd: hd[code], linear, error: error / (use.length * 3), rgb: linear.map(v => C.linearToSrgb8(v)) };
     }
-    return { fits, illumination: k };
+    return { fits, illumination: { K: 1, W: 1 } };
   }
 
   /* Board roles from the current palette: darkest / lightest / reddest / bluest. */
@@ -305,7 +335,7 @@
     const layout = options.layout || buildMatrixLayout();
     const mapping = options.mapping || matchMatrixPalette(palette);
     const detected = detectMatrixMarkers(imageData);
-    const orient = chooseMarkerMap(layout, detected, imageData, palette, mapping);
+    const orient = chooseMarkerMap(layout, detected, imageData);
     const map = orient.map;
     const p0 = map(0, 0), p10 = map(10, 0);
     const radius = clamp(Math.round(Math.hypot(p10.x - p0.x, p10.y - p0.y) / 10), 2, 8);
@@ -349,7 +379,10 @@
         const o = s.rgb.map(v => C.srgbToLinear(v / 255) / kk);
         const b = s.substrate.map(v => C.srgbToLinear(v / 255));
         let num = 0, den = 0;
-        for (let c = 0; c < 3; c++) { num += (o[c] - fit.linear[c]) * (b[c] - fit.linear[c]); den += (b[c] - fit.linear[c]) ** 2; }
+        for (let c = 0; c < 3; c++) {
+          if (s.rgb[c] <= 2 || s.rgb[c] >= 254) continue; // censored channel
+          num += (o[c] - fit.linear[c]) * (b[c] - fit.linear[c]); den += (b[c] - fit.linear[c]) ** 2;
+        }
         const T = den > 1e-10 ? clamp(num / den, 0, 1) : 1;
         if (T > 0.0005 && T < 0.995) residuals.push(Math.abs(Math.log10(T) + s.thickness / hd));
       }
@@ -388,6 +421,10 @@
       layout, markers: detected, mapping, results, score,
       orientation: { rot: orient.rot, mirror: orient.mirror, score: orient.score },
       illumination: illum,
+      quality: {
+        blackBase: baseSample.K.rgb, whiteBase: baseSample.W.rgb,
+        gainsMax: Math.max(...gains), whiteFitError: fits.W.error
+      },
       whiteBalance: { white: baseSample.W.rgb, gains: gains.map(g => 1 / g), cameraGains: gains, hd: fits.W.hd, residual: fits.W.error },
       matrixChecks: { meanDE, maxDE: Math.max(...checks.map(c => c.de)), cells: checks }
     };
