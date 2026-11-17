@@ -1,0 +1,423 @@
+{
+ "source": "HueForge affiliate filament libraries, synced by prusa3d/prusa-fdm-mixer (MIT)",
+ "synced": "2026-11-12T04:23:19.906Z",
+ "note": "TD = transmission distance (mm), community/affiliate values; batch, nozzle, temperature and layer height can shift them. HD = TD * 0.1 for frontlit prints. Cyan/Magenta added from Bambu PLA Basic CMYK set (hex per Bambu CMYK guide); TD values are CMYW reference starting points from Lumina config / community prints, not affiliate-library entries. Calibrate for production.",
+ "filaments": [
+  {
+   "id": "bambulab-basic-petg-blue",
+   "brand": "BambuLab Basic",
+   "material": "PETG",
+   "name": "Blue",
+   "hex": "#000e5b",
+   "td": 2.5
+  },
+  {
+   "id": "bambulab-basic-petg-blue-gray",
+   "brand": "BambuLab Basic",
+   "material": "PETG",
+   "name": "Blue Gray",
+   "hex": "#606e81",
+   "td": 2.7
+  },
+  {
+   "id": "bambulab-basic-petg-gold",
+   "brand": "BambuLab Basic",
+   "material": "PETG",
+   "name": "Gold",
+   "hex": "#b28b33",
+   "td": 1.7
+  },
+  {
+   "id": "bambulab-basic-petg-gray",
+   "brand": "BambuLab Basic",
+   "material": "PETG",
+   "name": "Gray",
+   "hex": "#9ea2a2",
+   "td": 3
+  },
+  {
+   "id": "bambulab-basic-petg-green",
+   "brand": "BambuLab Basic",
+   "material": "PETG",
+   "name": "Green",
+   "hex": "#009639",
+   "td": 1.7
+  },
+  {
+   "id": "bambulab-basic-petg-lake-blue",
+   "brand": "BambuLab Basic",
+   "material": "PETG",
+   "name": "Lake Blue",
+   "hex": "#0069b1",
+   "td": 4
+  },
+  {
+   "id": "bambulab-basic-petg-lime-green",
+   "brand": "BambuLab Basic",
+   "material": "PETG",
+   "name": "Lime Green",
+   "hex": "#b7db57",
+   "td": 2.7
+  },
+  {
+   "id": "bambulab-basic-petg-nature",
+   "brand": "BambuLab Basic",
+   "material": "PETG",
+   "name": "Nature",
+   "hex": "#f2eada",
+   "td": 8
+  },
+  {
+   "id": "bambulab-basic-petg-orange",
+   "brand": "BambuLab Basic",
+   "material": "PETG",
+   "name": "Orange",
+   "hex": "#ff671f",
+   "td": 4.5
+  },
+  {
+   "id": "bambulab-basic-petg-purple",
+   "brand": "BambuLab Basic",
+   "material": "PETG",
+   "name": "Purple",
+   "hex": "#9e007e",
+   "td": 2.5
+  },
+  {
+   "id": "bambulab-basic-petg-red",
+   "brand": "BambuLab Basic",
+   "material": "PETG",
+   "name": "Red",
+   "hex": "#7d1112",
+   "td": 2.5
+  },
+  {
+   "id": "bambulab-basic-petg-transparent",
+   "brand": "BambuLab Basic",
+   "material": "PETG",
+   "name": "Transparent",
+   "hex": "#ffffff",
+   "td": 50
+  },
+  {
+   "id": "bambulab-basic-petg-white",
+   "brand": "BambuLab Basic",
+   "material": "PETG",
+   "name": "White",
+   "hex": "#ffffff",
+   "td": 3.5
+  },
+  {
+   "id": "bambulab-basic-petg-yellow",
+   "brand": "BambuLab Basic",
+   "material": "PETG",
+   "name": "Yellow",
+   "hex": "#fce300",
+   "td": 6
+  },
+  {
+   "id": "bambulab-basic-pla-bambulab-green",
+   "brand": "BambuLab Basic",
+   "material": "PLA",
+   "name": "BambuLab Green",
+   "hex": "#00ae42",
+   "td": 4
+  },
+  {
+   "id": "bambulab-basic-pla-beige",
+   "brand": "BambuLab Basic",
+   "material": "PLA",
+   "name": "Beige",
+   "hex": "#e7ceb5",
+   "td": 8
+  },
+  {
+   "id": "bambulab-basic-pla-black",
+   "brand": "BambuLab Basic",
+   "material": "PLA",
+   "name": "Black",
+   "hex": "#000000",
+   "td": 0.6
+  },
+  {
+   "id": "bambulab-basic-pla-blue",
+   "brand": "BambuLab Basic",
+   "material": "PLA",
+   "name": "Blue",
+   "hex": "#00358e",
+   "td": 4
+  },
+  {
+   "id": "bambulab-basic-pla-blue-gray",
+   "brand": "BambuLab Basic",
+   "material": "PLA",
+   "name": "Blue Gray",
+   "hex": "#4c5f71",
+   "td": 3
+  },
+  {
+   "id": "bambulab-basic-pla-brown",
+   "brand": "BambuLab Basic",
+   "material": "PLA",
+   "name": "Brown",
+   "hex": "#9d432c",
+   "td": 2
+  },
+  {
+   "id": "bambulab-basic-pla-gray",
+   "brand": "BambuLab Basic",
+   "material": "PLA",
+   "name": "Gray",
+   "hex": "#8e9089",
+   "td": 2
+  },
+  {
+   "id": "bambulab-basic-pla-green",
+   "brand": "BambuLab Basic",
+   "material": "PLA",
+   "name": "Green",
+   "hex": "#003b3b",
+   "td": 2
+  },
+  {
+   "id": "bambulab-basic-pla-jade-white",
+   "brand": "BambuLab Basic",
+   "material": "PLA",
+   "name": "Jade White",
+   "hex": "#ffffff",
+   "td": 5
+  },
+  {
+   "id": "bambulab-basic-pla-orange",
+   "brand": "BambuLab Basic",
+   "material": "PLA",
+   "name": "Orange",
+   "hex": "#ff6a13",
+   "td": 7
+  },
+  {
+   "id": "bambulab-basic-pla-pink",
+   "brand": "BambuLab Basic",
+   "material": "PLA",
+   "name": "Pink",
+   "hex": "#ff5869",
+   "td": 8
+  },
+  {
+   "id": "bambulab-basic-pla-red",
+   "brand": "BambuLab Basic",
+   "material": "PLA",
+   "name": "Red",
+   "hex": "#c00d1e",
+   "td": 5
+  },
+  {
+   "id": "bambulab-basic-pla-silver",
+   "brand": "BambuLab Basic",
+   "material": "PLA",
+   "name": "Silver",
+   "hex": "#a6a9aa",
+   "td": 0.5
+  },
+  {
+   "id": "bambulab-basic-pla-yellow",
+   "brand": "BambuLab Basic",
+   "material": "PLA",
+   "name": "Yellow",
+   "hex": "#fce300",
+   "td": 6
+  },
+  {
+   "id": "bambulab-matte-pla-ash-gray",
+   "brand": "BambuLab Matte",
+   "material": "PLA",
+   "name": "Ash Gray",
+   "hex": "#9b9ea0",
+   "td": 1.5
+  },
+  {
+   "id": "bambulab-matte-pla-charcoal",
+   "brand": "BambuLab Matte",
+   "material": "PLA",
+   "name": "Charcoal",
+   "hex": "#000000",
+   "td": 0.6
+  },
+  {
+   "id": "bambulab-matte-pla-dark-blue",
+   "brand": "BambuLab Matte",
+   "material": "PLA",
+   "name": "Dark Blue",
+   "hex": "#1c254c",
+   "td": 1
+  },
+  {
+   "id": "bambulab-matte-pla-dark-brown",
+   "brand": "BambuLab Matte",
+   "material": "PLA",
+   "name": "Dark Brown",
+   "hex": "#7d6556",
+   "td": 2
+  },
+  {
+   "id": "bambulab-matte-pla-dark-red",
+   "brand": "BambuLab Matte",
+   "material": "PLA",
+   "name": "Dark Red",
+   "hex": "#bb3d43",
+   "td": 1.5
+  },
+  {
+   "id": "bambulab-matte-pla-grass-green",
+   "brand": "BambuLab Matte",
+   "material": "PLA",
+   "name": "Grass Green",
+   "hex": "#61c680",
+   "td": 2
+  },
+  {
+   "id": "bambulab-matte-pla-ice-blue",
+   "brand": "BambuLab Matte",
+   "material": "PLA",
+   "name": "Ice Blue",
+   "hex": "#8bd5ee",
+   "td": 3.5
+  },
+  {
+   "id": "bambulab-matte-pla-ivory-white",
+   "brand": "BambuLab Matte",
+   "material": "PLA",
+   "name": "Ivory White",
+   "hex": "#ffffff",
+   "td": 4
+  },
+  {
+   "id": "bambulab-matte-pla-latte-brown",
+   "brand": "BambuLab Matte",
+   "material": "PLA",
+   "name": "Latte Brown",
+   "hex": "#d3b7a7",
+   "td": 2
+  },
+  {
+   "id": "bambulab-matte-pla-lemon-yellow",
+   "brand": "BambuLab Matte",
+   "material": "PLA",
+   "name": "Lemon Yellow",
+   "hex": "#ffe17f",
+   "td": 4
+  },
+  {
+   "id": "bambulab-matte-pla-lilac-purple",
+   "brand": "BambuLab Matte",
+   "material": "PLA",
+   "name": "Lilac Purple",
+   "hex": "#ae96d4",
+   "td": 2
+  },
+  {
+   "id": "bambulab-matte-pla-mandarin-orange",
+   "brand": "BambuLab Matte",
+   "material": "PLA",
+   "name": "Mandarin Orange",
+   "hex": "#f99963",
+   "td": 3
+  },
+  {
+   "id": "bambulab-matte-pla-marine-blue",
+   "brand": "BambuLab Matte",
+   "material": "PLA",
+   "name": "Marine Blue",
+   "hex": "#0078bf",
+   "td": 2
+  },
+  {
+   "id": "bambulab-matte-pla-pine-green",
+   "brand": "BambuLab Matte",
+   "material": "PLA",
+   "name": "Pine Green",
+   "hex": "#304301",
+   "td": 1
+  },
+  {
+   "id": "bambulab-matte-pla-sakura-pink",
+   "brand": "BambuLab Matte",
+   "material": "PLA",
+   "name": "Sakura Pink",
+   "hex": "#e4bdd0",
+   "td": 3
+  },
+  {
+   "id": "bambulab-matte-pla-scarlet-red",
+   "brand": "BambuLab Matte",
+   "material": "PLA",
+   "name": "Scarlet Red",
+   "hex": "#de4343",
+   "td": 2
+  },
+  {
+   "id": "bambulab-tough-pla-black",
+   "brand": "BambuLab Tough",
+   "material": "PLA",
+   "name": "Black",
+   "hex": "#000000",
+   "td": 0.6
+  },
+  {
+   "id": "bambulab-tough-pla-cream-white",
+   "brand": "BambuLab Tough",
+   "material": "PLA",
+   "name": "Cream White",
+   "hex": "#dde5ed",
+   "td": 10
+  },
+  {
+   "id": "bambulab-tough-pla-gray",
+   "brand": "BambuLab Tough",
+   "material": "PLA",
+   "name": "Gray",
+   "hex": "#515a6c",
+   "td": 1.8
+  },
+  {
+   "id": "bambulab-tough-pla-lavender-blue",
+   "brand": "BambuLab Tough",
+   "material": "PLA",
+   "name": "Lavender Blue",
+   "hex": "#6667ab",
+   "td": 2
+  },
+  {
+   "id": "bambulab-tough-pla-pine-green",
+   "brand": "BambuLab Tough",
+   "material": "PLA",
+   "name": "Pine Green",
+   "hex": "#053633",
+   "td": 1.5
+  },
+  {
+   "id": "bambulab-tough-pla-vermilion-red",
+   "brand": "BambuLab Tough",
+   "material": "PLA",
+   "name": "Vermilion Red",
+   "hex": "#b22f18",
+   "td": 3
+  },
+  {
+   "id": "bambu-basic-cyan",
+   "brand": "BambuLab Basic",
+   "material": "PLA",
+   "name": "Cyan",
+   "hex": "#0086D6",
+   "td": 3.5
+  },
+  {
+   "id": "bambu-basic-magenta",
+   "brand": "BambuLab Basic",
+   "material": "PLA",
+   "name": "Magenta",
+   "hex": "#EC008C",
+   "td": 3.0
+  }
+ ]
+}

@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<title>叠彩 ChromaStack · 混合彩绘 3D 打印规划器</title>
+<link rel="icon" type="image/x-icon" href="favicon.ico">
+<link rel="stylesheet" href="css/app.css?v=20261117pyramid">
+</head>
+<body>
+<header class="app-header">
+  <div class="brand">
+    <div class="brand-mark" aria-hidden="true">
+      <svg viewBox="0 0 48 48"><path d="M24 5 43 15 24 25 5 15Z" fill="#d95d39"/><path d="M5 22 24 32 43 22" fill="none" stroke="#f3e7d3" stroke-width="3" stroke-linejoin="round"/><path d="M5 29 24 39 43 29" fill="none" stroke="#d8a53a" stroke-width="3" stroke-linejoin="round"/><path d="M5 36 24 46 43 36" fill="none" stroke="#2f6f6a" stroke-width="3" stroke-linejoin="round"/></svg>
+    </div>
+    <div class="brand-text">
+      <h1>叠彩 <span>ChromaStack</span></h1>
+      <p>纯色直印 × 局部 HueForge 浮雕渐变 · 混合彩绘 3D 打印规划器</p>
+    </div>
+  </div>
+  <div class="header-actions">
+    <span class="header-badge" id="engineBadge">TD 浮雕 · 自定义耗材</span>
+    <span class="header-badge" title="仅耗材标定属性保存在此浏览器，不保存工程参数或图片">标定自动保存</span>
+    <button class="btn ghost" id="btnResetSettings" title="重置当前耗材标定并清除已保存标定，其他参数不变">重置标定</button>
+    <button class="btn ghost" id="btnHelp">原理与来源</button>
+    <button class="btn primary" id="btnOpenImage">导入画稿</button>
+  </div>
+</header>
+
+<main class="workspace">
+  <aside class="panel panel-left">
+    <section class="card">
+      <div class="card-head"><h2>画稿</h2><span class="tiny" id="imageMeta">未载入</span></div>
+      <div class="dropzone" id="dropZone">
+        <input type="file" id="fileInput" accept="image/*" hidden>
+        <div class="dropzone-inner" id="dropzoneInner">
+          <div class="drop-art" id="dropArt">
+            <svg viewBox="0 0 64 64" aria-hidden="true"><rect x="7" y="10" width="50" height="44" rx="4" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="22" cy="24" r="5" fill="currentColor" opacity=".5"/><path d="M12 48 26 32l10 9 7-7 9 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+          </div>
+          <strong>拖动图片到这里</strong>
+          <span>或点击选择 · 建议 ≥ 800px 宽</span>
+        </div>
+        <img id="previewThumb" alt="画稿预览" hidden>
+      </div>
+      <div class="sample-row">
+        <button class="sample-btn" data-sample="samples/landscape.jpg"><img src="samples/landscape-thumb.jpg" alt=""><span>油画风景</span></button>
+        <button class="sample-btn ghost-sample" id="btnSyntheticSample"><span class="synthetic-swatch"></span><span>测试色块</span></button>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>打印结构</h2><span class="tiny">单位 mm</span></div>
+      <div class="segmented" id="engineSwitch">
+        <button data-engine="lut">物理 LUT</button>
+        <button data-engine="td" class="active">TD 浮雕</button>
+      </div>
+      <p class="hint" id="engineHint">用你实际有的耗材，在局部叠出 HueForge 式变高渐变；矩形纯色区仍然整块直印。</p>
+
+      <label class="field" id="lutField">
+        <span>LUT 配色</span>
+        <select id="lutSelect">
+          <option value="bambu_8">拓竹 8 色宽色域（黑/白/红/黄/蓝/绿/青/品红）</option>
+          <option value="bambu_cmyw">拓竹 CMYW 4 色（单 AMS）</option>
+        </select>
+      </label>
+
+      <div class="field-grid">
+        <label class="field"><span>成品宽度</span><div class="input-unit"><input type="number" id="widthMm" value="150" min="40" max="400" step="5"><i>mm</i></div></label>
+        <label class="field"><span>纯色区顶高</span><div class="input-unit"><input type="number" id="flatTopMm" value="1.6" min="0.8" max="6" step="0.08"><i>mm</i></div></label>
+      </div>
+      <div class="field-grid">
+        <label class="field"><span>打印层高</span>
+          <select id="layerHeight">
+            <option value="0.08" selected>0.08 mm</option>
+            <option value="0.04">0.04 mm</option>
+            <option value="0.12">0.12 mm</option>
+            <option value="0.16">0.16 mm</option>
+          </select>
+        </label>
+        <label class="field"><span>渐变区浮雕差</span><div class="input-unit"><input type="number" id="reliefMm" value="0.16" min="-0.8" max="0.8" step="0.08"><i>mm</i></div></label>
+      </div>
+      <label class="field" id="lineWidthField">
+        <span>喷嘴线宽 <em id="lineWidthHint">平滑 ≥ 0.84 mm</em></span>
+        <div class="input-unit"><input type="number" id="lineWidthMm" value="0.42" min="0.2" max="1.2" step="0.01"><i>mm</i></div>
+      </label>
+      <div class="field-grid">
+        <label class="field"><span>渐变起始层 <em id="startMm">0.80 mm</em></span><div class="input-unit"><input type="number" id="gradStartLayer" value="16" min="1" max="240" step="1"><i>层</i></div></label>
+        <label class="field"><span>渐变最高高度</span><div class="input-unit"><input type="number" id="gradTopMm" value="1.76" min="0.08" max="20" step="0.08"><i>mm</i></div></label>
+      </div>
+      <div class="field-grid" id="tdLayerField">
+        <label class="field"><span>最大叠层数 <em id="layersHint">1–24</em></span><div class="input-unit"><input type="number" id="gradLayers" value="6" min="1" max="24" step="1"><i>层</i></div></label>
+        <label class="field"><span>基底耗材</span><select id="foundationSelect"></select></label>
+      </div>
+      <p class="hint">打印层高 = 每层厚度；最大叠层数 = 渐变最多叠几层。起始高度 = 起始层 × 层高，最高高度 = 起始高度 + 最大层数 × 层高；改任意一项会联动反算。改打印层高会保持物理高度、反算层数。</p>
+      <label class="switch-row" id="variableField">
+        <span><b>渐变区阶梯浮雕</b><small>开：不同颜色停在不同层，形成高低台阶；关：所有渐变块拉到同一高度，只换颜色。</small></span>
+        <input type="checkbox" id="variableHeight" checked>
+      </label>
+
+      <div class="structure-line" id="structureLine">
+        <div><b>纯色区</b><span>0 → —</span></div>
+        <div><b>渐变区</b><span>— → —</span></div>
+        <div><b>浮雕差</b><span>—</span></div>
+      </div>
+      <p class="hint">渐变区从设定层开始叠色；抬高它可形成油画般的局部凸起，压低则形成凹槽。</p>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>批量标定</h2><span class="tiny">当前全部耗材</span></div>
+      <button class="btn wide primary" id="btnBatchPlate">生成全部标定板 3MF</button>
+      <button class="btn wide" id="btnPhotoCalibration">上传照片批量识别</button>
+      <input type="file" id="batchPhotoInput" accept="image/*" hidden>
+      <p class="hint" id="batchCalibStatus">黑色两层薄底 → 白色 → 其余耗材，三色阶逐层收成金字塔；每个 Z 层仅一种耗材，四角白色定位柱只在白色料带内增高。</p>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>背景 / 轮廓</h2><span class="tiny">异形浮雕</span></div>
+      <label class="field"><span>背景移除</span><select id="backgroundMode">
+        <option value="off" selected>关闭（保留矩形）</option>
+        <option value="auto">自动识别边框主色</option>
+        <option value="pick">点击画面取背景色</option>
+      </select></label>
+      <label class="field"><span>背景容差 <em>ΔE00</em></span><div class="input-unit"><input type="number" id="backgroundTolerance" value="8" min="1" max="30" step="0.5"><i>ΔE</i></div></label>
+      <label class="switch-row"><span><b>单连通包络</b><small>距离场形成圆弧贴合轮廓，纳入全部孤立线/符号；新增区域只作低层连接，不形成高墙。</small></span><input type="checkbox" id="backgroundEnvelope" checked></label>
+      <label class="field"><span>气泡贴合余量</span><div class="input-unit"><input type="number" id="backgroundEnvelopeMm" value="1.5" min="0.2" max="10" step="0.1"><i>mm</i></div></label>
+      <button class="btn wide" id="btnPickBackground" disabled>从画面选择背景色</button>
+      <button class="btn wide" id="btnBackgroundHole" disabled>删除 / 恢复内部封闭区域</button>
+      <p class="hint" id="backgroundStatus">未启用，保留完整矩形。</p>
+      <p class="hint">只移除与图像边缘连通的近纯色；封闭的白色脸部、眼睛和内部浅色不会被误删。深色自动模式最低使用 12 ΔE 吸收压缩噪点，手动取色按输入值。修改后点击计算，分层、3D 与 3MF 共用同一轮廓；内部封闭区域可点选删除或恢复。</p>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>区域策略</h2><span class="tiny">纯色 vs 渐变</span></div>
+      <label class="slider-field"><span>平整阈值 <b id="stdValue">自动</b></span><input type="range" id="stdThreshold" min="0" max="8" step="0.1" value="0"><em>低 → 更多区域走层叠渐变；高 → 更多区域直接纯色</em></label>
+      <label class="slider-field"><span>配色残差 <b id="resValue">5.0 ΔE</b></span><input type="range" id="residualThreshold" min="1" max="12" step="0.5" value="5"><em>纯色区颜色与最近耗材的最大允许差</em></label>
+      <label class="slider-field"><span>纯色区最小面积 <b id="areaValue">0.6%</b></span><input type="range" id="minFlatPercent" min="0.1" max="5" step="0.1" value="0.6"><em>过滤零碎的同色块，避免满图纯色补丁</em></label>
+      <label class="slider-field" id="mergeField"><span>层序合并 ΔE <b id="mergeValue">4.0</b></span><input type="range" id="mergeDeltaE" min="0" max="10" step="0.5" value="4"><em>相邻渐变色差 ≤ 阈值时改为共享底层、只在顶部变化；0=关闭。越大越整体，但颜色可能偏。</em></label>
+      <label class="slider-field" id="heightMergeField"><span>高度去重 ΔE <b id="heightMergeValue">1.5</b></span><input type="range" id="heightMergeDeltaE" min="0" max="5" step="0.5" value="1.5"><em>预测颜色差 ≤ 阈值时，把叠得更高的色族改用同色的更短配方；只处理层数差 ≥4 层、且短配方面积不小于高配方 75% 的情况。0=关闭。用来去掉“颜色没变、只是更高”的无效台阶。</em></label>
+      <label class="slider-field" id="edgeCleanField"><span>边缘光晕清理 <b id="edgeCleanValue">轻 1</b></span><input type="range" id="edgeClean" min="0" max="3" step="1" value="1"><em>原图的抗锯齿过渡色不参与配色聚类，并归到相邻主色，避免黑线周围出现黄/红/蓝细噪点。0=关闭，1=轻，2=中，3=强并额外清理全图喷嘴级孤岛；3 会明显改变颜色，建议先用 1–2。</em></label>
+      <label class="switch-row" id="vectorField">
+        <span><b>矢量化色块直印</b><small>把面积大、颜色均匀的色族改成整块纯色；适合贴纸/扁平插画，能去掉分层首层的红蓝噪点。开启后还用圆形加权投票收敛区域轮廓；直印区统一到纯色区顶高；照片/渐变画勿用。</small></span>
+        <input type="checkbox" id="vectorFlat">
+      </label>
+      <label class="field" id="lineProtectField">
+        <span>线稿保护 <em id="lineStatus">自动检测</em></span>
+        <select id="lineProtect">
+          <option value="auto">自动（检测到线稿时）</option>
+          <option value="strong" selected>强（全色线稿直印）</option>
+          <option value="off">关闭</option>
+        </select>
+      </label>
+      <p class="hint" id="lineHint">细线与直边在平滑、配色归并时容易被吃掉。网页默认强模式把深色及高彩度细线按合适耗材直印，适合中文细字、彩色 Logo 和描边贴纸；找不到接近颜色时保留渐变，避免换错色。自动模式保留层叠配方，关闭则不保护线稿。孤立深点仍会清理，黑描边本身不属于背景噪声。</p>
+      <label class="slider-field"><span>渐变配色数 <b id="familiesValue">192</b></span><input type="range" id="families" min="16" max="256" step="8" value="192"><em>越高越细腻，但层内换色与 3MF 面数越多</em></label>
+      <button class="btn wide primary" id="btnAnalyze" disabled>应用全部修改并计算</button>
+      <p class="hint dirty-hint" id="dirtyHint" hidden>参数或耗材已修改，尚未应用到预览和导出。点击计算后统一生效。</p>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>耗材 / AMS</h2><span class="tiny" id="paletteCount">0 槽</span></div>
+      <div id="paletteList" class="palette-list"></div>
+      <div class="row-actions">
+        <button class="btn small" id="btnAddFilament">从耗材库添加</button>
+        <button class="btn small ghost" id="btnRecommend">按画面推荐</button>
+      </div>
+      <div class="quick-row"><span>拓竹 CMYK 快速加入</span><button data-quick="Cyan">+ Cyan</button><button data-quick="Magenta">+ Magenta</button></div>
+      <p class="hint" id="paletteHint">可连续添加或修改多种耗材，点击计算后统一生效。LUT 模式锁定为校准配色；TD 层叠可使用任意耗材与 TD。</p>
+    </section>
+
+  </aside>
+
+  <section class="stage">
+    <div class="stage-toolbar">
+      <div class="view-tabs" id="viewTabs">
+        <button data-view="sim" class="active">模拟成画</button>
+        <button data-view="original">原图</button>
+        <button data-view="regions">区域</button>
+        <button data-view="height">高度</button>
+        <button data-view="gamut">色域</button>
+        <button data-view="layer">分层</button>
+        <button data-view="three">3D</button>
+      </div>
+      <div class="stage-tools">
+        <label class="tool-slider tool-number" title="结构平滑尺寸（mm）：小于该尺寸的孤立色块会被合并。有效像素半径按成品宽度换算，并与喷嘴线宽一起决定可打印细节。输入后点击计算生效。">
+          <span>平滑</span><input type="number" id="smoothMm" min="0" max="3" step="0.1" value="0.8"><i>mm</i><b id="smoothValue">—</b>
+        </label>
+        <button class="btn small primary analyze-stage" id="btnAnalyzeStage" disabled>计算</button>
+        <div class="layer-control" id="layerControl">
+          <span>第 <b id="layerNumber">1</b> 层</span>
+          <input type="range" id="layerSlider" min="0" max="1" value="0">
+        </div>
+        <button class="icon-btn" id="btnBrush" title="手动修整区域">✎</button>
+        <button class="icon-btn" id="btnUndoBrush" title="撤销区域修整">↶</button>
+      </div>
+    </div>
+    <div class="brush-bar" id="brushBar" hidden>
+      <span>画笔：</span>
+      <button class="chip active" data-brush="flat">设为纯色</button>
+      <button class="chip" data-brush="grad">设为渐变</button>
+      <label class="brush-size">大小 <input type="range" id="brushSize" min="4" max="60" value="18"></label>
+      <button class="chip" id="btnClearBrush">清除手绘</button>
+      <span class="hint inline">在画布上拖动；松开后标记修改，点击计算生效。</span>
+    </div>
+
+    <div class="canvas-stage" id="canvasStage">
+      <canvas id="stageCanvas"></canvas>
+      <canvas id="threeCanvas" hidden></canvas>
+      <div class="three-hud" id="threeHud" hidden>
+        <div class="three-head"><b id="threeTitle">3D 材料堆叠</b><span id="threeSubtitle">顶面光学混色 · 侧面真实耗材</span></div>
+        <div class="three-segmented" id="threeMode" aria-label="3D 显示模式">
+          <button type="button" data-mode="stack" class="active">材料堆叠</button>
+          <button type="button" data-mode="finish">成品混色</button>
+        </div>
+        <label class="three-slider">高度夸张 <input type="range" id="exaggeration" min="1" max="16" step="1" value="8"><b id="exagValue">8×</b></label>
+        <label class="three-check" title="裁去右侧部分，并显示剖面列的完整耗材层"><input type="checkbox" id="section3D">剖面</label>
+        <label class="three-slider">X <input type="range" id="sectionPosition" min="0" max="100" step="1" value="50" disabled><b id="sectionValue">关</b></label>
+        <button class="btn small" id="reset3D" title="回到图片正面">重置视角</button>
+      </div>
+      <div class="stage-empty" id="stageEmpty">
+        <div class="empty-mark">叠</div>
+        <strong>先导入一幅画</strong>
+        <span>软件会找出大片纯色区域直接铺色，<br>其余细节用局部层叠渐变还原。</span>
+        <button class="btn primary" id="btnEmptyImport">选择图片</button>
+      </div>
+      <div class="canvas-legend" id="canvasLegend" hidden></div>
+      <div class="progress-overlay" id="progressOverlay" hidden>
+        <div class="spinner"></div><span id="progressText">正在分析画面…</span>
+      </div>
+    </div>
+
+    <div class="metric-strip" id="metricStrip">
+      <div class="metric"><span>平均色差</span><b id="metricDE">—</b><em>ΔE00</em></div>
+      <div class="metric"><span>P90 色差</span><b id="metricP90">—</b><em>ΔE00</em></div>
+      <div class="metric"><span>纯色区</span><b id="metricFlat">—</b><em>面积占比</em></div>
+      <div class="metric"><span>渐变配方</span><b id="metricFamilies">—</b><em>个</em></div>
+      <div class="metric"><span>层内换色下界</span><b id="metricSwaps">—</b><em>次</em></div>
+      <div class="metric"><span>浮雕差</span><b id="metricRelief">—</b><em>mm</em></div>
+    </div>
+
+    <div class="action-bar">
+      <div class="action-group">
+        <button class="btn primary" id="btnExport3MF" title="按网页当前分辨率导出，避免降采样改变短配方的顶面颜色" disabled>导出 3MF</button>
+        <button class="btn" id="btnExportPreview" disabled>导出预览 PNG</button>
+        <button class="btn" id="btnExportPlan" disabled>打印计划包</button>
+      </div>
+      <div class="action-group right">
+        <button class="btn ghost" id="btnCalibrate">TD / HD 标定</button>
+        <span class="tiny" id="planTime"></span>
+      </div>
+    </div>
+  </section>
+
+  <aside class="panel panel-right">
+    <section class="card">
+      <div class="card-head"><h2>结构剖面</h2><span class="tiny">示意</span></div>
+      <svg id="sectionSvg" class="section-svg" viewBox="0 0 300 170" role="img" aria-label="纯色区与渐变区的高度剖面"></svg>
+      <div class="section-readout">
+        <div><span>总层数</span><b id="readoutLayers">—</b></div>
+        <div><span>渐变起点</span><b id="readoutStart">—</b></div>
+        <div><span>耗材估算</span><b id="readoutGrams">—</b></div>
+      </div>
+    </section>
+
+    <section class="card grow">
+      <div class="card-head"><h2>渐变配方</h2><span class="tiny" id="familyMeta">—</span></div>
+      <div class="family-list" id="familyList">
+        <div class="placeholder-small">分析后这里会列出主要色块的层叠顺序。</div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>质量与提醒</h2></div>
+      <div class="quality-bars">
+        <div><span>ΔE00 ≤ 5</span><div class="bar"><i id="barUnder5"></i></div><b id="valUnder5">—</b></div>
+        <div><span>ΔE00 ≤ 10</span><div class="bar"><i id="barUnder10"></i></div><b id="valUnder10">—</b></div>
+        <div><span>渐变区占比</span><div class="bar grad"><i id="barGrad"></i></div><b id="valGrad">—</b></div>
+        <div><span>色域外 &gt;8ΔE</span><div class="bar gamut"><i id="barGamut"></i></div><b id="valGamut">—</b></div>
+        <div><span>共享底层</span><div class="bar share"><i id="barShare"></i></div><b id="valShare">—</b></div>
+      </div>
+      <ul class="warning-list" id="warningList"><li class="muted">暂无提醒</li></ul>
+      <p class="hint" id="supportAudit">悬空检查：—</p>
+      <button class="btn small wide" id="btnApplyGamut" hidden>加入建议耗材</button>
+    </section>
+
+    <section class="card note-card">
+      <div class="card-head"><h2>怎么读这个方案</h2></div>
+      <p><b>纯色区</b>整根打印成该颜色，颜色最实、最省层内换色。<b>渐变区</b>只在局部从设定层开始叠 5 层（LUT）或 N 层（TD）色层，靠透光混合出中间色。</p>
+      <p>“层内换色下界”不是打印时间，而是每一层最少要出现几种耗材的粗略下界；实际换料、擦料塔由切片器决定。</p>
+    </section>
+  </aside>
+</main>
+
+<!-- 耗材库 -->
+<div class="modal" id="libraryModal" hidden>
+  <div class="modal-card wide">
+    <div class="modal-head"><h2>耗材库</h2><button class="icon-btn" data-close="libraryModal">×</button></div>
+    <p class="hint">TD 来自 HueForge 社区耗材库（拓竹 PLA Basic / Matte / Tough 等）。TD 只是起点，批次与工艺会让它漂移；可在 TD / HD 标定中修正。</p>
+    <div class="library-toolbar">
+      <input type="search" id="librarySearch" placeholder="搜索颜色、品牌或材料，例如：Jade White / 黑 / PLA">
+      <div class="filter-chips" id="libraryFilters">
+        <button class="chip active" data-brand="BambuLab Basic">拓竹 Basic</button>
+        <button class="chip" data-brand="BambuLab Matte">拓竹 Matte</button>
+        <button class="chip" data-brand="">全部</button>
+      </div>
+    </div>
+    <div class="library-list" id="libraryList"></div>
+    <div class="modal-foot"><span class="tiny" id="libraryCount"></span><button class="btn" data-close="libraryModal">完成</button></div>
+  </div>
+</div>
+
+<!-- 标定 -->
+<div class="modal" id="calibrationModal" hidden>
+  <div class="modal-card">
+    <div class="modal-head"><h2>TD / HD 标定</h2><button class="icon-btn" data-close="calibrationModal">×</button></div>
+    <p class="hint">正面观看的叠色用“遮盖距离 HD”建模：T = 10<sup>−d/HD</sup>。常规透光距离 TD ≈ 10 × HD。下面的计算器按“第一片与参考条看不出区别”的读数反推 HD。</p>
+    <div class="calib-grid">
+      <label class="field"><span>耗材</span><select id="calibFilament"></select></label>
+      <label class="field"><span>打印层高</span><input type="number" id="calibLayer" value="0.08" min="0.04" max="0.28" step="0.04"></label>
+      <label class="field"><span>底色</span><select id="calibBase"><option value="#000000">黑</option><option value="#ffffff">白</option></select></label>
+      <label class="field"><span>首次无差别片号</span><input type="number" id="calibPatch" value="6" min="1" max="30" step="1"></label>
+      <label class="field"><span>楔形片数</span><input type="number" id="calibPatches" value="10" min="4" max="24" step="1"></label>
+    </div>
+    <div class="calib-actions">
+      <button class="btn primary" id="btnDownloadCalib">下载标定楔形 3MF</button>
+      <button class="btn" id="btnComputeCalib">计算并应用</button>
+      <span class="tiny" id="calibResult">—</span>
+    </div>
+    <ol class="calib-steps">
+      <li>打印 1–N 层递增的楔形色片（从左到右），旁边/后方打印一条同耗材的全厚度参考条；都放在黑或白底上。</li>
+      <li>在自然光下找出第一片“和参考条看不出区别”的片号 k。</li>
+      <li>输入 k、层高和底色，按 2 ΔE00 的视觉阈值反推 HD；结果会写回当前耗材。</li>
+      <li>换批次、换温度/层高/线宽后重新标定；不确定时先打小样。</li>
+    </ol>
+    <p class="hint">楔形 3MF 里基底固定为 1 号槽、目标耗材为 2 号槽。LUT 模式的颜色来自实测色卡，标定主要影响 TD 层叠模式和基底遮盖判断。也可以用 HueForge 的 Seashell 法或 Ajax-3D TD-1 传感器测得 TD，再填回耗材卡。</p>
+  </div>
+</div>
+
+<!-- 批量照片标定 -->
+<div class="modal" id="batchPhotoModal" hidden>
+  <div class="modal-card wide">
+    <div class="modal-head"><h2>照片批量标定</h2><button class="icon-btn" data-close="batchPhotoModal">×</button></div>
+    <p class="hint">已按四点透视校正，并用白色参考做白平衡。绿色为定位点，方框为厚度采样区。请确认识别框与阶梯对齐后再应用。</p>
+    <canvas id="batchPhotoCanvas" style="width:100%;max-height:52vh;object-fit:contain;background:#182125;border-radius:8px"></canvas>
+    <div id="batchPhotoSummary" class="hint"></div>
+    <div id="batchPhotoResults" class="family-list"></div>
+    <div class="calib-actions"><button class="btn primary" id="btnApplyBatchPhoto">应用全部标定并保存</button></div>
+  </div>
+</div>
+
+<!-- 说明 -->
+<div class="modal" id="helpModal" hidden>
+  <div class="modal-card wide">
+    <div class="modal-head"><h2>原理、边界与开源来源</h2><button class="icon-btn" data-close="helpModal">×</button></div>
+    <div class="help-cols">
+      <div>
+        <h3>三层策略</h3>
+        <p><b>1. 纯色直印</b>：检测大面积低方差、且能被现有耗材色覆盖的区域，整块用该耗材打印，色准最高。</p>
+        <p><b>2. 局部分层</b>：其余区域按颜色聚类，每类选一组层叠配方。默认 TD 模式用 Beer–Lambert 遮盖模型，并为当前耗材枚举可达色域；层序限制为连续色段，每种耗材最多一段，不会红-蓝-红-蓝交替。LUT 可选模式直接用 Lumina Studio 的拓竹 PLA Basic 实测 5 层色卡。</p>
+        <p><b>分层预览</b>：浅色棋盘格表示该层没有材料；黑色耗材是实心黑色。导出的 layer_maps 用透明像素表示未打印。</p>
+        <p><b>3D 预览</b>：默认从图片正面观察，拖动旋转、滚轮缩放。「材料堆叠」顶面显示光学混色，台阶与侧面按真实耗材逐层着色；开启 X 剖面可裁去右侧并查看内部材料层。「成品混色」保留旧的平滑最终色高度场。高度夸张只影响预览，3MF 仍是精确阶梯。</p>
+        <p><b>背景移除</b>：自动识别边框主色或点击原图取色，只删除与边缘连通的近纯色，保留封闭浅色内部。分层、3D、剖面和原生 3MF 共用同一异形轮廓；识别会删空整幅图时自动放弃。</p>
+        <p><b>3. 高度控制</b>：纯色区顶高、渐变起始层、渐变最高高度、最大叠层数分开设置，三者联动；TD 的短线配方会自然形成低台阶，最长配方形成最高点，像油画厚涂。打印层高在 TD 可改，LUT 固定 0.08 mm。</p>
+        <p><b>有限颜色</b>：切到「色域」视图，红色区域是当前耗材物理上叠不出来的颜色；软件会按面积给出缺少的 Bambu Basic 耗材，并可一键加入重算。</p>
+        <p><b>结构平滑</b>：按“最小可打印结构尺寸（mm）”做多数表决，不再是固定像素等级。引擎按成品宽度换算像素半径（0.8 mm 在 150 mm/640 px 约 2 px，在 80 mm/600 px 约 3 px），所以换尺寸不会改变物理平滑量；小于喷嘴线宽的尺寸会提示可能打不出来。</p>
+        <p><b>层序合并</b>：渐变目标色差在阈值内时，相邻色族共享同一段底层，顶部再分开；更像 HueForge 的连续叠色，也更少碎结构。0 关闭。</p>
+        <p><b>高度去重</b>：如果两个色族的预测颜色几乎一样、但一个叠得高很多，就改用同色的更短配方，并合并成同一个 family；只处理层数差 ≥4 层、短配方面积足够大的情况。最高高度是上限，不保证每个色族都达到。</p>
+        <p><b>边缘光晕清理</b>：原图描边有抗锯齿过渡色，容易在黑线周围生成黄/红/蓝细噪点。开启后边缘过渡色不参与聚类，并归到最近的核心色/受保护描边；只在渐变区 ≥20% 时启用。1–2 档清理边缘小岛，强 3 还会清理全图喷嘴级孤岛。最终颜色看模拟/3D。</p>
+        <p><b>矢量化色块直印</b>：先统计每个色族的平均色、颜色方差和物理面积，把面积大、颜色均匀且接近某个耗材的色族整块改成纯色直印，不再分层；适合贴纸/扁平插画，能去掉分层首层的红蓝噪点。直印区统一到纯色区顶高，照片/渐变画不要开。</p>
+        <p><b>悬空检查</b>：逐层比较占用面积，第 1 层后不允许出现“从无到有”的新像素。正常方案显示“无新增面积”。Bambu 若提示模型有浮空区域，通常是它把每个颜色 part 单独检查（颜色层 part 的底面在 z>0），不代表实际切片有悬空；以本检查 + 切片预览为准。</p>
+        <p><b>线稿保护</b>：自动模式识别白底线稿，普通区域用颜色双边表决，受保护线条只在线条内部统一配方，且有明度上限，不会被白纸/白发投掉；孤立深点仍会清理。强模式把深色细线改成纯色直印。贴纸/表情包推荐自动；照片、马赛克、印象派通常不触发。</p>
+      </div>
+      <div>
+        <h3>必须知道的边界</h3>
+        <p>颜色预测是“正面漫射光”的近似；实际受批次、温度、层高、线宽、喷嘴、观察光影响。LUT 校准条件是 0.08 mm 层高、0.42 mm 线宽、白色基底。</p>
+        <p>逐层混色需要 AMS/MMU/换刀机；单 AMS 只有 4 槽。3MF 已写入每个 part 的 extruder 编号，导入 Bambu Studio / OrcaSlicer 后请核对槽位、擦料和温度。</p>
+        <p><b>Bambu Studio 导入提示</b>：出现“3mf 文件配置无效，仅加载几何数据”时点 <b>确认</b> 即可，这不是文件损坏，而是不加载第三方打印参数。新版 3MF 把颜色写进了每个三角面，Bambu 会弹“标准 3MF 导入颜色”，点 <b>追加</b> 即可把颜色加入耗材列表；若相近颜色被自动合并，可在窗口里调颜色数量或手动匹配。若提示“对象尺寸过小/是否转换为毫米”，选 <b>否</b>；若提示“是否将多部分对象组合成一个对象”，选 <b>是</b>。旧版 3MF 没有面颜色，就会只剩当前项目的 2 个默认耗材。</p>
+        <p>模型由很多水密 part 组成，切片器会做布尔合并；如遇“悬空/重叠”提示，优先检查切片预览而不是直接忽略。</p>
+      </div>
+    </div>
+    <h3>开源与数据</h3>
+    <ul class="source-list">
+      <li><b>Lumina Studio / Lumina-Layers</b>（AGPL-3.0）：拓竹 PLA Basic CMYW / 8 色实测 LUT、5 层叠色思路。项目地址：luminastudio.com.cn / github.com/lumina-layer-studio/Lumina-Layers</li>
+      <li><b>Kromacut</b>（AGPL-3.0）：正面遮盖距离 HD、Flat Paint 分区、3MF 多 part 导出思路。github.com/vycdev/Kromacut</li>
+      <li><b>Prusa FDM Color Mixer</b>（MIT）：交替层混色校准与色差评估方法。github.com/prusa3d/prusa-fdm-mixer</li>
+      <li><b>HueForge 社区耗材库</b>（经 prusa-fdm-mixer 同步）：627 条耗材的 TD 参考值。</li>
+      <li><b>earcut</b>（ISC）：多边形三角化，用于生成水密网格。</li>
+    </ul>
+    <p class="hint">本工具是规划/预览器，不是切片器。最终 G-code、换料顺序与打印参数以切片软件为准。</p>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="js/color.js?v=20261117pyramid"></script>
+<script src="js/data-filaments.js?v=20261117pyramid"></script>
+<script src="js/data-lut.js?v=20261117pyramid"></script>
+<script src="js/earcut.js?v=20261117pyramid"></script>
+<script src="js/engine.js?v=20261117pyramid"></script>
+<script src="js/zip.js?v=20261117pyramid"></script>
+<script src="js/exporter.js?v=20261117pyramid"></script>
+<script src="js/calibration.js?v=20261117pyramid"></script>
+<script src="js/batch-calibration.js?v=20261117pyramid"></script>
+<script src="js/view3d.js?v=20261117pyramid"></script>
+<script src="js/settings.js?v=20261117pyramid"></script>
+<script src="js/app.js?v=20261117pyramid"></script>
+</body>
+</html>

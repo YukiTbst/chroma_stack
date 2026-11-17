@@ -1,0 +1,2547 @@
+/* ChromaStack planning engine.
+   - Hybrid segmentation: solid direct-color regions + local layered color regions.
+   - LUT engine: pre-calibrated Bambu PLA Basic 5-layer LUTs from Lumina Studio.
+   - TD engine: arbitrary filaments, Beer-Lambert hiding distance, local stack search.
+   Sets globalThis.CS.engine. No dependencies outside CS.color. */
+(function (root) {
+  'use strict';
+  const CS = root.CS = root.CS || {};
+  const C = CS.color;
+  const clamp = (v, lo, hi) => v < lo ? lo : (v > hi ? hi : v);
+
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function imageToLab(imageData) {
+    const data = imageData.data, n = imageData.width * imageData.height;
+    const lab = new Float32Array(n * 3);
+    const alpha = new Uint8Array(n);
+    for (let i = 0, p = 0; i < n; i++, p += 4) {
+      const r = data[p] / 255, g = data[p + 1] / 255, b = data[p + 2] / 255;
+      const l = C.rgb01ToLab({ r, g, b });
+      lab[i * 3] = l.L; lab[i * 3 + 1] = l.a; lab[i * 3 + 2] = l.b;
+      alpha[i] = data[p + 3];
+    }
+    return { lab, alpha };
+  }
+
+  function labAt(lab, i) { return { L: lab[i * 3], a: lab[i * 3 + 1], b: lab[i * 3 + 2] }; }
+
+  function localStd(lab, w, h, radius) {
+    const sw = w + 1, stride = sw;
+    const n = w * h;
+    const sum = [new Float64Array(stride * (h + 1)), new Float64Array(stride * (h + 1)), new Float64Array(stride * (h + 1))];
+    const sq = [new Float64Array(stride * (h + 1)), new Float64Array(stride * (h + 1)), new Float64Array(stride * (h + 1))];
+    for (let y = 0; y < h; y++) {
+      let rowS0 = 0, rowS1 = 0, rowS2 = 0, rowQ0 = 0, rowQ1 = 0, rowQ2 = 0;
+      for (let x = 0; x < w; x++) {
+        const i = (y * w + x) * 3;
+        const v0 = lab[i], v1 = lab[i + 1], v2 = lab[i + 2];
+        rowS0 += v0; rowS1 += v1; rowS2 += v2;
+        rowQ0 += v0 * v0; rowQ1 += v1 * v1; rowQ2 += v2 * v2;
+        const p = (y + 1) * stride + (x + 1);
+        const q = y * stride + (x + 1);
+        sum[0][p] = sum[0][q] + rowS0;
+        sum[1][p] = sum[1][q] + rowS1;
+        sum[2][p] = sum[2][q] + rowS2;
+        sq[0][p] = sq[0][q] + rowQ0;
+        sq[1][p] = sq[1][q] + rowQ1;
+        sq[2][p] = sq[2][q] + rowQ2;
+      }
+    }
+    const out = new Float32Array(n);
+    const r = radius;
+    for (let y = 0; y < h; y++) {
+      const y0 = Math.max(0, y - r), y1 = Math.min(h - 1, y + r);
+      for (let x = 0; x < w; x++) {
+        const x0 = Math.max(0, x - r), x1 = Math.min(w - 1, x + r);
+        const xa = x0, xb = x1 + 1, ya = y0, yb = y1 + 1;
+        const p00 = ya * stride + xa, p10 = ya * stride + xb, p01 = yb * stride + xa, p11 = yb * stride + xb;
+        const area = (xb - xa) * (yb - ya);
+        let variance = 0;
+        for (let ch = 0; ch < 3; ch++) {
+          const s = sum[ch][p11] - sum[ch][p01] - sum[ch][p10] + sum[ch][p00];
+          const q = sq[ch][p11] - sq[ch][p01] - sq[ch][p10] + sq[ch][p00];
+          const mean = s / area;
+          variance += Math.max(0, q / area - mean * mean);
+        }
+        out[y * w + x] = Math.sqrt(variance);
+      }
+    }
+    return out;
+  }
+
+  function erode(mask, w, h, radius) {
+    const out = new Uint8Array(mask.length);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        let ok = 1;
+        for (let dy = -radius; dy <= radius && ok; dy++) {
+          const yy = y + dy; if (yy < 0 || yy >= h) { ok = 0; break; }
+          for (let dx = -radius; dx <= radius; dx++) {
+            const xx = x + dx; if (xx < 0 || xx >= w) { ok = 0; break; }
+            if (!mask[yy * w + xx]) { ok = 0; break; }
+          }
+        }
+        out[y * w + x] = ok;
+      }
+    }
+    return out;
+  }
+
+  function dilate(mask, w, h, radius) {
+    const out = new Uint8Array(mask.length);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        let ok = 0;
+        for (let dy = -radius; dy <= radius && !ok; dy++) {
+          const yy = y + dy; if (yy < 0 || yy >= h) continue;
+          for (let dx = -radius; dx <= radius; dx++) {
+            const xx = x + dx; if (xx < 0 || xx >= w) continue;
+            if (mask[yy * w + xx]) { ok = 1; break; }
+          }
+        }
+        out[y * w + x] = ok;
+      }
+    }
+    return out;
+  }
+
+  function removeSmallComponents(mask, w, h, minArea, fillValue) {
+    const out = new Uint8Array(mask);
+    const seen = new Uint8Array(mask.length);
+    const stack = new Int32Array(mask.length);
+    const target = fillValue ? 0 : 1; // remove flat islands (=>0) or fill holes (=>1)
+    for (let start = 0; start < mask.length; start++) {
+      if (seen[start] || out[start] !== target) continue;
+      let top = 0; stack[top++] = start; seen[start] = 1;
+      const cells = [];
+      while (top) {
+        const idx = stack[--top]; cells.push(idx);
+        const x = idx % w, y = (idx / w) | 0;
+        if (x > 0) { const j = idx - 1; if (!seen[j] && out[j] === target) { seen[j] = 1; stack[top++] = j; } }
+        if (x + 1 < w) { const j = idx + 1; if (!seen[j] && out[j] === target) { seen[j] = 1; stack[top++] = j; } }
+        if (y > 0) { const j = idx - w; if (!seen[j] && out[j] === target) { seen[j] = 1; stack[top++] = j; } }
+        if (y + 1 < h) { const j = idx + w; if (!seen[j] && out[j] === target) { seen[j] = 1; stack[top++] = j; } }
+      }
+      if (cells.length < minArea) {
+        for (const idx of cells) out[idx] = fillValue ? 1 : 0;
+      }
+    }
+    return out;
+  }
+
+  function maskComponents(mask, w, h) {
+    const n = w * h, seen = new Uint8Array(n), stack = new Int32Array(n), components = [];
+    for (let start = 0; start < n; start++) {
+      if (!mask[start] || seen[start]) continue;
+      let top = 0, cells = [];
+      seen[start] = 1; stack[top++] = start;
+      while (top) {
+        const i = stack[--top]; cells.push(i);
+        const x = i % w, y = (i / w) | 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          const yy = y + dy; if (yy < 0 || yy >= h) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            if ((!dx && !dy) || (dx && dy)) continue; // physical 4-connectivity, never corner-only contact
+            const xx = x + dx; if (xx < 0 || xx >= w) continue;
+            const j = yy * w + xx;
+            if (mask[j] && !seen[j]) { seen[j] = 1; stack[top++] = j; }
+          }
+        }
+      }
+      components.push({ cells, area: cells.length });
+    }
+    for (const comp of components) {
+      comp.boundary = comp.cells.filter(i => {
+        const x = i % w, y = (i / w) | 0;
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          if (!dx && !dy) continue;
+          const xx = x + dx, yy = y + dy;
+          if (xx < 0 || xx >= w || yy < 0 || yy >= h || !mask[yy * w + xx]) return true;
+        }
+        return false;
+      });
+    }
+    return components.sort((a, b) => b.area - a.area);
+  }
+
+  // Exact squared Euclidean distance transform (Felzenszwalb/Huttenlocher).
+  // Used for rounded, bubble-like envelopes instead of hand-drawn straight bridges.
+  function distanceField(source, w, h) {
+    const n = w * h, INF = 1e20, dist = new Float64Array(n), out = new Float32Array(n);
+    for (let y = 0; y < h; y++) {
+      let last = -INF;
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (source[i]) last = x;
+        dist[i] = last < -INF / 2 ? INF : (x - last) ** 2;
+      }
+      last = INF;
+      for (let x = w - 1; x >= 0; x--) {
+        const i = y * w + x;
+        if (source[i]) last = x;
+        if (last < INF / 2) dist[i] = Math.min(dist[i], (last - x) ** 2);
+      }
+    }
+    const v = new Int32Array(Math.max(w, h)), z = new Float64Array(Math.max(w, h) + 1), f = new Float64Array(Math.max(w, h));
+    const transform = (len, get, put) => {
+      for (let i = 0; i < len; i++) f[i] = get(i);
+      let k = 0; v[0] = 0; z[0] = -INF; z[1] = INF;
+      for (let q = 1; q < len; q++) {
+        let s = ((f[q] + q * q) - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]);
+        while (s <= z[k]) {
+          k--;
+          s = ((f[q] + q * q) - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]);
+        }
+        k++; v[k] = q; z[k] = s; z[k + 1] = INF;
+      }
+      k = 0;
+      for (let q = 0; q < len; q++) {
+        while (z[k + 1] < q) k++;
+        put(q, (q - v[k]) ** 2 + f[v[k]]);
+      }
+    };
+    for (let x = 0; x < w; x++) {
+      transform(h, y => dist[y * w + x], (y, value) => { out[y * w + x] = Math.sqrt(value); });
+    }
+    return out;
+  }
+
+  function maskAtDistance(dist, radius, w, h) {
+    const mask = new Uint8Array(w * h);
+    for (let i = 0; i < mask.length; i++) if (dist[i] <= radius) mask[i] = 1;
+    return mask;
+  }
+
+  function connectionRadius(dist, w, h) {
+    if (maskComponents(maskAtDistance(dist, 0, w, h), w, h).length <= 1) return 0;
+    const maxDim = Math.max(w, h);
+    let lo = 0, hi = 1;
+    while (hi < maxDim && maskComponents(maskAtDistance(dist, hi, w, h), w, h).length > 1) { lo = hi; hi *= 2; }
+    while (hi - lo > 1) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (maskComponents(maskAtDistance(dist, mid, w, h), w, h).length <= 1) hi = mid;
+      else lo = mid;
+    }
+    return hi;
+  }
+
+  function findEnclosedHoles(mask, w, h) {
+    const inverted = new Uint8Array(mask.length);
+    for (let i = 0; i < mask.length; i++) inverted[i] = mask[i] ? 0 : 1;
+    const components = maskComponents(inverted, w, h);
+    const holeMap = new Int32Array(mask.length).fill(-1), holes = [];
+    for (const comp of components) {
+      const touchesBorder = comp.cells.some(i => {
+        const x = i % w, y = (i / w) | 0;
+        return x === 0 || x === w - 1 || y === 0 || y === h - 1;
+      });
+      if (touchesBorder) continue;
+      const id = comp.cells[0];
+      let sx = 0, sy = 0;
+      for (const i of comp.cells) { holeMap[i] = id; sx += i % w; sy += (i / w) | 0; }
+      holes.push({ id, area: comp.area, cx: sx / comp.area, cy: sy / comp.area });
+    }
+    return { holeMap, holes };
+  }
+
+  function envelopePrintMask(source, w, h, envelopeMm, pixelSize, lineWidthMm, deletedHoles) {
+    const px = pixelSize > 0 ? pixelSize : 0.1;
+    const marginPx = clamp(envelopeMm / (2 * px), 0.5, 24);
+    const dist = distanceField(source, w, h);
+    const connectPx = connectionRadius(dist, w, h);
+    let mask = maskAtDistance(dist, connectPx + marginPx, w, h);
+    // A small majority relaxation turns the distance-field contour into a soft,
+    // pressure-fit outline rather than a polygonal bridge. Restore every source
+    // pixel afterwards so smoothing can never erase original artwork.
+    mask = smoothBinaryMask(mask, w, h, clamp(Math.round(marginPx / 2), 1, 4), 2, null, 0);
+    for (let i = 0; i < mask.length; i++) if (source[i]) mask[i] = 1;
+    if (maskComponents(mask, w, h).length > 1) {
+      const reconnect = distanceField(mask, w, h);
+      mask = maskAtDistance(reconnect, connectionRadius(reconnect, w, h), w, h);
+    }
+    const { holeMap, holes } = findEnclosedHoles(mask, w, h);
+    const deleted = deletedHoles instanceof Set ? deletedHoles : new Set(deletedHoles || []);
+    for (let i = 0; i < mask.length; i++) {
+      const id = holeMap[i];
+      if (id >= 0 && !deleted.has(id)) mask[i] = 1;
+    }
+    return {
+      mask,
+      componentsBefore: maskComponents(source, w, h).length,
+      componentsAfter: maskComponents(mask, w, h).length,
+      bridges: 0, connectionRadiusMm: connectPx * px,
+      holes, holeMap
+    };
+  }
+
+  // Build a printable silhouette from a near-solid background. Colour alone is
+  // not enough: white faces and highlights must survive. Only pixels connected
+  // to the image border through the selected colour can become empty space.
+  function buildPrintMask(lab, w, h, options, pixelSize) {
+    const n = w * h;
+    let printMask = new Uint8Array(n).fill(1);
+    const requested = options.backgroundMode;
+    const enabled = requested === 'auto' || requested === 'pick';
+    if (!enabled) return { printMask, sourcePrintMask: printMask, background: { enabled: false, mode: 'off', printPixels: n, removedPixels: 0 } };
+    let tolerance = clamp(Number(options.backgroundTolerance) || 8, 1, 40);
+    let seed = null;
+    if (requested === 'pick' && options.backgroundColor) seed = C.hexToLab(options.backgroundColor);
+    if (!seed) {
+      // Dominant Lab bin on the outer frame, robust to a character touching
+      // one part of the border and to slightly off-white PNG backgrounds.
+      const bins = new Map();
+      const add = (i) => {
+        const L = lab[i * 3], a = lab[i * 3 + 1], b = lab[i * 3 + 2];
+        const key = `${Math.round(L / 4)},${Math.round(a / 4)},${Math.round(b / 4)}`;
+        const bin = bins.get(key) || { count: 0, L: 0, a: 0, b: 0 };
+        bin.count++; bin.L += L; bin.a += a; bin.b += b; bins.set(key, bin);
+      };
+      for (let x = 0; x < w; x++) { add(x); add((h - 1) * w + x); }
+      for (let y = 1; y + 1 < h; y++) { add(y * w); add(y * w + w - 1); }
+      let best = null;
+      for (const bin of bins.values()) if (!best || bin.count > best.count) best = bin;
+      seed = best && best.count ? { L: best.L / best.count, a: best.a / best.count, b: best.b / best.count } : { L: 100, a: 0, b: 0 };
+    }
+    // Dark JPEG/WebP backgrounds often contain coloured compression speckles
+    // just above the old ΔE8 boundary. Give automatic mode a stronger floor on
+    // dark artwork only; manual colour picking always honors the exact input.
+    if (requested === 'auto' && seed.L < 45) tolerance = Math.max(tolerance, 12);
+    const similar = new Uint8Array(n);
+    for (let i = 0; i < n; i++) {
+      if (C.deltaE2000(labAt(lab, i), seed) <= tolerance) similar[i] = 1;
+    }
+    const background = new Uint8Array(n);
+    const stack = new Int32Array(n);
+    let top = 0;
+    const seedBorder = (i) => {
+      if (similar[i] && !background[i]) { background[i] = 1; stack[top++] = i; }
+    };
+    for (let x = 0; x < w; x++) { seedBorder(x); seedBorder((h - 1) * w + x); }
+    for (let y = 1; y + 1 < h; y++) { seedBorder(y * w); seedBorder(y * w + w - 1); }
+    while (top) {
+      const i = stack[--top], x = i % w, y = (i / w) | 0;
+      if (x > 0) seedBorder(i - 1);
+      if (x + 1 < w) seedBorder(i + 1);
+      if (y > 0) seedBorder(i - w);
+      if (y + 1 < h) seedBorder(i + w);
+    }
+    let removedPixels = 0;
+    for (let i = 0; i < n; i++) {
+      if (background[i]) { printMask[i] = 0; removedPixels++; }
+    }
+    const sourcePrintMask = new Uint8Array(printMask);
+    let envelope = { componentsBefore: removedPixels < n ? 1 : 0, componentsAfter: removedPixels < n ? 1 : 0, bridges: 0 };
+    const envelopeEnabled = options.backgroundEnvelope !== false;
+    const envelopeMm = clamp(Number(options.backgroundEnvelopeMm) || 1.5, 0.2, 10);
+    if (envelopeEnabled && removedPixels > 0 && removedPixels < n) {
+      const px = pixelSize > 0 ? pixelSize : (Number(options.widthMm) || 150) / w;
+      envelope = envelopePrintMask(printMask, w, h, envelopeMm, px, Number(options.lineWidthMm) || 0.42, new Set(options.backgroundDeletedHoles || []));
+      printMask = envelope.mask;
+      removedPixels = 0;
+      for (let i = 0; i < n; i++) if (!printMask[i]) removedPixels++;
+    }
+    const info = {
+      enabled: true, mode: requested, colorHex: C.labToHex(seed), tolerance,
+      removedPixels, printPixels: n - removedPixels, failed: false,
+      envelope: envelopeEnabled, envelopeMm,
+      componentsBefore: envelope.componentsBefore, componentsAfter: envelope.componentsAfter, bridges: 0,
+      connectionRadiusMm: envelope.connectionRadiusMm || 0,
+      holes: envelope.holes || [], deletedHoles: (envelope.holes || []).filter(h => (options.backgroundDeletedHoles || []).includes(h.id)).length
+    };
+    if (removedPixels === n) {
+      // Never turn a valid image into an empty print. The UI surfaces this as a
+      // failed recognition instead of silently producing an empty 3MF.
+      printMask.fill(1);
+      info.printPixels = n; info.removedPixels = 0; info.failed = true;
+      info.componentsBefore = 1; info.componentsAfter = 1;
+    } else if (!envelopeEnabled) {
+      const actualComponents = maskComponents(printMask, w, h).length;
+      info.componentsBefore = actualComponents; info.componentsAfter = actualComponents;
+    }
+    return { printMask, sourcePrintMask, background: info, holeMap: envelope.holeMap || null };
+  }
+
+  function buildLutPalette(lut, extra) {
+    return lut.palette.map((p, i) => {
+      const hex = (extra && extra.hexOverrides && extra.hexOverrides[i]) || p.hex;
+      const td = (extra && extra.tdOverrides && extra.tdOverrides[i]) || p.td || 5;
+      const rgb = C.hexToRgb(hex);
+      return {
+        index: i, name: p.name, hex, brand: p.brand || 'BambuLab', material: p.material || 'PLA Basic',
+        td, hd: td * 0.1, rgb,
+        lin: { r: C.srgbToLinear(rgb.r / 255), g: C.srgbToLinear(rgb.g / 255), b: C.srgbToLinear(rgb.b / 255) },
+        lab: C.hexToLab(hex), fromLut: true
+      };
+    });
+  }
+
+  function buildUserPalette(list) {
+    return list.map((p, i) => {
+      const hex = p.hex || '#808080';
+      const td = Number(p.td) || 5;
+      const rgb = C.hexToRgb(hex);
+      return {
+        index: i, name: p.name || ('耗材 ' + (i + 1)), hex, brand: p.brand || '', material: p.material || 'PLA',
+        td, hd: td * 0.1, rgb,
+        lin: { r: C.srgbToLinear(rgb.r / 255), g: C.srgbToLinear(rgb.g / 255), b: C.srgbToLinear(rgb.b / 255) },
+        lab: C.hexToLab(hex), fromLut: false
+      };
+    });
+  }
+
+  function nearestPalette(lab, palette) {
+    let best = 0, bestD = Infinity;
+    for (let i = 0; i < palette.length; i++) {
+      const p = palette[i].lab;
+      const dl = lab.L - p.L, da = lab.a - p.a, db = lab.b - p.b;
+      const d = dl * dl + da * da + db * db;
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    return best;
+  }
+
+  function autoStdThreshold(stds) {
+    const values = [];
+    const n = stds.length;
+    const step = Math.max(1, Math.floor(n / 30000));
+    for (let i = 0; i < n; i += step) values.push(stds[i]);
+    values.sort((a, b) => a - b);
+    if (!values.length) return 3;
+    return clamp(values[Math.floor(values.length * 0.55)], 1.2, 8);
+  }
+
+  function labDistSq(lab, i, j) {
+    const dl = lab[i * 3] - lab[j * 3];
+    const da = lab[i * 3 + 1] - lab[j * 3 + 1];
+    const db = lab[i * 3 + 2] - lab[j * 3 + 2];
+    return dl * dl + da * da + db * db;
+  }
+
+  // Line-art detector and thin-stroke map.
+  //
+  // A 1-2 px outline has no area for a meaningful layer stack, and a colour
+  // blind majority filter will happily erase it in favour of the surrounding
+  // fill. Stickers and meme line art need the opposite treatment: keep thin
+  // dark strokes continuous, optionally print them as one direct colour.
+  // Photos, mosaics and impressionist work normally fail the pure-paper gate,
+  // so the automatic mode leaves them alone.
+  function buildStrokeInfo(lab, alpha, w, h) {
+    const n = w * h;
+    const dark = new Uint8Array(n);
+    const chromatic = new Uint8Array(n);
+    const darkCore = new Uint8Array(n);
+    const ink = new Uint8Array(n);
+    const stroke = new Uint8Array(n);
+    let darkCount = 0, veryDark = 0, pureWhite = 0, edgeCount = 0;
+    for (let i = 0; i < n; i++) {
+      const L = lab[i * 3], a = lab[i * 3 + 1], b = lab[i * 3 + 2];
+      const isDark = L < 80;
+      dark[i] = isDark ? 1 : 0;
+      darkCore[i] = L < 24 ? 1 : 0;
+      // Strong line-art mode also supports saturated yellow/blue/red strokes.
+      // Distance-to-non-ink below still rejects the centre of large fills.
+      chromatic[i] = (!isDark && Math.hypot(a, b) >= 18 && L < 96) ? 1 : 0;
+      ink[i] = (isDark || chromatic[i]) ? 1 : 0;
+      if (isDark) darkCount++;
+      if (L < 48) veryDark++;
+      if (L > 96 && Math.hypot(a, b) < 5) pureWhite++;
+      if (i % w !== w - 1 && labDistSq(lab, i, i + 1) > 196) edgeCount++;
+      if (i < n - w && labDistSq(lab, i, i + w) > 196) edgeCount++;
+    }
+    // Distance from every pixel to the nearest non-dark pixel. A dark run
+    // whose centre is within 3 px of a light/filled area is a stroke, not a
+    // broad shadow, so it is safe to protect or direct-print.
+    const dist = new Int16Array(n).fill(-1);
+    const queue = new Int32Array(n);
+    let head = 0, tail = 0;
+    for (let i = 0; i < n; i++) {
+      if (!dark[i] || alpha[i] < 8) { dist[i] = 0; queue[tail++] = i; }
+    }
+    while (head < tail) {
+      const i = queue[head++];
+      const d = dist[i] + 1;
+      const x = i % w, y = (i / w) | 0;
+      if (x > 0 && dist[i - 1] < 0) { dist[i - 1] = d; queue[tail++] = i - 1; }
+      if (x + 1 < w && dist[i + 1] < 0) { dist[i + 1] = d; queue[tail++] = i + 1; }
+      if (y > 0 && dist[i - w] < 0) { dist[i - w] = d; queue[tail++] = i - w; }
+      if (y + 1 < h && dist[i + w] < 0) { dist[i + w] = d; queue[tail++] = i + w; }
+    }
+    // Chromatic strokes get their own distance map. Combining them with dark
+    // ink would make a black line next to a coloured fill lose its protection.
+    const chromaDist = new Int16Array(n).fill(-1), chromaQueue = new Int32Array(n);
+    head = 0; tail = 0;
+    for (let i = 0; i < n; i++) {
+      if (!chromatic[i] || alpha[i] < 8) { chromaDist[i] = 0; chromaQueue[tail++] = i; }
+    }
+    while (head < tail) {
+      const i = chromaQueue[head++], d = chromaDist[i] + 1;
+      const x = i % w, y = (i / w) | 0;
+      if (x > 0 && chromaDist[i - 1] < 0) { chromaDist[i - 1] = d; chromaQueue[tail++] = i - 1; }
+      if (x + 1 < w && chromaDist[i + 1] < 0) { chromaDist[i + 1] = d; chromaQueue[tail++] = i + 1; }
+      if (y > 0 && chromaDist[i - w] < 0) { chromaDist[i - w] = d; chromaQueue[tail++] = i - w; }
+      if (y + 1 < h && chromaDist[i + w] < 0) { chromaDist[i + w] = d; chromaQueue[tail++] = i + w; }
+    }
+    let thinDark = 0;
+    for (let i = 0; i < n; i++) {
+      if ((dark[i] && dist[i] > 0 && dist[i] <= 3) || (chromatic[i] && chromaDist[i] > 0 && chromaDist[i] <= 3)) {
+        stroke[i] = 1; thinDark++;
+      }
+    }
+    const edgeFraction = edgeCount / n;
+    const whiteFraction = pureWhite / n;
+    const darkFraction = darkCount / n;
+    const veryDarkFraction = veryDark / n;
+    const strokeFraction = thinDark / n;
+    const score = clamp(
+      0.35 * Math.min(1, edgeFraction / 0.10) +
+      0.25 * Math.min(1, strokeFraction / 0.02) +
+      0.20 * Math.min(1, whiteFraction / 0.25) +
+      0.20 * Math.min(1, veryDarkFraction / 0.04), 0, 1);
+    const active = whiteFraction > 0.08 && edgeFraction > 0.015 && strokeFraction > 0.004 && score >= 0.45;
+    return {
+      stroke, dark, darkCore, ink, dist, score, active,
+      edgeFraction, whiteFraction, darkFraction, veryDarkFraction, strokeFraction
+    };
+  }
+
+  function repairLineGaps(lab, lineInfo, flatMask, nearest, familyId, lineDirect, lineProtectMask, w, h, printMask, families, palette) {
+    if (!lineProtectMask) return;
+    const addFlat = new Uint8Array(flatMask), addNearest = new Uint16Array(nearest), addFamily = new Int16Array(familyId);
+    const addDirect = lineDirect ? new Uint8Array(lineDirect) : null, addProtect = new Uint8Array(lineProtectMask);
+    const directions = [[1, 0], [0, 1], [1, 1], [1, -1], [-1, 1], [-1, -1], [-1, 0], [0, -1]];
+    const find = (x, y, dx, dy) => {
+      for (let step = 1; step <= 4; step++) {
+        const xx = x + dx * step, yy = y + dy * step;
+        if (xx < 0 || xx >= w || yy < 0 || yy >= h) return -1;
+        const j = yy * w + xx;
+        if (lineProtectMask[j]) return j;
+      }
+      return -1;
+    };
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (lineProtectMask[i] || (!lineInfo.ink[i] && lab[i * 3] >= 90) || (printMask && !printMask[i])) continue;
+        for (const [dx, dy] of directions) {
+          const a = find(x, y, dx, dy), b = find(x, y, -dx, -dy);
+          if (a < 0 || b < 0) continue;
+          const stepA = Math.max(Math.abs(a % w - x), Math.abs(((a / w) | 0) - y));
+          const stepB = Math.max(Math.abs(b % w - x), Math.abs(((b / w) | 0) - y));
+          let source = stepA <= stepB ? a : b;
+          const la = lineProtectMask[a] && flatMask[a] ? palette[nearest[a]].lab.L : (familyId[a] >= 0 ? families[familyId[a]].predictedLab.L : Infinity);
+          const lb = lineProtectMask[b] && flatMask[b] ? palette[nearest[b]].lab.L : (familyId[b] >= 0 ? families[familyId[b]].predictedLab.L : Infinity);
+          if (la < lb) source = a; else if (lb < la) source = b;
+          addFlat[i] = flatMask[source]; addNearest[i] = nearest[source]; addFamily[i] = familyId[source]; addProtect[i] = 1;
+          if (addDirect && (lineDirect[a] || lineDirect[b])) addDirect[i] = 1;
+          break;
+        }
+      }
+    }
+    flatMask.set(addFlat); nearest.set(addNearest); familyId.set(addFamily); lineProtectMask.set(addProtect);
+    if (lineDirect && addDirect) lineDirect.set(addDirect);
+  }
+
+  function chooseStrokeFilament(targetLab, palette) {
+    let best = -1, bestScore = Infinity;
+    const targetC = Math.hypot(targetLab.a, targetLab.b);
+    for (let i = 0; i < palette.length; i++) {
+      const p = palette[i].lab;
+      const pC = Math.hypot(p.a, p.b);
+      // A neutral black outline must stay neutral; a coloured accent may use
+      // a matching hue, but never a far more saturated filament (blue was
+      // creeping onto dark purple hair as a bright fringe before this gate).
+      if (targetC < 12 && pC > 8) continue;
+      if (pC > targetC * 1.25 + 4) continue;
+      if (targetC >= 12 && pC >= 12) {
+        const dot = (targetLab.a * p.a + targetLab.b * p.b) / (targetC * pC);
+        if (dot < 0.95) continue;
+      }
+      const de = C.deltaE2000(targetLab, p);
+      const lift = Math.max(0, p.L - targetLab.L - 10);
+      let score = de + lift * 0.9;
+      if (p.L > 88 && targetLab.L < 62) score += 12;
+      if (score < bestScore) { bestScore = score; best = i; }
+    }
+    if (best < 0 || bestScore > 16) return -1;
+    return best;
+  }
+
+  function buildFlatMask(lab, w, h, palette, opts) {
+    const n = w * h;
+    const stds = localStd(lab, w, h, opts.localRadius || 2);
+    const nearest = new Uint8Array(n);
+    const residual = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const l = labAt(lab, i);
+      const pi = nearestPalette(l, palette);
+      nearest[i] = pi;
+      residual[i] = C.deltaE2000(l, palette[pi].lab);
+    }
+    const stdT = opts.stdThreshold > 0 ? opts.stdThreshold : autoStdThreshold(stds);
+    const resT = opts.residualThreshold > 0 ? opts.residualThreshold : 5;
+    let mask = new Uint8Array(n);
+    for (let i = 0; i < n; i++) mask[i] = (stds[i] <= stdT && residual[i] <= resT) ? 1 : 0;
+    const r = Math.max(1, Math.round(Math.min(w, h) / 500));
+    mask = dilate(mask, w, h, r);
+    mask = erode(mask, w, h, r);
+    const minArea = Math.max(12, Math.round((opts.minFlatPercent || 0.6) / 100 * n));
+    mask = removeSmallComponents(mask, w, h, minArea, 0);
+    mask = removeSmallComponents(mask, w, h, Math.max(12, Math.round(minArea * 0.6)), 1);
+    return { mask, stds, residual, nearest, stdT, resT };
+  }
+
+  function sampleGradientLab(lab, mask, maxSamples, exclude) {
+    const n = mask.length;
+    let useExclude = !!exclude;
+    let count = 0;
+    for (let i = 0; i < n; i++) if (!mask[i] && !(useExclude && exclude[i])) count++;
+    if (count < 24) {
+      // Do not let a very aggressive edge band starve the cluster sampler.
+      useExclude = false;
+      count = 0;
+      for (let i = 0; i < n; i++) if (!mask[i]) count++;
+    }
+    const step = Math.max(1, Math.floor(count / maxSamples));
+    const pts = new Float32Array(Math.min(count, maxSamples) * 3);
+    let out = 0, seen = 0;
+    for (let i = 0; i < n; i++) {
+      if (mask[i]) continue;
+      if (useExclude && exclude[i]) continue;
+      if (seen++ % step) continue;
+      if (out >= pts.length / 3) break;
+      pts[out * 3] = lab[i * 3]; pts[out * 3 + 1] = lab[i * 3 + 1]; pts[out * 3 + 2] = lab[i * 3 + 2];
+      out++;
+    }
+    return pts.subarray(0, out * 3);
+  }
+
+  // Anti-aliased transition pixels are mixtures of two real regions. They
+  // should not become independent HueForge families: with a limited palette
+  // they turn into yellow/red/blue fringes around every dark outline.
+  // Build a band around strong Lab edges, exclude it from k-means training,
+  // then snap its pixels back to families present in the nearby core.
+  function buildEdgeMask(lab, w, h, level) {
+    if (!(level > 0)) return null;
+    const n = w * h;
+    const edge = new Uint8Array(n);
+    const threshold = 100; // 10 ΔE between adjacent pixels
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (x + 1 < w && labDistSq(lab, i, i + 1) > threshold) edge[i] = 1;
+        if (y + 1 < h && labDistSq(lab, i, i + w) > threshold) edge[i] = 1;
+      }
+    }
+    return dilate(edge, w, h, level);
+  }
+
+  function snapEdgeFamilies(lab, flatMask, familyId, edgeMask, protect, families, w, h, radius) {
+    if (!edgeMask) return familyId;
+    const out = new Int16Array(familyId);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (!edgeMask[i] || flatMask[i] || (protect && protect[i])) continue;
+        const l = labAt(lab, i);
+        const curF = familyId[i];
+        const curP = curF >= 0 ? families[curF].predictedLab : null;
+        const curD = curP ? (l.L - curP.L) ** 2 + (l.a - curP.a) ** 2 + (l.b - curP.b) ** 2 : Infinity;
+        let best = -1;
+        // Search ring by ring: a boundary pixel should take the nearest core
+        // family, not jump to a distant colour that happens to be closer in Lab.
+        for (let r = 1; r <= radius && best < 0; r++) {
+          const famCounts = new Map();
+          for (let yy = Math.max(0, y - r); yy <= Math.min(h - 1, y + r); yy++) {
+            for (let xx = Math.max(0, x - r); xx <= Math.min(w - 1, x + r); xx++) {
+              if (Math.max(Math.abs(xx - x), Math.abs(yy - y)) !== r) continue;
+              const j = yy * w + xx;
+              if (j === i || flatMask[j]) continue;
+              if (edgeMask[j] && !(protect && protect[j])) continue;
+              const f = familyId[j];
+              if (f >= 0) famCounts.set(f, (famCounts.get(f) || 0) + 1);
+            }
+          }
+          let localBest = -1, localD = Infinity, localCount = 0;
+          for (const [f, c] of famCounts) {
+            const p = families[f].predictedLab;
+            const d = (l.L - p.L) ** 2 + (l.a - p.a) ** 2 + (l.b - p.b) ** 2;
+            if (d < localD - 25 || (Math.abs(d - localD) <= 25 && c > localCount)) {
+              localD = d; localCount = c; localBest = f;
+            }
+          }
+          if (localBest >= 0) best = localBest;
+        }
+        // Do not trade a plausible edge blend for a much worse colour just
+        // to get a shorter/cleaner recipe. This guard is what keeps "strong"
+        // edge cleanup from making the simulated painting visibly dirtier.
+        if (best >= 0) {
+          const p = families[best].predictedLab;
+          const d = (l.L - p.L) ** 2 + (l.a - p.a) ** 2 + (l.b - p.b) ** 2;
+          if (d <= curD + 16) out[i] = best;
+        }
+      }
+    }
+    return out;
+  }
+
+  function kmeansLab(points, k, seed, iterations) {
+    const count = points.length / 3;
+    if (!count) return [];
+    k = Math.min(k, count);
+    const rand = mulberry32(seed || 1234567);
+    const centers = new Float32Array(k * 3);
+    const first = Math.floor(rand() * count);
+    centers[0] = points[first * 3]; centers[1] = points[first * 3 + 1]; centers[2] = points[first * 3 + 2];
+    const d2 = new Float64Array(count).fill(Infinity);
+    for (let c = 1; c < k; c++) {
+      let total = 0;
+      const cl = centers[(c - 1) * 3], ca = centers[(c - 1) * 3 + 1], cb = centers[(c - 1) * 3 + 2];
+      for (let i = 0; i < count; i++) {
+        const dl = points[i * 3] - cl, da = points[i * 3 + 1] - ca, db = points[i * 3 + 2] - cb;
+        const d = dl * dl + da * da + db * db;
+        if (d < d2[i]) d2[i] = d;
+        total += d2[i];
+      }
+      let target = rand() * total;
+      let idx = 0;
+      for (; idx < count - 1; idx++) { target -= d2[idx]; if (target <= 0) break; }
+      centers[c * 3] = points[idx * 3]; centers[c * 3 + 1] = points[idx * 3 + 1]; centers[c * 3 + 2] = points[idx * 3 + 2];
+    }
+    const sums = new Float64Array(k * 3);
+    const counts = new Uint32Array(k);
+    for (let it = 0; it < (iterations || 10); it++) {
+      sums.fill(0); counts.fill(0);
+      for (let i = 0; i < count; i++) {
+        let best = 0, bestD = Infinity;
+        for (let c = 0; c < k; c++) {
+          const dl = points[i * 3] - centers[c * 3];
+          const da = points[i * 3 + 1] - centers[c * 3 + 1];
+          const db = points[i * 3 + 2] - centers[c * 3 + 2];
+          const d = dl * dl + da * da + db * db;
+          if (d < bestD) { bestD = d; best = c; }
+        }
+        sums[best * 3] += points[i * 3]; sums[best * 3 + 1] += points[i * 3 + 1]; sums[best * 3 + 2] += points[i * 3 + 2];
+        counts[best]++;
+      }
+      for (let c = 0; c < k; c++) {
+        if (counts[c]) {
+          centers[c * 3] = sums[c * 3] / counts[c];
+          centers[c * 3 + 1] = sums[c * 3 + 1] / counts[c];
+          centers[c * 3 + 2] = sums[c * 3 + 2] / counts[c];
+        } else {
+          const idx = Math.floor(rand() * count);
+          centers[c * 3] = points[idx * 3]; centers[c * 3 + 1] = points[idx * 3 + 1]; centers[c * 3 + 2] = points[idx * 3 + 2];
+        }
+      }
+    }
+    const out = [];
+    for (let c = 0; c < k; c++) out.push({ L: centers[c * 3], a: centers[c * 3 + 1], b: centers[c * 3 + 2] });
+    return out;
+  }
+
+  function nearestLut(lab, lut) {
+    const entries = lut.entries;
+    const candidates = [];
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i];
+      const dl = lab.L - e[0], da = lab.a - e[1], db = lab.b - e[2];
+      const d = dl * dl + da * da + db * db;
+      if (candidates.length < 12) {
+        candidates.push({ i, d });
+        if (candidates.length === 12) candidates.sort((x, y) => x.d - y.d);
+      } else if (d < candidates[11].d) {
+        candidates[11] = { i, d };
+        candidates.sort((x, y) => x.d - y.d);
+      }
+    }
+    let best = candidates[0], bestDE = Infinity;
+    for (const cand of candidates) {
+      const e = entries[cand.i];
+      const de = C.deltaE2000(lab, { L: e[0], a: e[1], b: e[2] });
+      if (de < bestDE) { bestDE = de; best = cand; }
+    }
+    const e = entries[best.i];
+    return { index: best.i, lab: { L: e[0], a: e[1], b: e[2] }, recipe: e.slice(3), deltaE: bestDE };
+  }
+
+  function stackTransmission(thickness, hd) {
+    if (!(thickness > 0) || !(hd > 0)) return 1;
+    return Math.pow(10, -thickness / hd);
+  }
+
+  function compositeLinear(bg, seq, palette, layerHeight) {
+    let cur = { r: bg.r, g: bg.g, b: bg.b };
+    for (let i = 0; i < seq.length; i++) {
+      const fg = palette[seq[i]].lin;
+      const hd = palette[seq[i]].hd;
+      const T = stackTransmission(layerHeight, hd);
+      cur = { r: fg.r * (1 - T) + cur.r * T, g: fg.g * (1 - T) + cur.g * T, b: fg.b * (1 - T) + cur.b * T };
+    }
+    return cur;
+  }
+
+  function runsInSeq(seq) {
+    let runs = 0, last = -1;
+    for (const s of seq) { if (s !== last) runs++; last = s; }
+    return runs;
+  }
+
+  function initialSequences(targetLab, palette, foundation, layers) {
+    const nearest = palette.map((p) => ({ i: p.index, de: C.deltaE2000(targetLab, p.lab) })).sort((a, b) => a.de - b.de);
+    const seqs = [];
+    if (nearest.length) seqs.push(new Array(layers).fill(nearest[0].i));
+    if (foundation && foundation.index != null) seqs.push(new Array(layers).fill(foundation.index));
+    seqs.push(new Array(layers).fill(0));
+    if (palette.length > 1) seqs.push(new Array(layers).fill(palette.length - 1));
+    const ramp = [];
+    for (let i = 0; i < layers; i++) ramp.push(nearest[Math.min(nearest.length - 1, i % Math.max(1, nearest.length))].i);
+    seqs.push(ramp);
+    const rand = mulberry32(0xC0FFEE + Math.round(targetLab.L * 31));
+    for (let s = 0; s < 3; s++) {
+      const r = [];
+      for (let i = 0; i < layers; i++) r.push(Math.floor(rand() * palette.length));
+      seqs.push(r);
+    }
+    return seqs;
+  }
+
+  function optimizeTdStack(targetLab, palette, foundation, layerHeight, layers) {
+    const bg = foundation ? foundation.lin : { r: 1, g: 1, b: 1 };
+    const runPenalty = 0.35;
+    let bestSeq = null, bestLab = null, bestCost = Infinity;
+    const consider = (seq) => {
+      const lin = compositeLinear(bg, seq, palette, layerHeight);
+      const lab = C.rgb01ToLab({ r: C.linearToSrgb(lin.r), g: C.linearToSrgb(lin.g), b: C.linearToSrgb(lin.b) });
+      const cost = C.deltaE2000(lab, targetLab) + runPenalty * Math.max(0, runsInSeq(seq) - 1);
+      if (cost < bestCost) { bestCost = cost; bestSeq = seq.slice(); bestLab = lab; }
+      return { lin, lab, cost };
+    };
+    for (const start of initialSequences(targetLab, palette, foundation, layers)) {
+      let seq = start.slice();
+      let cur = consider(seq);
+      for (let pass = 0; pass < 4; pass++) {
+        let improved = false;
+        for (let pos = 0; pos < layers; pos++) {
+          let localBest = null;
+          for (let ci = 0; ci < palette.length; ci++) {
+            if (seq[pos] === ci) continue;
+            const trial = seq.slice(); trial[pos] = ci;
+            const ev = consider(trial);
+            if (!localBest || ev.cost < localBest.cost) localBest = { seq: trial, ...ev };
+          }
+          if (localBest && localBest.cost < cur.cost - 1e-6) { seq = localBest.seq; cur = localBest; improved = true; }
+        }
+        if (!improved) break;
+      }
+    }
+    let beam = [{ seq: [], lin: bg, last: -1, cost: 0 }];
+    const beamWidth = Math.min(220, 40 * palette.length);
+    for (let step = 0; step < layers; step++) {
+      const next = [];
+      for (const st of beam) {
+        for (let ci = 0; ci < palette.length; ci++) {
+          const fg = palette[ci].lin, T = stackTransmission(layerHeight, palette[ci].hd);
+          const lin = { r: fg.r * (1 - T) + st.lin.r * T, g: fg.g * (1 - T) + st.lin.g * T, b: fg.b * (1 - T) + st.lin.b * T };
+          const lab = C.rgb01ToLab({ r: C.linearToSrgb(lin.r), g: C.linearToSrgb(lin.g), b: C.linearToSrgb(lin.b) });
+          const cost = C.deltaE2000(lab, targetLab);
+          next.push({ seq: st.seq.concat([ci]), lin, last: ci, cost });
+        }
+      }
+      next.sort((a, b) => a.cost - b.cost);
+      const dedup = new Map();
+      for (const st of next) {
+        const qr = Math.round(st.lin.r * 40), qg = Math.round(st.lin.g * 40), qb = Math.round(st.lin.b * 40);
+        const key = st.last + '|' + qr + ',' + qg + ',' + qb;
+        if (!dedup.has(key)) dedup.set(key, st);
+        if (dedup.size >= beamWidth) break;
+      }
+      beam = Array.from(dedup.values());
+    }
+    for (const st of beam) {
+      const lab = C.rgb01ToLab({ r: C.linearToSrgb(st.lin.r), g: C.linearToSrgb(st.lin.g), b: C.linearToSrgb(st.lin.b) });
+      const cost = C.deltaE2000(lab, targetLab) + runPenalty * Math.max(0, runsInSeq(st.seq) - 1);
+      if (cost < bestCost) { bestCost = cost; bestSeq = st.seq.slice(); bestLab = lab; }
+    }
+    const lin = compositeLinear(bg, bestSeq, palette, layerHeight);
+    return {
+      seq: bestSeq, lin, lab: bestLab,
+      deltaE: C.deltaE2000(bestLab, targetLab),
+      hex: C.linearToHex(lin)
+    };
+  }
+
+  function compositeLab(bg, seq, palette, layerHeight) {
+    const lin = compositeLinear(bg, seq, palette, layerHeight);
+    return {
+      lin,
+      lab: C.rgb01ToLab({ r: C.linearToSrgb(lin.r), g: C.linearToSrgb(lin.g), b: C.linearToSrgb(lin.b) })
+    };
+  }
+
+  // Enumerate the reachable color gamut for the selected filaments. With a
+  // small palette this is exact (e.g. 4 colors × 6 layers = 5,460 stacks), so
+  // matching is not greedy and unreachable colors become measurable gaps.
+  function buildTdGamut(palette, foundation, layerHeight, maxLayers, variableHeight) {
+    const bg = foundation ? foundation.lin : { r: 1, g: 1, b: 1 };
+    const K = palette.length;
+    const budget = 120000;
+    const entries = [];
+    const seen = new Map();
+    const pushSeq = (seq, runs) => {
+      const { lin, lab } = compositeLab(bg, seq, palette, layerHeight);
+      const key = Math.round(lab.L * 2) + '|' + Math.round(lab.a * 2) + '|' + Math.round(lab.b * 2)
+        + (variableHeight ? '|' + seq.length : '');
+      const existing = seen.get(key);
+      if (existing !== undefined) {
+        if (!variableHeight && entries[existing].seq.length > seq.length) {
+          entries[existing] = { seq: seq.slice(), lab, lin, length: seq.length, runs, hex: C.linearToHex(lin) };
+        }
+        return;
+      }
+      seen.set(key, entries.length);
+      entries.push({ seq: seq.slice(), lab, lin, length: seq.length, runs, hex: C.linearToHex(lin) });
+    };
+    const permutations = (r) => {
+      const out = [];
+      const used = new Uint8Array(K);
+      const arr = [];
+      const rec = () => {
+        if (arr.length === r) { out.push(arr.slice()); return; }
+        for (let c = 0; c < K; c++) {
+          if (used[c]) continue;
+          used[c] = 1; arr.push(c); rec(); arr.pop(); used[c] = 0;
+        }
+      };
+      rec();
+      return out;
+    };
+    const compositions = (total, parts, cb) => {
+      const arr = new Array(parts);
+      const rec = (idx, remaining) => {
+        if (idx === parts - 1) {
+          if (remaining <= 0) return;
+          arr[idx] = remaining;
+          cb(arr);
+          return;
+        }
+        const minRest = parts - idx - 1;
+        for (let len = 1; len <= remaining - minRest; len++) {
+          arr[idx] = len;
+          rec(idx + 1, remaining - len);
+        }
+      };
+      rec(0, total);
+    };
+    const buildRunSeq = (colors, lengths) => {
+      const seq = [];
+      for (let i = 0; i < colors.length; i++) {
+        for (let l = 0; l < lengths[i]; l++) seq.push(colors[i]);
+      }
+      return seq;
+    };
+    const maxRuns = Math.min(K, 5);
+    for (let r = 1; r <= maxRuns; r++) {
+      if (entries.length >= budget) break;
+      const quota = r <= 2 ? budget : r === 3 ? 52000 : r === 4 ? 38000 : 26000;
+      let made = 0;
+      const perms = permutations(r);
+      const totals = variableHeight
+        ? Array.from({ length: maxLayers - r + 1 }, (_, i) => r + i)
+        : [maxLayers];
+      for (const perm of perms) {
+        if (made >= quota || entries.length >= budget) break;
+        for (const total of totals) {
+          if (made >= quota || entries.length >= budget) break;
+          compositions(total, r, (lengths) => {
+            if (made >= quota || entries.length >= budget) return;
+            pushSeq(buildRunSeq(perm, lengths), r);
+            made++;
+          });
+        }
+      }
+    }
+    // For large heights the composition space can explode. Fill the remainder
+    // with deterministic run-sampled stacks (still contiguous, never A-B-A-B).
+    if (maxLayers > 10 && entries.length < budget) {
+      const rand = mulberry32(0xB10C5);
+      let guard = 0;
+      while (entries.length < budget && guard++ < budget * 3) {
+        const r = 1 + Math.floor(rand() * maxRuns);
+        const colors = [];
+        const used = new Uint8Array(K);
+        while (colors.length < r) {
+          const c = Math.floor(rand() * K);
+          if (!used[c]) { used[c] = 1; colors.push(c); }
+        }
+        const total = variableHeight
+          ? r + Math.floor(rand() * (maxLayers - r + 1))
+          : maxLayers;
+        // random positive composition
+        const lengths = new Array(r).fill(1);
+        let extra = total - r;
+        while (extra > 0) {
+          const i = Math.floor(rand() * r);
+          lengths[i]++; extra--;
+        }
+        pushSeq(buildRunSeq(colors, lengths), r);
+      }
+    }
+    return entries;
+  }
+
+  function matchGamutAtLength(targetLab, gamut, length) {
+    let best = null, bestScore = Infinity, bestDE = Infinity;
+    for (const g of gamut) {
+      if (g.length !== length) continue;
+      const de = C.deltaE2000(targetLab, g.lab);
+      const score = de + 0.12 * Math.max(0, (g.runs || 1) - 1);
+      if (score < bestScore) { bestScore = score; bestDE = de; best = g; }
+    }
+    return best ? {
+      seq: best.seq.slice(), lab: best.lab, lin: best.lin, hex: best.hex,
+      deltaE: bestDE, length: best.length, runs: best.runs
+    } : null;
+  }
+
+  function matchGamut(targetLab, gamut) {
+    if (!gamut || !gamut.length) return null;
+    // Color first, with a short-stack tie-break: a color that is within 0.5 ΔE
+    // of the best match uses the shortest recipe. This keeps relief lower
+    // without sacrificing visible color, and makes limited-palette gaps honest.
+    const shortlist = [];
+    const keep = 28;
+    for (let i = 0; i < gamut.length; i++) {
+      const e = gamut[i].lab;
+      const dl = targetLab.L - e.L, da = targetLab.a - e.a, db = targetLab.b - e.b;
+      const d = dl * dl + da * da + db * db;
+      if (shortlist.length < keep) {
+        shortlist.push({ i, d });
+        if (shortlist.length === keep) shortlist.sort((a, b) => a.d - b.d);
+      } else if (d < shortlist[keep - 1].d) {
+        shortlist[keep - 1] = { i, d };
+        shortlist.sort((a, b) => a.d - b.d);
+      }
+    }
+    let chosen = null, bestScore = Infinity, bestDE = Infinity;
+    for (const c of shortlist) {
+      const g = gamut[c.i];
+      const de = C.deltaE2000(targetLab, g.lab);
+      const score = de + 0.12 * Math.max(0, (g.runs || 1) - 1);
+      if (score < bestScore) { bestScore = score; bestDE = de; chosen = c.i; }
+    }
+    if (chosen == null) return null;
+    const g = gamut[chosen];
+    return {
+      seq: g.seq.slice(), lab: g.lab, lin: g.lin, hex: g.hex,
+      deltaE: bestDE, length: g.length, runs: g.runs
+    };
+  }
+
+  function suggestFilamentForLab(targetLab, palette) {
+    const all = (CS.FILAMENT_DB && CS.FILAMENT_DB.filaments) || [];
+    const used = new Set((palette || []).map(p => (p.name + '|' + p.hex).toLowerCase()));
+    const basics = all.filter(f => f.brand === 'BambuLab Basic' && f.material === 'PLA');
+    const db = basics.length ? basics : all;
+    let best = null, bestD = Infinity;
+    for (const f of db) {
+      if (used.has((f.name + '|' + f.hex).toLowerCase())) continue;
+      const fl = C.hexToLab(f.hex);
+      const d = C.deltaE2000(targetLab, fl);
+      if (d < bestD) { bestD = d; best = f; }
+    }
+    return best ? { name: best.name, hex: best.hex, brand: best.brand, material: best.material, deltaE: C.deltaE2000(targetLab, C.hexToLab(best.hex)) } : null;
+  }
+
+  function assignFamilies(lab, mask, predictedLabs, w, h, strokeMask) {
+    const n = w * h;
+    const familyId = new Int16Array(n).fill(-1);
+    const counts = new Uint32Array(predictedLabs.length);
+    for (let i = 0; i < n; i++) {
+      if (mask[i]) continue;
+      const l = labAt(lab, i);
+      const onStroke = !!(strokeMask && strokeMask[i]);
+      let best = -1, bestD = Infinity;
+      for (let f = 0; f < predictedLabs.length; f++) {
+        const p = predictedLabs[f];
+        const dl = l.L - p.L, da = l.a - p.a, db = l.b - p.b;
+        let d = dl * dl + da * da + db * db;
+        // A dark stroke may be reproduced by a light recipe only if there is
+        // no dark alternative. The quadratic lift makes that very expensive.
+        if (onStroke) {
+          const lift = Math.max(0, p.L - l.L - 10);
+          d += 3.0 * lift * lift;
+        }
+        if (d < bestD) { bestD = d; best = f; }
+      }
+      familyId[i] = best;
+      if (best >= 0) counts[best]++;
+    }
+    return { familyId, counts };
+  }
+
+  function meanLabForFamilies(lab, mask, familyId, familyCount) {
+    const sums = new Float64Array(familyCount * 3);
+    const counts = new Uint32Array(familyCount);
+    for (let i = 0; i < mask.length; i++) {
+      const f = familyId[i];
+      if (f < 0) continue;
+      sums[f * 3] += lab[i * 3]; sums[f * 3 + 1] += lab[i * 3 + 1]; sums[f * 3 + 2] += lab[i * 3 + 2];
+      counts[f]++;
+    }
+    const centers = [];
+    for (let f = 0; f < familyCount; f++) {
+      if (!counts[f]) continue;
+      centers.push({ L: sums[f * 3] / counts[f], a: sums[f * 3 + 1] / counts[f], b: sums[f * 3 + 2] / counts[f], count: counts[f] });
+    }
+    return centers;
+  }
+
+  function matchGamutPrefix(targetLab, gamut, prefix) {
+    let best = null, bestScore = Infinity, bestDE = Infinity;
+    const b = prefix.length;
+    for (const g of gamut) {
+      if (g.length < b) continue;
+      let ok = true;
+      for (let i = 0; i < b; i++) if (g.seq[i] !== prefix[i]) { ok = false; break; }
+      if (!ok) continue;
+      const de = C.deltaE2000(targetLab, g.lab);
+      const score = de + 0.12 * Math.max(0, (g.runs || 1) - 1);
+      if (score < bestScore) { bestScore = score; bestDE = de; best = g; }
+    }
+    if (!best) return null;
+    return {
+      seq: best.seq.slice(), lab: best.lab, lin: best.lin, hex: best.hex,
+      deltaE: bestDE, length: best.length, runs: best.runs
+    };
+  }
+
+  function mergeCommonBases(families, gamut, threshold, maxLayers) {
+    if (!(threshold > 0) || !gamut || !gamut.length) return { groups: 0, sharedPixels: 0 };
+    const list = families.filter(f => f.pixelCount > 0);
+    const n = list.length;
+    for (const f of families) f.sharedBaseLayers = 0;
+    if (n < 2) return { groups: 0, sharedPixels: 0 };
+    // Greedy groups around a weighted target-color center. Plain union-find
+    // would chain a whole smooth gradient into one giant group, which then
+    // can only share a very short base. Centered groups keep the threshold
+    // meaningful and let close colors share a longer common bottom.
+    const groups = [];
+    const sorted = list.slice().sort((a, b) => b.pixelCount - a.pixelCount);
+    for (const f of sorted) {
+      let best = null, bestDE = Infinity;
+      for (const g of groups) {
+        const de = C.deltaE2000(f.targetLab, g.centerLab);
+        if (de <= threshold && de < bestDE) { bestDE = de; best = g; }
+      }
+      if (best) {
+        const w0 = best.weight, w1 = f.pixelCount;
+        const tw = w0 + w1;
+        best.centerLab = {
+          L: (best.centerLab.L * w0 + f.targetLab.L * w1) / tw,
+          a: (best.centerLab.a * w0 + f.targetLab.a * w1) / tw,
+          b: (best.centerLab.b * w0 + f.targetLab.b * w1) / tw
+        };
+        best.weight = tw;
+        best.members.push(f);
+      } else {
+        groups.push({ centerLab: { L: f.targetLab.L, a: f.targetLab.a, b: f.targetLab.b }, weight: f.pixelCount, members: [f] });
+      }
+    }
+    let mergedGroups = 0, sharedPixels = 0;
+    for (const g of groups) {
+      const group = g.members;
+      if (group.length < 2) continue;
+      const byPixels = group.slice().sort((a, b) => b.pixelCount - a.pixelCount);
+      const byL = group.slice().sort((a, b) => a.targetLab.L - b.targetLab.L);
+      const sources = [byPixels[0], byL[Math.floor(byL.length / 2)]]
+        .filter((f, i, arr) => f && arr.indexOf(f) === i);
+      let bestCandidate = null;
+      for (const source of sources) {
+        const maxB = Math.min(source.recipe.length, maxLayers) - 1;
+        for (let b = maxB; b >= 2; b--) {
+          if (bestCandidate && b <= bestCandidate.b) break;
+          const base = source.recipe.slice(0, b);
+          const picks = [];
+          let ok = true, totalDE = 0;
+          for (const f of group) {
+            const m = matchGamutPrefix(f.targetLab, gamut, base);
+            if (!m || m.deltaE > f.deltaE + threshold) { ok = false; break; }
+            picks.push({ f, m });
+            totalDE += m.deltaE * f.pixelCount;
+          }
+          if (!ok) continue;
+          if (!bestCandidate || b > bestCandidate.b || (b === bestCandidate.b && totalDE < bestCandidate.totalDE)) {
+            bestCandidate = { b, base, picks, totalDE };
+          }
+          break; // largest valid b for this source
+        }
+      }
+      if (!bestCandidate) continue;
+      mergedGroups++;
+      for (const { f, m } of bestCandidate.picks) {
+        f.predictedLab = m.lab;
+        f.predictedHex = m.hex;
+        f.recipe = m.seq;
+        f.layers = m.seq.length;
+        f.deltaE = m.deltaE;
+        f.topLayer = (f.topLayer || 0); // recalculated below by caller
+        f.sharedBaseLayers = bestCandidate.b;
+        sharedPixels += f.pixelCount;
+      }
+    }
+    return { groups: mergedGroups, sharedPixels };
+  }
+
+  function mergeIneffectiveHeights(families, familyId, threshold, minGap) {
+    const result = { changed: 0, groups: 0, oldMax: 0, newMax: 0, savedLayers: 0, savedLayerPixels: 0, threshold: threshold || 0 };
+    if (!(threshold > 0)) return result;
+    const entries = [];
+    for (let i = 0; i < families.length; i++) {
+      const f = families[i];
+      if (f.pixelCount > 0 && f.recipe && f.recipe.length) entries.push({ f, idx: i });
+    }
+    if (entries.length < 2) return result;
+    result.oldMax = entries.reduce((m, e) => Math.max(m, e.f.recipe.length), 0);
+    const minSupport = 0.75; // a short recipe must represent a sizeable area
+    let changedAny = false;
+    for (let pass = 0; pass < 3; pass++) {
+      const sorted = entries.slice().sort((a, b) => b.f.recipe.length - a.f.recipe.length);
+      let passChanged = 0;
+      for (const e of sorted) {
+        const f = e.f;
+        if (f.recipe.length <= minGap) continue;
+        let best = null;
+        for (const c of entries) {
+          if (c === e) continue;
+          const cand = c.f;
+          if (!cand.recipe || cand.pixelCount <= 0) continue;
+          if (f.recipe.length - cand.recipe.length < minGap) continue;
+          if (cand.pixelCount < f.pixelCount * minSupport) continue;
+          const predDE = C.deltaE2000(f.predictedLab, cand.predictedLab);
+          if (predDE > threshold) continue;
+          const targetDE = C.deltaE2000(f.targetLab, cand.predictedLab);
+          if (targetDE > f.deltaE + threshold + 0.25) continue;
+          if (!best || cand.recipe.length < best.recipe.length ||
+            (cand.recipe.length === best.recipe.length && cand.pixelCount > best.pixelCount)) {
+            best = cand;
+          }
+        }
+        if (!best) continue;
+        const oldLen = f.recipe.length;
+        f.recipe = best.recipe.slice();
+        f.layers = f.recipe.length;
+        f.predictedLab = { L: best.predictedLab.L, a: best.predictedLab.a, b: best.predictedLab.b };
+        f.predictedHex = best.predictedHex;
+        f.deltaE = C.deltaE2000(f.targetLab, f.predictedLab);
+        f.sharedBaseLayers = 0;
+        result.savedLayerPixels += (oldLen - f.recipe.length) * f.pixelCount;
+        result.savedLayers += oldLen - f.recipe.length;
+        result.changed++;
+        passChanged++;
+        changedAny = true;
+      }
+      if (!passChanged) break;
+    }
+    // Collapse families that ended up with exactly the same recipe + colour.
+    // This is what makes two spatially separate patches truly one recipe, not
+    // just two identical entries in the list.
+    const groups = new Map();
+    for (const e of entries) {
+      const f = e.f;
+      if (f.pixelCount <= 0) continue;
+      const key = f.recipe.join(',') + '|' + f.predictedHex;
+      const arr = groups.get(key);
+      if (arr) arr.push(e); else groups.set(key, [e]);
+    }
+    const remap = new Map();
+    for (const arr of groups.values()) {
+      if (arr.length < 2) continue;
+      arr.sort((a, b) => b.f.pixelCount - a.f.pixelCount);
+      const canon = arr[0];
+      for (let i = 1; i < arr.length; i++) {
+        const f = arr[i].f;
+        canon.f.pixelCount += f.pixelCount;
+        f.pixelCount = 0;
+        f.sharedBaseLayers = 0;
+        remap.set(arr[i].idx, canon.idx);
+        result.groups++;
+      }
+    }
+    if (remap.size) {
+      for (let i = 0; i < familyId.length; i++) {
+        const f = familyId[i];
+        if (f < 0) continue;
+        const c = remap.get(f);
+        if (c !== undefined) familyId[i] = c;
+      }
+    }
+    result.newMax = entries.reduce((m, e) => Math.max(m, e.f.pixelCount > 0 ? e.f.recipe.length : 0), 0);
+    result.remap = remap;
+    result.changedAny = changedAny;
+    return result;
+  }
+
+  function labelFamilyComponents(familyId, flatMask, w, h) {
+    const n = w * h;
+    const label = new Int32Array(n).fill(-1);
+    const compArea = [];
+    const stack = new Int32Array(n);
+    for (let start = 0; start < n; start++) {
+      if (label[start] !== -1 || flatMask[start] || familyId[start] < 0) continue;
+      const f = familyId[start];
+      const id = compArea.length;
+      let top = 0; stack[top++] = start; label[start] = id;
+      let area = 0;
+      while (top) {
+        const i = stack[--top]; area++;
+        const x = i % w, y = (i / w) | 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          const yy = y + dy; if (yy < 0 || yy >= h) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            if (!dx && !dy) continue;
+            const xx = x + dx; if (xx < 0 || xx >= w) continue;
+            const j = yy * w + xx;
+            if (label[j] === -1 && !flatMask[j] && familyId[j] === f) { label[j] = id; stack[top++] = j; }
+          }
+        }
+      }
+      compArea.push(area);
+    }
+    return { label, compArea };
+  }
+
+  function forceVectorBoundaries(lab, flatMask, nearest, familyId, families, palette, w, h, minAnchorPx, protect, band) {
+    const labeled = labelFamilyComponents(familyId, flatMask, w, h);
+    const label = labeled.label, compArea = labeled.compArea;
+    let changed = 0;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (!band[i] || flatMask[i] || (protect && protect[i])) continue;
+        const l = labAt(lab, i);
+        let bestKind = 0, bestIdx = -1, bestD = Infinity, bestCount = 0;
+        for (let r = 1; r <= 4 && !bestKind; r++) {
+          const famCounts = new Map(), flatCounts = new Map();
+          for (let yy = Math.max(0, y - r); yy <= Math.min(h - 1, y + r); yy++) {
+            for (let xx = Math.max(0, x - r); xx <= Math.min(w - 1, x + r); xx++) {
+              if (Math.max(Math.abs(xx - x), Math.abs(yy - y)) !== r) continue;
+              const j = yy * w + xx;
+              if (j === i) continue;
+              if (flatMask[j]) {
+                const fi = nearest[j];
+                if (fi !== 0xffff) flatCounts.set(fi, (flatCounts.get(fi) || 0) + 1);
+                continue;
+              }
+              const cid = label[j];
+              if (cid >= 0 && (compArea[cid] >= minAnchorPx || (protect && protect[j]))) {
+                const f = familyId[j];
+                famCounts.set(f, (famCounts.get(f) || 0) + 1);
+              }
+            }
+          }
+          let localKind = 0, localIdx = -1, localD = Infinity, localCount = 0;
+          for (const [fi, c] of flatCounts) {
+            const p = palette[fi].lab;
+            const d = (l.L - p.L) ** 2 + (l.a - p.a) ** 2 + (l.b - p.b) ** 2;
+            if (d < localD - 25 || (Math.abs(d - localD) <= 25 && c > localCount)) { localD = d; localCount = c; localIdx = fi; localKind = 1; }
+          }
+          for (const [f, c] of famCounts) {
+            const p = families[f].predictedLab;
+            const d = (l.L - p.L) ** 2 + (l.a - p.a) ** 2 + (l.b - p.b) ** 2;
+            if (d < localD - 25 || (Math.abs(d - localD) <= 25 && c > localCount)) { localD = d; localCount = c; localIdx = f; localKind = 2; }
+          }
+          if (localKind) { bestKind = localKind; bestIdx = localIdx; }
+        }
+        if (bestKind === 1) {
+          flatMask[i] = 1; nearest[i] = bestIdx; familyId[i] = -1; changed++;
+        } else if (bestKind === 2) {
+          familyId[i] = bestIdx; changed++;
+        }
+      }
+    }
+    return changed;
+  }
+
+  function mergeSmallFamilyComponents(familyId, flatMask, nearest, families, w, h, minAreaPx, edgeMask, protect) {
+    const n = w * h;
+    const label = new Int32Array(n).fill(-1);
+    const compArea = [];
+    const compHasCore = [];
+    const compProtected = [];
+    const stack = new Int32Array(n);
+    for (let start = 0; start < n; start++) {
+      if (label[start] !== -1 || flatMask[start] || familyId[start] < 0) continue;
+      const f = familyId[start];
+      const id = compArea.length;
+      let top = 0; stack[top++] = start; label[start] = id;
+      let area = 0;
+      let hasCore = 0, protectedComp = 0;
+      while (top) {
+        const i = stack[--top]; area++;
+        if (edgeMask && !edgeMask[i]) hasCore = 1;
+        if (protect && protect[i]) protectedComp = 1;
+        const x = i % w, y = (i / w) | 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          const yy = y + dy; if (yy < 0 || yy >= h) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            if (!dx && !dy) continue;
+            const xx = x + dx; if (xx < 0 || xx >= w) continue;
+            const j = yy * w + xx;
+            if (label[j] === -1 && !flatMask[j] && familyId[j] === f) {
+              label[j] = id; stack[top++] = j;
+            }
+          }
+        }
+      }
+      compArea.push(area);
+      compHasCore.push(hasCore);
+      compProtected.push(protectedComp);
+    }
+    let mergedPixels = 0;
+    for (let i = 0; i < n; i++) {
+      const cid = label[i];
+      if (cid < 0 || compArea[cid] >= minAreaPx) continue;
+      // Only edge-only islands (no core pixel outside the anti-alias band)
+      // are removed. A small but genuine fill (red ribbon, eye highlight)
+      // always has a core and is preserved.
+      if (compHasCore[cid] || compProtected[cid]) continue;
+      const x = i % w, y = (i / w) | 0;
+      const famCount = new Map();
+      const flatCount = new Map();
+      for (let dy = -1; dy <= 1; dy++) {
+        const yy = y + dy; if (yy < 0 || yy >= h) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          if (!dx && !dy) continue;
+          const xx = x + dx; if (xx < 0 || xx >= w) continue;
+          const j = yy * w + xx;
+          if (j === i) continue;
+          if (flatMask[j]) {
+            const fi = nearest[j];
+            if (fi !== 0xffff) flatCount.set(fi, (flatCount.get(fi) || 0) + 1);
+            continue;
+          }
+          const lj = label[j];
+          if (lj >= 0 && lj !== cid && compArea[lj] >= minAreaPx) {
+            const f = familyId[j];
+            famCount.set(f, (famCount.get(f) || 0) + 1);
+          }
+        }
+      }
+      let bestF = -1, bestN = 0;
+      for (const [f, c] of famCount) if (c > bestN) { bestN = c; bestF = f; }
+      let bestFlat = -1, bestFN = bestN;
+      for (const [fi, c] of flatCount) if (c > bestFN) { bestFN = c; bestFlat = fi; }
+      if (bestFlat >= 0) {
+        flatMask[i] = 1;
+        nearest[i] = bestFlat;
+        familyId[i] = -1;
+        mergedPixels++;
+      } else if (bestF >= 0) {
+        familyId[i] = bestF;
+        mergedPixels++;
+      }
+    }
+    return { label, compArea, mergedPixels };
+  }
+
+  // Final, representation-independent cleanup. Earlier stages operate on
+  // either the flat mask or a gradient family, so a tiny island can survive
+  // simply by crossing that boundary (or by carrying a protected-stroke bit).
+  // Here a region means one actual printable assignment: flat filament or
+  // gradient family. Small regions are absorbed by the closest-colour neighbour,
+  // using shared border as a tie-break and stable/large targets to avoid cycles.
+  function mergeSmallRegions(flatMask, nearest, familyId, lab, families, palette, w, h, minAreaPx, eligibleMask, protectedMask) {
+    const n = w * h;
+    const result = { mergedPixels: 0, mergedComponents: 0, passes: 0, converged: true };
+    if (!(minAreaPx > 1)) return result;
+    for (let pass = 0; pass < 16; pass++) {
+      const keys = new Int32Array(n);
+      for (let i = 0; i < n; i++) {
+        // Positive = flat filament + 1; negative = -(family + 2).
+        // The extra offset keeps both flat 0 and gradient -1 unambiguous.
+        keys[i] = flatMask[i] ? nearest[i] + 1 : -(familyId[i] + 2);
+      }
+      const label = new Int32Array(n).fill(-1);
+      const compArea = [], compEligible = [], compLab = [], compProtected = [], compSpan = [];
+      const stack = new Int32Array(n);
+      for (let start = 0; start < n; start++) {
+        if (label[start] !== -1) continue;
+        const key = keys[start], id = compArea.length;
+        let top = 0, area = 0, eligible = 1, protectedComp = 0, sumL = 0, sumA = 0, sumB = 0;
+        let minX = w, minY = h, maxX = -1, maxY = -1;
+        stack[top++] = start; label[start] = id;
+        while (top) {
+          const i = stack[--top]; area++;
+          sumL += lab[i * 3]; sumA += lab[i * 3 + 1]; sumB += lab[i * 3 + 2];
+          if (eligibleMask && !eligibleMask[i]) eligible = 0;
+          if (protectedMask && protectedMask[i]) protectedComp = 1;
+          const x = i % w, y = (i / w) | 0;
+          minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+          for (let dy = -1; dy <= 1; dy++) {
+            const yy = y + dy; if (yy < 0 || yy >= h) continue;
+            for (let dx = -1; dx <= 1; dx++) {
+              if (!dx && !dy) continue;
+              const xx = x + dx; if (xx < 0 || xx >= w) continue;
+              const j = yy * w + xx;
+              if (label[j] === -1 && keys[j] === key) { label[j] = id; stack[top++] = j; }
+            }
+          }
+        }
+        compArea.push(area); compEligible.push(eligible); compProtected.push(protectedComp);
+        compSpan.push(Math.max(maxX - minX + 1, maxY - minY + 1));
+        compLab.push({ L: sumL / area, a: sumA / area, b: sumB / area });
+      }
+      const targets = new Int32Array(compArea.length);
+      const votesByComponent = [];
+      for (let i = 0; i < n; i++) {
+        const cid = label[i], area = compArea[cid];
+        if (area >= minAreaPx || !compEligible[cid] || (compProtected[cid] && area > 1 && compSpan[cid] >= 3)) continue;
+        const x = i % w, y = (i / w) | 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          const yy = y + dy; if (yy < 0 || yy >= h) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            if (!dx && !dy) continue;
+            const xx = x + dx; if (xx < 0 || xx >= w) continue;
+            const j = yy * w + xx, nid = label[j];
+            if (nid === cid) continue;
+            const otherArea = compArea[nid];
+            // Small components may only grow into a stable component, a
+            // larger one, or a deterministic tie-break. This prevents swaps.
+            if (otherArea < minAreaPx && (otherArea < area || (otherArea === area && nid > cid))) continue;
+            const votes = votesByComponent[cid] || (votesByComponent[cid] = new Map());
+            const vote = votes.get(nid) || { count: 0, key: keys[j], area: otherArea, nid };
+            vote.count++; votes.set(nid, vote);
+          }
+        }
+      }
+      let changedPass = 0, componentsPass = 0;
+      for (let cid = 0; cid < compArea.length; cid++) {
+        const votes = votesByComponent[cid];
+        if (!votes) continue;
+        let best = null;
+        for (const vote of votes.values()) {
+          const fi = -vote.key - 2;
+          const candidateLab = vote.key > 0 ? palette[vote.key - 1].lab : (families[fi] ? families[fi].predictedLab : compLab[cid]);
+          vote.de = C.deltaE2000(compLab[cid], candidateLab);
+          // Colour fidelity comes first; shared border and component size only
+          // break near-colour ties. Otherwise a red accent beside a long black
+          // outline would be absorbed into black merely because black is long.
+          if (!best || vote.de < best.de - 0.05 ||
+            (Math.abs(vote.de - best.de) <= 0.05 && vote.count > best.count) ||
+            (Math.abs(vote.de - best.de) <= 0.05 && vote.count === best.count && vote.area > best.area) ||
+            (Math.abs(vote.de - best.de) <= 0.05 && vote.count === best.count && vote.area === best.area && vote.nid < best.nid)) best = vote;
+        }
+        if (best) { targets[cid] = best.key; componentsPass++; }
+      }
+      for (let i = 0; i < n; i++) {
+        const target = targets[label[i]];
+        if (!target) continue;
+        if (target > 0) {
+          flatMask[i] = 1; nearest[i] = target - 1; familyId[i] = -1;
+        } else {
+          flatMask[i] = 0; familyId[i] = -target - 2;
+        }
+        changedPass++;
+      }
+      if (!changedPass) break;
+      if (pass === 15) result.converged = false;
+      result.mergedPixels += changedPass;
+      result.mergedComponents += componentsPass;
+      result.passes = pass + 1;
+    }
+    return result;
+  }
+
+  function smoothUnifiedRegions(flatMask, nearest, familyId, printMask, w, h, radius, protect, lab, families, palette) {
+    const n = w * h;
+    let srcFlat = new Uint8Array(flatMask), srcNearest = new Uint16Array(nearest), srcFamily = new Int16Array(familyId);
+    const passes = radius > 1 ? 2 : 1;
+    const sigma2 = Math.max(0.5, (radius / 1.5) ** 2);
+    let changedTotal = 0;
+    for (let pass = 0; pass < passes; pass++) {
+      const outFlat = new Uint8Array(srcFlat), outNearest = new Uint16Array(srcNearest), outFamily = new Int16Array(srcFamily);
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const i = y * w + x;
+          if (printMask && !printMask[i]) continue;
+          const protectedCenter = !!(protect && protect[i]);
+          const votes = new Map();
+          for (let yy = Math.max(0, y - radius); yy <= Math.min(h - 1, y + radius); yy++) {
+            for (let xx = Math.max(0, x - radius); xx <= Math.min(w - 1, x + radius); xx++) {
+              const dx = xx - x, dy = yy - y, d2 = dx * dx + dy * dy;
+              if (d2 > radius * radius) continue;
+              const j = yy * w + xx;
+              if (printMask && !printMask[j]) continue;
+              if (protectedCenter && !(protect && protect[j])) continue;
+              const key = srcFlat[j] ? srcNearest[j] + 1 : -(srcFamily[j] + 2);
+              if (protectedCenter && lab) {
+                const fi = key > 0 ? key - 1 : -key - 2;
+                const candidate = key > 0 ? palette[fi] && palette[fi].lab : (families[fi] && families[fi].predictedLab);
+                if (candidate && candidate.L > lab[i * 3] + 10) continue;
+              }
+              const weight = d2 === 0 ? 3 : Math.exp(-d2 / (2 * sigma2));
+              votes.set(key, (votes.get(key) || 0) + weight);
+            }
+          }
+          let best = srcFlat[i] ? srcNearest[i] + 1 : -(srcFamily[i] + 2), bestCount = 0;
+          for (const [key, count] of votes) if (count > bestCount) { best = key; bestCount = count; }
+          const oldKey = srcFlat[i] ? srcNearest[i] + 1 : -(srcFamily[i] + 2);
+          if (best === oldKey) continue;
+          if (best > 0) {
+            outFlat[i] = 1; outNearest[i] = best - 1; outFamily[i] = -1;
+          } else {
+            outFlat[i] = 0; outFamily[i] = -best - 2;
+          }
+          changedTotal++;
+        }
+      }
+      srcFlat = outFlat; srcNearest = outNearest; srcFamily = outFamily;
+    }
+    flatMask.set(srcFlat); nearest.set(srcNearest); familyId.set(srcFamily);
+    return changedTotal;
+  }
+
+  function smoothParams(level, family) {
+    if (level <= 0) return null;
+    if (!family) {
+      if (level <= 1) return null;
+      if (level === 2) return { r: 1, passes: 1 };
+      if (level === 3) return { r: 1, passes: 2 };
+      return { r: 2, passes: 1 };
+    }
+    if (level === 1) return { r: 1, passes: 1 };
+    if (level === 2) return { r: 2, passes: 1 };
+    if (level === 3) return { r: 2, passes: 2 };
+    return { r: 3, passes: 2 };
+  }
+
+  // Physical smoothing: the user specifies the smallest structure worth
+  // printing in millimetres. A majority radius of r removes details roughly
+  // 2r pixels wide, so r = smoothMm / (2 * pixelSize). This keeps the result
+  // consistent when the same artwork is printed at 80 mm or 300 mm, and with
+  // different nozzle widths.
+  function physicalSmoothParams(smoothMm, pixelSize) {
+    if (!(smoothMm > 0) || !(pixelSize > 0)) return { familyR: 0, flatR: 0, passes: 0 };
+    const familyR = Math.max(0, Math.round(smoothMm / (2 * pixelSize)));
+    const flatR = familyR > 0 ? Math.max(1, Math.round(familyR * 0.5)) : 0;
+    return { familyR, flatR, passes: familyR > 0 ? 1 : 0 };
+  }
+
+  function smoothBinaryMask(mask, w, h, radius, passes, lab, colorTol) {
+    let src = new Uint8Array(mask);
+    const tol2 = colorTol ? colorTol * colorTol : 0;
+    for (let pass = 0; pass < passes; pass++) {
+      const out = new Uint8Array(src.length);
+      for (let y = 0; y < h; y++) {
+        const y0 = Math.max(0, y - radius), y1 = Math.min(h - 1, y + radius);
+        for (let x = 0; x < w; x++) {
+          const i = y * w + x;
+          const x0 = Math.max(0, x - radius), x1 = Math.min(w - 1, x + radius);
+          let ones = 0, total = 0;
+          for (let yy = y0; yy <= y1; yy++) {
+            for (let xx = x0; xx <= x1; xx++) {
+              const j = yy * w + xx;
+              // Edge-aware pass: a white paper neighbour must not erase a
+              // thin dark stroke, and a dark neighbour must not bleed into it.
+              if (lab && tol2 && i !== j && labDistSq(lab, i, j) > tol2) continue;
+              const wgt = (yy === y && xx === x) ? 2 : 1;
+              total += wgt;
+              if (src[j]) ones += wgt;
+            }
+          }
+          out[i] = total ? (ones * 2 > total ? 1 : 0) : src[i];
+        }
+      }
+      src = out;
+    }
+    return src;
+  }
+
+  function smoothFamilyMap(mask, familyId, familyCount, families, w, h, radius, passes, lab, colorTol, protect) {
+    let src = new Int16Array(familyId);
+    const counts = new Uint32Array(familyCount);
+    const tol2 = colorTol ? colorTol * colorTol : 0;
+    const touched = [];
+    for (let pass = 0; pass < passes; pass++) {
+      const out = new Int16Array(src);
+      for (let y = 0; y < h; y++) {
+        const y0 = Math.max(0, y - radius), y1 = Math.min(h - 1, y + radius);
+        for (let x = 0; x < w; x++) {
+          const i = y * w + x;
+          if (mask[i] || src[i] < 0) continue;
+          // Protect the stroke's coverage, not every noisy recipe inside it.
+          // A protected pixel votes only with other protected stroke pixels:
+          // the surrounding paper still cannot erase the line, while a long
+          // outline converges to a continuous family instead of dotted stacks.
+          const protectedCenter = !!(protect && protect[i]);
+          const x0 = Math.max(0, x - radius), x1 = Math.min(w - 1, x + radius);
+          touched.length = 0;
+          let best = src[i], bestCount = 0;
+          for (let yy = y0; yy <= y1; yy++) {
+            for (let xx = x0; xx <= x1; xx++) {
+              const j = yy * w + xx;
+              if (mask[j]) continue;
+              if (protectedCenter && !(protect && protect[j])) continue;
+              if (!protectedCenter && lab && tol2 && j !== i && labDistSq(lab, i, j) > tol2) continue;
+              const f = src[j];
+              if (f < 0) continue;
+              if (protectedCenter && lab && families && families[f] && families[f].predictedLab.L > lab[i * 3] + 10) continue;
+              const wgt = (yy === y && xx === x) ? 2 : 1;
+              const c = counts[f];
+              if (c === 0) touched.push(f);
+              counts[f] = c + wgt;
+              if (c + wgt > bestCount) { bestCount = c + wgt; best = f; }
+            }
+          }
+          for (const f of touched) counts[f] = 0;
+          out[i] = bestCount ? best : src[i];
+        }
+      }
+      src = out;
+    }
+    return src;
+  }
+
+  function buildPlan(imageData, options) {
+    const w = imageData.width, h = imageData.height, n = w * h;
+    const engine = options.engine === 'td' ? 'td' : 'lut';
+    const layerHeight = engine === 'lut' ? (options.lutLayerHeight || 0.08) : (Number(options.layerHeight) || 0.08);
+    const flatTopMm = Number(options.flatTopMm) || (engine === 'lut' ? 1.6 : 2.0);
+    const reliefMm = Number(options.reliefMm) || 0;
+    const pixelSize = (Number(options.widthMm) || 150) / w;
+    const { lab, alpha } = imageToLab(imageData);
+    const { printMask, sourcePrintMask, background, holeMap } = buildPrintMask(lab, w, h, options, pixelSize);
+
+    let lut = null, palette = null, foundation = null, colorLayers, baseLayers, baseIndex;
+    if (engine === 'lut') {
+      const key = options.lutKey || 'bambu_8';
+      const all = CS.LUT_DATA && CS.LUT_DATA.lut;
+      lut = all && all[key];
+      if (!lut) throw new Error('LUT 数据未加载');
+      palette = buildLutPalette(lut, options);
+      colorLayers = lut.colorLayers || 5;
+      baseLayers = lut.baseLayers || 10;
+      baseIndex = lut.baseIndex || 0;
+      foundation = palette[baseIndex];
+    } else {
+      palette = buildUserPalette(options.palette || []);
+      if (!palette.length) throw new Error('请至少选择一种耗材');
+      colorLayers = clamp(Math.round(Number(options.gradLayers) || 6), 1, 24);
+      baseLayers = 0;
+      baseIndex = clamp(Math.round(Number(options.foundationIndex) || 0), 0, palette.length - 1);
+      foundation = palette[baseIndex];
+    }
+
+    let flatMask, stds, residual, nearest, stdT, resT;
+    const auto = buildFlatMask(lab, w, h, palette, options);
+    stds = auto.stds; residual = auto.residual; nearest = auto.nearest; stdT = auto.stdT; resT = auto.resT;
+    if (options.maskOverride && options.maskOverride.length === n) flatMask = new Uint8Array(options.maskOverride);
+    else flatMask = auto.mask;
+    const smoothLevel = clamp(Math.round(Number(options.smoothLevel) || 0), 0, 4);
+    const lineMode = (options.lineProtect === 'strong' || options.lineProtect === 'off') ? options.lineProtect : 'auto';
+    // Detection is cheap and runs every time: the UI can explain why a
+    // sticker got line protection and a photo did not.
+    const lineInfo = buildStrokeInfo(lab, alpha, w, h);
+    const lineActive = lineMode !== 'off' && (lineMode === 'strong' || lineInfo.active);
+    lineInfo.applied = lineActive;
+    lineInfo.mode = lineMode;
+    const edgeCleanRequested = clamp(Math.round(Number(options.edgeClean == null ? 1 : options.edgeClean) || 0), 0, 3);
+    let edgeCleanLevel = edgeCleanRequested;
+    let edgeMask = null;
+    let edgePixelCount = 0;
+    let lineProtectMask = lineActive ? new Uint8Array(lineInfo.stroke) : null;
+    if (lineActive) for (let i = 0; i < n; i++) if (lineInfo.darkCore[i]) lineProtectMask[i] = 1;
+    let lineDirect = null;
+    if (lineActive && lineMode === 'strong' && !options.maskOverride) {
+      lineDirect = new Uint8Array(n);
+      for (let i = 0; i < n; i++) {
+        if ((lineInfo.stroke[i] && (lab[i * 3] < 55 || Math.hypot(lab[i * 3 + 1], lab[i * 3 + 2]) >= 12)) || lineInfo.darkCore[i]) lineDirect[i] = 1;
+      }
+      // One pixel of growth into the surrounding dark ink reaches a stripe
+      // width that a 0.4 mm nozzle can actually lay down. Without it a 1 px
+      // source outline becomes a dashed line no matter how good the recipes.
+      const grown = dilate(lineDirect, w, h, 1);
+      for (let i = 0; i < n; i++) {
+        if (!lineDirect[i] && grown[i] && lineInfo.ink[i]) lineDirect[i] = 1;
+      }
+      for (let i = 0; i < n; i++) {
+        if (!lineDirect[i]) continue;
+        const fi = chooseStrokeFilament(labAt(lab, i), palette);
+        if (fi >= 0) nearest[i] = fi;
+        else lineDirect[i] = 0;
+      }
+      // Anti-aliased grey fringe is part of the same stroke, even when its RGB
+      // is too far from black to be accepted on its own. Inherit only from a
+      // nearby accepted stroke core; never paint arbitrary grey areas black.
+      const accepted = new Uint8Array(lineDirect);
+      for (let i = 0; i < n; i++) {
+        if (lineDirect[i] || !lineInfo.stroke[i] || !lineInfo.ink[i] || lab[i * 3] >= 90) continue;
+        const x = i % w, y = (i / w) | 0;
+        const votes = new Map();
+        for (let yy = Math.max(0, y - 3); yy <= Math.min(h - 1, y + 3); yy++) {
+          for (let xx = Math.max(0, x - 3); xx <= Math.min(w - 1, x + 3); xx++) {
+            const j = yy * w + xx;
+            if (!accepted[j]) continue;
+            const fi = nearest[j];
+            votes.set(fi, (votes.get(fi) || 0) + 1);
+          }
+        }
+        let best = -1, count = 0;
+        for (const [fi, c] of votes) if (c > count) { best = fi; count = c; }
+        if (best >= 0) { lineDirect[i] = 1; nearest[i] = best; }
+      }
+      for (let i = 0; i < n; i++) if (lineDirect[i]) lineProtectMask[i] = 1;
+    }
+    const flatSmoothLevel = smoothParams(smoothLevel, false);
+    const familySmoothLevel = smoothParams(smoothLevel, true);
+    const lineWidthMm = Number(options.lineWidthMm) || 0.42;
+    const smoothMm = options.smoothMm != null ? Math.max(0, Number(options.smoothMm) || 0) : null;
+    const physSmooth = smoothMm != null ? physicalSmoothParams(smoothMm, pixelSize) : null;
+    const flatSmooth = smoothMm != null
+      ? (physSmooth.flatR > 0 ? { r: physSmooth.flatR, passes: physSmooth.passes } : null)
+      : flatSmoothLevel;
+    if (flatSmooth) {
+      flatMask = smoothBinaryMask(flatMask, w, h, flatSmooth.r, flatSmooth.passes,
+        lineActive ? lab : null, lineActive ? 11 : 0);
+    }
+    if (lineDirect) for (let i = 0; i < n; i++) if (lineDirect[i]) flatMask[i] = 1;
+
+    const flatLayers = Math.max(2, Math.round(flatTopMm / layerHeight));
+    const reliefLayers = Math.round(reliefMm / layerHeight);
+    const startOverride = Math.round(Number(options.gradStartLayerOverride) || 0);
+    const topOverride = Number(options.gradTopMmOverride) || 0;
+    let gradTopLayer, gradStartLayer;
+    if (engine === 'lut') {
+      const minTop = baseLayers + colorLayers;
+      if (startOverride > 0) {
+        gradStartLayer = Math.max(baseLayers, startOverride);
+        gradTopLayer = gradStartLayer + colorLayers;
+      } else {
+        gradTopLayer = Math.max(minTop, flatLayers + reliefLayers);
+        gradStartLayer = gradTopLayer - colorLayers;
+      }
+    } else {
+      if (topOverride > 0) {
+        const desiredTop = clamp(Math.round(topOverride / layerHeight), 2, 240);
+        gradStartLayer = startOverride > 0
+          ? Math.max(1, startOverride)
+          : Math.max(1, desiredTop - colorLayers);
+        let maxTop = gradStartLayer + 24;
+        gradTopLayer = clamp(desiredTop, gradStartLayer + 1, maxTop);
+        colorLayers = gradTopLayer - gradStartLayer;
+      } else if (startOverride > 0) {
+        gradStartLayer = Math.max(1, startOverride);
+        gradTopLayer = gradStartLayer + colorLayers;
+      } else {
+        gradTopLayer = Math.max(1, flatLayers + reliefLayers);
+        gradStartLayer = Math.max(1, gradTopLayer - colorLayers);
+        gradTopLayer = gradStartLayer + colorLayers;
+      }
+    }
+    let maxLayers = Math.max(flatLayers, gradTopLayer);
+
+    let flatCount = flatMask.reduce((a, b) => a + b, 0);
+    let gradCount = n - flatCount;
+    // On nearly flat line art the gradient core is too small and the edge
+    // band would starve the colour sampler. Keep the old behaviour there;
+    // edge cleanup is for images with a real gradient area.
+    if (edgeCleanRequested > 0 && gradCount >= n * 0.20) {
+      edgeCleanLevel = edgeCleanRequested;
+      edgeMask = buildEdgeMask(lab, w, h, edgeCleanLevel);
+      for (let i = 0; i < n; i++) if (edgeMask[i]) edgePixelCount++;
+    } else {
+      edgeCleanLevel = 0;
+    }
+    const variableHeight = engine === 'td' && options.variableHeight !== false;
+    const gamut = engine === 'td' && gradCount > 0
+      ? buildTdGamut(palette, foundation, layerHeight, colorLayers, variableHeight)
+      : null;
+    let families = [];
+    let heightMerge = null;
+    let vectorInfo = null;
+    let mergeResult = { groups: 0, sharedPixels: 0 };
+    let structureCleanup = { mergedPixels: 0, mergedComponents: 0, passes: 0, converged: true, minAreaPx: 0, featureMm: 0, edgeOnly: false };
+    let familyId = new Int16Array(n).fill(-1);
+    let predicted = new Array(n);
+    let familyPixels = new Uint32Array(0);
+
+    if (gradCount > 0) {
+      const K = clamp(Math.round(Number(options.families) || 96), 2, 256);
+      const samples = sampleGradientLab(lab, flatMask, 12000, edgeMask);
+      const familyCenters = kmeansLab(samples, Math.min(K, Math.max(2, Math.floor(samples.length / 6))), 1234567, 10);
+
+      const buildFamilies = (centers) => {
+        const fams = [];
+        const predLabs = [];
+        for (const center of centers) {
+          if (engine === 'lut') {
+            const m = nearestLut(center, lut);
+            const seq = m.recipe.slice().reverse();
+            fams.push({
+              targetLab: center, targetHex: C.labToHex(center), predictedLab: m.lab, predictedHex: C.labToHex(m.lab),
+              recipe: seq, lutIndex: m.index, deltaE: m.deltaE, pixelCount: 0,
+              layers: seq.length, topLayer: gradStartLayer + seq.length,
+              topMm: (gradStartLayer + seq.length) * layerHeight
+            });
+            predLabs.push(m.lab);
+          } else {
+            let opt = gamut ? matchGamut(center, gamut) : null;
+            if (!opt) {
+              opt = optimizeTdStack(center, palette, foundation, layerHeight, colorLayers);
+              opt.length = opt.seq.length;
+            }
+            fams.push({
+              targetLab: center, targetHex: C.labToHex(center), predictedLab: opt.lab, predictedHex: opt.hex,
+              recipe: opt.seq, deltaE: opt.deltaE, pixelCount: 0,
+              layers: opt.seq.length, topLayer: gradStartLayer + opt.seq.length,
+              topMm: (gradStartLayer + opt.seq.length) * layerHeight
+            });
+            predLabs.push(opt.lab);
+          }
+        }
+        return { fams, predLabs };
+      };
+
+      let built = buildFamilies(familyCenters);
+      let assigned = assignFamilies(lab, flatMask, built.predLabs, w, h, lineProtectMask);
+      familyId = assigned.familyId;
+      familyPixels = assigned.counts;
+
+      const refinedCenters = meanLabForFamilies(lab, flatMask, familyId, built.fams.length);
+      if (refinedCenters.length >= 2) {
+        const built2 = buildFamilies(refinedCenters.map(c => ({ L: c.L, a: c.a, b: c.b })));
+        const assigned2 = assignFamilies(lab, flatMask, built2.predLabs, w, h, lineProtectMask);
+        families = built2.fams;
+        familyId = assigned2.familyId;
+        familyPixels = assigned2.counts;
+      } else {
+        families = built.fams;
+      }
+      const familySmooth = smoothMm != null
+        ? (physSmooth.familyR > 0 ? { r: physSmooth.familyR, passes: physSmooth.passes } : null)
+        : familySmoothLevel;
+      if (familySmooth) {
+        familyId = smoothFamilyMap(flatMask, familyId, families.length, families, w, h, familySmooth.r, familySmooth.passes,
+          lineActive ? lab : null, lineActive ? 11 : 0, lineActive ? lineProtectMask : null);
+        familyPixels = new Uint32Array(families.length);
+        for (let i = 0; i < n; i++) if (!flatMask[i] && familyId[i] >= 0) familyPixels[familyId[i]]++;
+      }
+      repairLineGaps(lab, lineInfo, flatMask, nearest, familyId, lineDirect, lineProtectMask, w, h, printMask, families, palette);
+      const lineDirectFilament = lineDirect ? new Uint16Array(nearest) : null;
+      if (edgeMask) {
+        familyId = snapEdgeFamilies(lab, flatMask, familyId, edgeMask, lineProtectMask, families, w, h, edgeCleanLevel);
+        familyPixels = new Uint32Array(families.length);
+        for (let i = 0; i < n; i++) if (!flatMask[i] && familyId[i] >= 0) familyPixels[familyId[i]]++;
+      }
+      for (let f = 0; f < families.length; f++) families[f].pixelCount = familyPixels[f] || 0;
+      let vectorConverted = { families: 0, pixels: 0 };
+      vectorInfo = vectorConverted;
+      if (options.vectorFlat && gradCount > 0) {
+        // Vector-like direct colour: a large, colour-uniform family whose mean
+        // is already close to a real filament does not need a layer stack.
+        // Printing it as a solid patch removes the first-layer red/blue
+        // speckle from stickers without turning the whole image flat.
+        const fc = families.length;
+        const sums = [new Float64Array(fc), new Float64Array(fc), new Float64Array(fc)];
+        const sqs = [new Float64Array(fc), new Float64Array(fc), new Float64Array(fc)];
+        const fCount = new Uint32Array(fc);
+        for (let i = 0; i < n; i++) {
+          if (flatMask[i]) continue;
+          const f = familyId[i];
+          if (f < 0) continue;
+          const L = lab[i * 3], a = lab[i * 3 + 1], b = lab[i * 3 + 2];
+          sums[0][f] += L; sums[1][f] += a; sums[2][f] += b;
+          sqs[0][f] += L * L; sqs[1][f] += a * a; sqs[2][f] += b * b;
+          fCount[f]++;
+        }
+        const pixelAreaMm2 = pixelSize * pixelSize;
+        const minAreaMm2 = Math.max(0.4, (lineWidthMm * 2) ** 2 * 1.5);
+        const vectorStd = 8;
+        const tolDE = Math.max(6, resT + 2);
+        const map = new Map();
+        for (let f = 0; f < fc; f++) {
+          const cnt = fCount[f];
+          if (!cnt || cnt * pixelAreaMm2 < minAreaMm2) continue;
+          const vL = Math.max(0, sqs[0][f] / cnt - (sums[0][f] / cnt) ** 2);
+          const vA = Math.max(0, sqs[1][f] / cnt - (sums[1][f] / cnt) ** 2);
+          const vB = Math.max(0, sqs[2][f] / cnt - (sums[2][f] / cnt) ** 2);
+          if (Math.sqrt(vL + vA + vB) > 15) continue;
+          // Judge the *top* colour, not the average source patch: a white
+          // highlight whose first recipe layer happens to be red/blue should
+          // still become direct white.
+          const pp = families[f].predictedLab;
+          const pi = nearestPalette(pp, palette);
+          const de = C.deltaE2000(pp, palette[pi].lab);
+          if (de > tolDE || de > families[f].deltaE + 3.0) continue;
+          map.set(f, pi);
+          vectorConverted.families++;
+        }
+        if (map.size) {
+          for (let i = 0; i < n; i++) {
+            if (flatMask[i]) continue;
+            const f = familyId[i];
+            if (f < 0) continue;
+            const pi = map.get(f);
+            if (pi === undefined) continue;
+            flatMask[i] = 1;
+            nearest[i] = pi;
+            familyId[i] = -1;
+            vectorConverted.pixels++;
+          }
+          flatCount = 0;
+          for (let i = 0; i < n; i++) if (flatMask[i]) flatCount++;
+          gradCount = n - flatCount;
+          for (const f of map.keys()) families[f].pixelCount = 0;
+          familyPixels = new Uint32Array(families.length);
+          for (let i = 0; i < n; i++) if (!flatMask[i] && familyId[i] >= 0) familyPixels[familyId[i]]++;
+          for (let f = 0; f < families.length; f++) families[f].pixelCount = familyPixels[f] || 0;
+        }
+      }
+      if (options.vectorFlat) {
+        // Vector boundaries need a minimum region size. Merge tiny same-family
+        // islands into a large neighbouring region/flat colour so the first
+        // recipe layer does not get a fringe of red/blue speckles.
+        const minAreaMm2 = (lineWidthMm * 2) ** 2 * 0.9;
+        const minAreaPx = Math.max(6, Math.round(minAreaMm2 / (pixelSize * pixelSize)));
+        const islands = mergeSmallFamilyComponents(familyId, flatMask, nearest, families, w, h, minAreaPx, edgeMask, lineProtectMask);
+        if (islands.mergedPixels) {
+          if (vectorInfo) { vectorInfo.islandsMerged = (vectorInfo.islandsMerged || 0) + 1; vectorInfo.islandPixels = (vectorInfo.islandPixels || 0) + islands.mergedPixels; }
+          flatCount = 0;
+          for (let i = 0; i < n; i++) if (flatMask[i]) flatCount++;
+          gradCount = n - flatCount;
+          familyPixels = new Uint32Array(families.length);
+          for (let i = 0; i < n; i++) if (!flatMask[i] && familyId[i] >= 0) familyPixels[familyId[i]]++;
+          for (let f = 0; f < families.length; f++) families[f].pixelCount = familyPixels[f] || 0;
+        }
+        // Watershed-style vector boundary: every pixel in a wide anti-alias
+        // band is claimed by the nearest *large* region or flat patch. Small
+        // edge families no longer get their own recipe, so the first layer
+        // has clean borders instead of red/blue speckles.
+        const band = buildEdgeMask(lab, w, h, 3);
+        if (band) {
+          const anchorPx = Math.max(8, Math.round(((lineWidthMm * 2) ** 2) / (pixelSize * pixelSize)));
+          const forced = forceVectorBoundaries(lab, flatMask, nearest, familyId, families, palette, w, h, anchorPx, lineProtectMask, band);
+          if (forced) {
+            if (vectorInfo) vectorInfo.boundaryPixels = (vectorInfo.boundaryPixels || 0) + forced;
+            flatCount = 0;
+            for (let i = 0; i < n; i++) if (flatMask[i]) flatCount++;
+            gradCount = n - flatCount;
+            familyPixels = new Uint32Array(families.length);
+            for (let i = 0; i < n; i++) if (!flatMask[i] && familyId[i] >= 0) familyPixels[familyId[i]]++;
+            for (let f = 0; f < families.length; f++) families[f].pixelCount = familyPixels[f] || 0;
+            // One more conservative island pass for leftovers.
+            const leftovers = mergeSmallFamilyComponents(familyId, flatMask, nearest, families, w, h, anchorPx, band, lineProtectMask);
+            if (vectorInfo && leftovers.mergedPixels) {
+              vectorInfo.islandsMerged = (vectorInfo.islandsMerged || 0) + 1;
+              vectorInfo.islandPixels = (vectorInfo.islandPixels || 0) + leftovers.mergedPixels;
+            }
+            flatCount = 0;
+            for (let i = 0; i < n; i++) if (flatMask[i]) flatCount++;
+            gradCount = n - flatCount;
+            familyPixels = new Uint32Array(families.length);
+            for (let i = 0; i < n; i++) if (!flatMask[i] && familyId[i] >= 0) familyPixels[familyId[i]]++;
+            for (let f = 0; f < families.length; f++) families[f].pixelCount = familyPixels[f] || 0;
+          }
+        }
+      }
+      // Edge snapping and vector boundary growth are deliberately local and
+      // pixel-by-pixel, so they can recreate one-pixel recipe islands after
+      // the first smoothing pass. Finish with the same physical-radius vote;
+      // protected strokes still vote only within the stroke, never with paper.
+      if (familySmooth && (edgeMask || options.vectorFlat)) {
+        familyId = smoothFamilyMap(flatMask, familyId, families.length, families, w, h, familySmooth.r, familySmooth.passes,
+          lineActive ? lab : null, lineActive ? 11 : 0, lineActive ? lineProtectMask : null);
+        familyPixels = new Uint32Array(families.length);
+        for (let i = 0; i < n; i++) if (!flatMask[i] && familyId[i] >= 0) familyPixels[familyId[i]]++;
+        for (let f = 0; f < families.length; f++) families[f].pixelCount = familyPixels[f] || 0;
+      }
+      if (options.vectorFlat) {
+        // Round, weighted neighbourhood voting smooths actual colour-region
+        // contours after edge/vector reassignment, without touching background
+        // or allowing paper neighbours to cut into a protected stroke.
+        const contourRadius = clamp((smoothMm > 0 ? physSmooth.flatR : 0) || Math.max(1, Math.round(lineWidthMm / pixelSize)), 1, 4);
+        const changed = smoothUnifiedRegions(flatMask, nearest, familyId, printMask, w, h, contourRadius, lineActive ? lineProtectMask : null, lab, families, palette);
+        if (vectorInfo) vectorInfo.contourPixels = (vectorInfo.contourPixels || 0) + changed;
+        flatCount = 0;
+        familyPixels = new Uint32Array(families.length);
+        for (let i = 0; i < n; i++) {
+          if (!printMask[i]) continue;
+          if (flatMask[i]) flatCount++;
+          else if (familyId[i] >= 0) familyPixels[familyId[i]]++;
+        }
+        gradCount = n - flatCount;
+        for (let f = 0; f < families.length; f++) families[f].pixelCount = familyPixels[f] || 0;
+      }
+      const physicalCleanup = smoothMm > 0 && physSmooth.familyR > 0;
+      const cleanupFeatureMm = Math.max(
+        physicalCleanup ? lineWidthMm * 2 : 0,
+        options.vectorFlat ? lineWidthMm * 2 : 0,
+        edgeCleanLevel > 0 ? lineWidthMm * 2 : 0
+      );
+      if (cleanupFeatureMm > 0) {
+        // A circular feature of diameter D has area π(D/2)². Use that physical
+        // area for isolated-region cleanup; majority smoothing alone cannot
+        // guarantee a minimum connected component, especially at mask edges.
+        const minAreaPx = Math.max(2, Math.round(Math.PI * (cleanupFeatureMm / 2) ** 2 / (pixelSize * pixelSize)));
+        const edgeOnly = !physicalCleanup && !options.vectorFlat && edgeCleanLevel > 0 && edgeCleanLevel < 3;
+        structureCleanup = mergeSmallRegions(flatMask, nearest, familyId, lab, families, palette, w, h, minAreaPx, edgeOnly ? edgeMask : null, lineProtectMask);
+        structureCleanup.minAreaPx = minAreaPx;
+        structureCleanup.featureMm = cleanupFeatureMm;
+        structureCleanup.edgeOnly = edgeOnly;
+        if (structureCleanup.mergedPixels) {
+          flatCount = 0;
+          familyPixels = new Uint32Array(families.length);
+          for (let i = 0; i < n; i++) {
+            if (flatMask[i]) flatCount++;
+            else if (familyId[i] >= 0) familyPixels[familyId[i]]++;
+          }
+          gradCount = n - flatCount;
+          for (let f = 0; f < families.length; f++) families[f].pixelCount = familyPixels[f] || 0;
+          if (lineDirect) for (let i = 0; i < n; i++) {
+            if (!flatMask[i] || nearest[i] !== lineDirectFilament[i]) lineDirect[i] = 0;
+          }
+        }
+      }
+      if (engine === 'td' && gamut && Number(options.mergeDeltaE) > 0) {
+        mergeResult = mergeCommonBases(families, gamut, Number(options.mergeDeltaE), colorLayers);
+        for (const f of families) {
+          if (!f.pixelCount) continue;
+          f.topLayer = gradStartLayer + f.recipe.length;
+          f.topMm = (gradStartLayer + f.recipe.length) * layerHeight;
+        }
+      }
+      if (engine === 'td' && variableHeight && colorLayers > 0) {
+        // Honor the user's maximum-height setting: if all recipes came out
+        // shorter, lift the largest color family to the configured top layer.
+        const currentMax = families.reduce((m, f) => Math.max(m, f.pixelCount > 0 ? f.recipe.length : 0), 0);
+        if (currentMax < colorLayers) {
+          let targetF = -1, bestCount = -1;
+          for (let f = 0; f < families.length; f++) {
+            if (families[f].pixelCount > bestCount) { bestCount = families[f].pixelCount; targetF = f; }
+          }
+          if (targetF >= 0) {
+            const lifted = gamut ? matchGamutAtLength(families[targetF].targetLab, gamut, colorLayers) : null;
+            if (lifted) {
+              families[targetF].predictedLab = lifted.lab;
+              families[targetF].predictedHex = lifted.hex;
+              families[targetF].recipe = lifted.seq;
+              families[targetF].layers = lifted.seq.length;
+              families[targetF].deltaE = lifted.deltaE;
+              families[targetF].topLayer = gradStartLayer + lifted.seq.length;
+              families[targetF].topMm = (gradStartLayer + lifted.seq.length) * layerHeight;
+            }
+          }
+        }
+      }
+      let heightMergeLocal = null;
+      if (engine === 'td' && variableHeight) {
+        const hmDE = options.heightMergeDeltaE == null ? 1.5 : Number(options.heightMergeDeltaE);
+        heightMergeLocal = mergeIneffectiveHeights(families, familyId, hmDE, 4);
+        heightMerge = heightMergeLocal;
+        if (heightMergeLocal.changed || heightMergeLocal.groups) {
+          familyPixels = new Uint32Array(families.length);
+          for (let i = 0; i < n; i++) if (!flatMask[i] && familyId[i] >= 0) familyPixels[familyId[i]]++;
+          for (let f = 0; f < families.length; f++) families[f].pixelCount = familyPixels[f] || 0;
+          let shared = 0;
+          for (const f of families) if (f.pixelCount > 0 && f.sharedBaseLayers >= 2) shared += f.pixelCount;
+          mergeResult.sharedPixels = shared;
+        }
+      }
+      for (const f of families) {
+        if (!f.pixelCount) continue;
+        f.topLayer = gradStartLayer + f.recipe.length;
+        f.topMm = (gradStartLayer + f.recipe.length) * layerHeight;
+      }
+      for (let i = 0; i < n; i++) {
+        if (flatMask[i]) predicted[i] = { lab: palette[nearest[i]].lab, hex: palette[nearest[i]].hex, filamentIndex: nearest[i] };
+        else { const f = familyId[i]; const fam = families[f]; predicted[i] = { lab: fam.predictedLab, hex: fam.predictedHex, family: f }; }
+      }
+    } else {
+      // Even an all-flat plan can contain isolated direct-colour pixels (most
+      // visibly after a manual mask override). Apply the same nozzle-scale
+      // island cleanup here instead of skipping it with the gradient branch.
+      if (smoothMm > 0 && physSmooth.familyR > 0) {
+        const featureMm = lineWidthMm * 2;
+        const minAreaPx = Math.max(2, Math.round(Math.PI * (featureMm / 2) ** 2 / (pixelSize * pixelSize)));
+        structureCleanup = mergeSmallRegions(flatMask, nearest, familyId, lab, families, palette, w, h, minAreaPx, null, lineProtectMask);
+        structureCleanup.minAreaPx = minAreaPx;
+        structureCleanup.featureMm = featureMm;
+        flatCount = 0;
+        for (let i = 0; i < n; i++) if (flatMask[i]) flatCount++;
+        gradCount = n - flatCount;
+        if (lineDirect) for (let i = 0; i < n; i++) {
+          if (!flatMask[i] || nearest[i] !== lineDirectFilament[i]) lineDirect[i] = 0;
+        }
+      }
+      for (let i = 0; i < n; i++) predicted[i] = { lab: palette[nearest[i]].lab, hex: palette[nearest[i]].hex, filamentIndex: nearest[i] };
+    }
+
+    const flatFilament = new Uint16Array(n);
+    flatFilament.fill(0xffff);
+    for (let i = 0; i < n; i++) if (flatMask[i]) flatFilament[i] = nearest[i];
+
+    if (background.enabled && background.envelope && !background.failed) {
+      // Envelope additions are structural support, not extra artwork. Keep them
+      // at the shared foundation height (gradStartLayer), with no family recipe
+      // above. Original foreground pixels retain every colour and every height;
+      // bridges and closing strips can therefore never become tall white walls.
+      for (let i = 0; i < n; i++) {
+        if (!printMask[i] || sourcePrintMask[i]) continue;
+        flatMask[i] = 0;
+        nearest[i] = baseIndex;
+        familyId[i] = -1;
+        flatFilament[i] = 0xffff;
+        predicted[i] = { lab: foundation.lab, hex: foundation.hex, filamentIndex: baseIndex, supportOnly: true };
+      }
+    }
+
+    const isEnvelopeSupport = (i) => background.enabled && background.envelope && !background.failed && printMask[i] && !sourcePrintMask[i];
+    let supportOnlyPixels = 0;
+    for (let i = 0; i < n; i++) if (isEnvelopeSupport(i)) supportOnlyPixels++;
+
+    // From this point onward all physical quantities describe only the
+    // printable silhouette. Colour recipes remain available for removed pixels
+    // so no array becomes structurally invalid, but they no longer contribute
+    // material, statistics, height, or exported geometry.
+    flatCount = 0; gradCount = 0;
+    familyPixels = new Uint32Array(families.length);
+    for (let i = 0; i < n; i++) {
+      if (!printMask[i]) { flatFilament[i] = 0xffff; continue; }
+      if (flatMask[i]) flatCount++;
+      else if (!isEnvelopeSupport(i)) {
+        gradCount++;
+        if (familyId[i] >= 0) familyPixels[familyId[i]]++;
+      }
+    }
+    for (let f = 0; f < families.length; f++) families[f].pixelCount = familyPixels[f] || 0;
+
+    const preview = new Uint8ClampedArray(n * 4);
+    let sumDE = 0, sumDE2 = 0, maxDE = 0;
+    const hist = new Uint32Array(101);
+    let under2 = 0, under5 = 0, under10 = 0, validPixels = 0, colorStatPixels = 0;
+    for (let i = 0; i < n; i++) {
+      if (!printMask[i]) continue; // alpha remains zero: no printed background
+      validPixels++;
+      if (isEnvelopeSupport(i)) {
+        const rgb = C.hexToRgb(predicted[i].hex);
+        preview[i * 4] = rgb.r; preview[i * 4 + 1] = rgb.g; preview[i * 4 + 2] = rgb.b; preview[i * 4 + 3] = 255;
+        continue; // support is real material, but not a colour recipe sample
+      }
+      colorStatPixels++;
+      const de = C.deltaE2000(labAt(lab, i), predicted[i].lab);
+      sumDE += de; sumDE2 += de * de; if (de > maxDE) maxDE = de;
+      hist[Math.min(100, Math.round(de))]++;
+      if (de <= 2) under2++; if (de <= 5) under5++; if (de <= 10) under10++;
+      const rgb = C.hexToRgb(predicted[i].hex);
+      preview[i * 4] = rgb.r; preview[i * 4 + 1] = rgb.g; preview[i * 4 + 2] = rgb.b; preview[i * 4 + 3] = 255;
+    }
+    const meanDE = colorStatPixels ? sumDE / colorStatPixels : 0;
+    let cum = 0, p90 = 0, median = 0;
+    for (let d = 0; d <= 100; d++) {
+      cum += hist[d];
+      if (!median && cum >= colorStatPixels * 0.5) median = d;
+      if (!p90 && cum >= colorStatPixels * 0.9) { p90 = d; break; }
+    }
+
+    const maxFamilyLayers = families.reduce((m, f) => Math.max(m, f.pixelCount > 0 ? f.recipe.length : 0), 0);
+    const actualGradTopLayer = gradCount > 0 ? gradStartLayer + maxFamilyLayers : flatLayers;
+    gradTopLayer = gradCount > 0 ? Math.max(gradStartLayer, actualGradTopLayer) : flatLayers;
+    const actualRelief = (gradTopLayer - flatLayers) * layerHeight;
+    maxLayers = Math.max(flatLayers, gradTopLayer, supportOnlyPixels ? gradStartLayer : 0);
+
+    const grams = new Float64Array(palette.length);
+    const pixelArea = pixelSize * pixelSize;
+    let flatPixels = 0, gradPixels = 0;
+    for (let i = 0; i < n; i++) {
+      if (!printMask[i]) continue;
+      if (isEnvelopeSupport(i)) {
+        grams[baseIndex] += pixelArea * gradStartLayer * layerHeight / 1000 * 1.24;
+        continue;
+      }
+      if (flatMask[i]) {
+        flatPixels++;
+        grams[flatFilament[i]] += pixelArea * flatLayers * layerHeight / 1000 * 1.24;
+      } else {
+        gradPixels++;
+        grams[baseIndex] += pixelArea * gradStartLayer * layerHeight / 1000 * 1.24;
+        const f = familyId[i];
+        if (f >= 0) {
+          const seq = families[f].recipe;
+          for (let l = 0; l < seq.length; l++) grams[seq[l]] += pixelArea * layerHeight / 1000 * 1.24;
+        }
+      }
+    }
+    let toolChanges = 0;
+    const layerFilaments = new Array(maxLayers);
+    for (let z = 0; z < maxLayers; z++) {
+      const set = new Set();
+      if (z < flatLayers) for (let i = 0; i < n; i++) if (printMask[i] && flatMask[i]) set.add(flatFilament[i]);
+      if (z < gradStartLayer) { if (gradCount > 0 || supportOnlyPixels > 0) set.add(baseIndex); }
+      else if (z < gradTopLayer) {
+        const li = z - gradStartLayer;
+        for (let i = 0; i < n; i++) {
+          if (!printMask[i] || flatMask[i]) continue;
+          const f = familyId[i];
+          if (f >= 0 && li < families[f].recipe.length) set.add(families[f].recipe[li]);
+        }
+      }
+      layerFilaments[z] = Array.from(set);
+      toolChanges += Math.max(0, set.size - 1);
+    }
+
+    // Support audit: every layer must be a subset of the previous footprint.
+    // A new pixel at z>0 is a real unsupported island (an overhang), not just
+    // a colour boundary. This lets the UI prove that the multi-part 3MF has no
+    // floating geometry even when a slicer's per-part checker complains.
+    let supportAddedPixels = 0;
+    const supportAddedLayers = [];
+    {
+      const prev = new Uint8Array(n);
+      const cur = new Uint8Array(n);
+      for (let z = 0; z < maxLayers; z++) {
+        for (let i = 0; i < n; i++) {
+          let on = 0;
+          if (flatMask[i]) on = z < flatLayers ? 1 : 0;
+          else if (z < gradStartLayer) on = 1;
+          else {
+            const f = familyId[i];
+            on = f >= 0 && (z - gradStartLayer) < families[f].recipe.length ? 1 : 0;
+          }
+          cur[i] = printMask[i] ? on : 0;
+        }
+        if (z > 0) {
+          let added = 0;
+          for (let i = 0; i < n; i++) if (cur[i] && !prev[i]) added++;
+          if (added) {
+            supportAddedPixels += added;
+            if (supportAddedLayers.length < 12) supportAddedLayers.push(z);
+          }
+        }
+        prev.set(cur);
+      }
+    }
+
+    const foundationOpacity = stackTransmission(gradStartLayer * layerHeight, foundation.hd);
+    let outGamutPixels = 0;
+    for (let i = 0; i < n; i++) {
+      if (!printMask[i] || flatMask[i]) continue;
+      const f = familyId[i];
+      if (f >= 0 && families[f].deltaE > 8) outGamutPixels++;
+    }
+    const gamutGaps = families
+      .filter(f => f.pixelCount > 0 && f.deltaE > 8)
+      .sort((a, b) => b.pixelCount - a.pixelCount)
+      .slice(0, 3)
+      .map(f => ({
+        targetHex: f.targetHex, predictedHex: f.predictedHex, pixelCount: f.pixelCount,
+        deltaE: +f.deltaE.toFixed(2), suggested: suggestFilamentForLab(f.targetLab, palette)
+      }));
+    const outOfGamutPercent = gradCount > 0 ? outGamutPixels / gradCount * 100 : 0;
+    const warnings = [];
+    if (engine === 'lut' && flatTopMm < (baseLayers + colorLayers) * layerHeight - 1e-6) {
+      warnings.push(`纯色区高度低于 LUT 需要的 ${((baseLayers + colorLayers) * layerHeight).toFixed(2)} mm，渐变区会自动抬高。`);
+    }
+    if (engine === 'td' && gradStartLayer * layerHeight < foundation.hd * Math.log10(20)) {
+      warnings.push(`渐变区基底 ${(gradStartLayer * layerHeight).toFixed(2)} mm 可能不足以遮住底色（建议 ≥ ${(foundation.hd * Math.log10(20)).toFixed(2)} mm）。`);
+    }
+    if (flatCount === 0) warnings.push('没有识别出纯色区，整幅画都会使用层叠渐变。可降低“平整阈值”或增加纯色区耗材。');
+    if (flatCount === n) warnings.push('整幅画都被识别为纯色区。可提高“平整阈值”或降低残差阈值。');
+    if (palette.length > 4) warnings.push(`当前使用 ${palette.length} 个耗材槽位；单 AMS 只有 4 槽，需要多 AMS 或中途换料。`);
+    if (outOfGamutPercent > 5 && gamutGaps.length) {
+      const g = gamutGaps[0];
+      const hint = g.suggested ? `；可加入 ${g.suggested.brand} ${g.suggested.name}（${g.suggested.hex}，ΔE≈${g.suggested.deltaE.toFixed(1)}）` : '';
+      warnings.push(`当前 ${palette.length} 色无法覆盖约 ${outOfGamutPercent.toFixed(0)}% 的渐变像素（ΔE>8）${hint}。`);
+    }
+    if (engine === 'td' && variableHeight) warnings.push('渐变区按配方长度自然形成阶梯浮雕；“浮雕差”显示的是最高差，不是所有色块都同高。');
+    if (lineInfo.active && lineMode === 'off') {
+      warnings.push(`检测到线稿（细线 ${(lineInfo.strokeFraction * 100).toFixed(1)}%）：0–2 px 的线条可能被平滑吃掉；可在“区域策略”开启线稿保护。`);
+    } else if (lineActive && lineMode === 'strong') {
+      warnings.push('线稿保护·强：深色及高彩度细线按合适耗材直印，并与纯色区同高；相邻渐变区可能略高于线条。');
+    }
+    if (heightMerge && (heightMerge.changed || heightMerge.groups)) {
+      const bits = [];
+      if (heightMerge.changed) bits.push(`${heightMerge.changed} 个色族改用更短配方`);
+      if (heightMerge.groups) bits.push(`${heightMerge.groups} 个重复色族合并`);
+      const save = heightMerge.oldMax > heightMerge.newMax ? `，最高 ${heightMerge.oldMax}→${heightMerge.newMax} 层` : '';
+      warnings.push(`高度去重：${bits.join('、')}${save}；相同/近似预测色不再为了不可见色差叠高。`);
+    }
+    if (edgeCleanRequested > 0 && edgeCleanLevel === 0) {
+      warnings.push('边缘光晕清理已跳过：渐变区不足 20%，避免把细线和小面积细节吃掉。可提高渐变区比例或把该滑块调低。');
+    } else if (edgeCleanLevel >= 3) {
+      warnings.push('边缘光晕清理·强 3：扩大边缘带并清理全图喷嘴级孤岛，模拟成画可能变脏/偏色；建议先用 1–2 档。');
+    }
+    if (background.enabled) {
+      if (background.failed) warnings.push('背景识别覆盖了整幅图，已自动放弃移除；请降低容差或重新取色。');
+      else if (!background.removedPixels) warnings.push(`未发现与边界连通的背景色 ${background.colorHex}；轮廓保持完整矩形。`);
+      else warnings.push(`背景移除：${background.colorHex}，ΔE≤${background.tolerance}，移除 ${(background.removedPixels / n * 100).toFixed(1)}% 画面，所有层均无背景材料${background.envelope ? `；包络后 ${background.componentsAfter} 个连通实体${background.bridges ? `，${background.bridges} 处低层桥接` : ''}；新增区域仅作基础支撑` : ''}。`);
+    }
+    if (supportAddedPixels > 0) {
+      warnings.push(`悬空检查：第 ${supportAddedLayers.join('、')} 层新增 ${supportAddedPixels} 个无下层支撑的像素，建议开启支撑或检查掩膜。`);
+    }
+    if (options.vectorFlat && vectorInfo && vectorInfo.families > 0) {
+      warnings.push(`矢量化色块直印：${vectorInfo.families} 个色族、约 ${(vectorInfo.pixels / n * 100).toFixed(1)}% 像素改为整块纯色${vectorInfo.islandPixels ? `，清理 ${vectorInfo.islandPixels} px 边缘小岛、归并 ${vectorInfo.boundaryPixels || 0} px 边界` : ''}${vectorInfo.contourPixels ? `，轮廓平滑 ${vectorInfo.contourPixels} px` : ''}；这些区域会统一到纯色区顶高。`);
+    }
+    if (smoothMm != null && smoothMm > 0) {
+      if (physSmooth.familyR === 0) warnings.push(`平滑尺寸 ${smoothMm.toFixed(2)} mm 在当前分辨率下不足 1 像素，平滑不会生效；可提高画稿分辨率或降低成品宽度。`);
+      else if (smoothMm < lineWidthMm) warnings.push(`平滑尺寸 ${smoothMm.toFixed(2)} mm 小于喷嘴线宽 ${lineWidthMm.toFixed(2)} mm，小于喷嘴的细节可能打不出来；建议 ≥ ${lineWidthMm.toFixed(2)} mm。`);
+    }
+    const lineDirectCount = lineDirect ? lineDirect.reduce((a, b) => a + b, 0) : 0;
+    let sharedBasePixels = 0;
+    for (let i = 0; i < n; i++) {
+      if (!printMask[i] || flatMask[i]) continue;
+      const f = familyId[i];
+      if (f >= 0 && families[f].sharedBaseLayers >= 2) sharedBasePixels++;
+    }
+
+    return {
+      engine, w, h, n, pixelSize, widthMm: w * pixelSize, heightMm: h * pixelSize,
+      layerHeight, flatLayers, gradStartLayer, gradTopLayer, actualGradTopLayer, maxGradLayers: colorLayers, maxLayers, flatTopMm: flatLayers * layerHeight,
+      gradTopMm: gradTopLayer * layerHeight, actualGradTopMm: actualGradTopLayer * layerHeight, reliefMm: actualRelief, variableHeight,
+      palette, foundation, foundationIndex: baseIndex, lutKey: options.lutKey || (engine === 'lut' ? 'bambu_8' : null),
+      flatMask, flatFilament, familyId, families, familyPixels, nearest, residual, stds, stdT, resT,
+      predicted, preview, alpha, printMask, background, holeMap, smoothLevel,
+      vectorFlat: !!options.vectorFlat,
+      vectorFlatFamilies: vectorInfo ? vectorInfo.families : 0, vectorFlatPixels: vectorInfo ? vectorInfo.pixels : 0,
+      vectorFlatIslandPixels: vectorInfo ? (vectorInfo.islandPixels || 0) : 0,
+      vectorFlatBoundaryPixels: vectorInfo ? (vectorInfo.boundaryPixels || 0) : 0,
+      vectorFlatContourPixels: vectorInfo ? (vectorInfo.contourPixels || 0) : 0,
+      smoothMode: smoothMm != null ? 'physical' : 'level', smoothMm, lineWidthMm,
+      smoothRadiusPx: smoothMm != null ? physSmooth.familyR : null, flatSmoothRadiusPx: smoothMm != null ? physSmooth.flatR : null,
+      structureCleanup,
+      mergeDeltaE: Number(options.mergeDeltaE) || 0,
+      lineMode, lineApplied: lineActive, lineProtectMask, lineDirectMask: lineDirect,
+      edgeClean: edgeCleanLevel, edgeCleanRequested, edgePixelPercent: n ? edgePixelCount / n * 100 : 0,
+      supportAddedPixels, supportAddedLayers,
+      heightMergeDeltaE: options.heightMergeDeltaE == null ? 1.5 : Number(options.heightMergeDeltaE),
+      heightMerge: heightMerge ? {
+        changed: heightMerge.changed, groups: heightMerge.groups,
+        oldMaxLayers: heightMerge.oldMax, newMaxLayers: heightMerge.newMax,
+        savedLayers: heightMerge.savedLayers, savedLayerPixels: heightMerge.savedLayerPixels,
+        threshold: heightMerge.threshold
+      } : null,
+      lineInfo: {
+        active: lineInfo.active, applied: lineActive, mode: lineMode, score: lineInfo.score,
+        edgePercent: lineInfo.edgeFraction * 100, whitePercent: lineInfo.whiteFraction * 100,
+        darkPercent: lineInfo.darkFraction * 100, strokePercent: lineInfo.strokeFraction * 100,
+        directPercent: n ? lineDirectCount / n * 100 : 0
+      },
+      stats: {
+        flatPixels, gradPixels, printPixels: validPixels, supportPixels: supportOnlyPixels, colorPixels: colorStatPixels, removedBackgroundPixels: background.removedPixels,
+        flatPercent: colorStatPixels ? flatPixels / colorStatPixels * 100 : 0, gradPercent: colorStatPixels ? gradPixels / colorStatPixels * 100 : 0,
+        supportPercent: validPixels ? supportOnlyPixels / validPixels * 100 : 0,
+        meanDE, p90, median, maxDE,
+        under2: colorStatPixels ? under2 / colorStatPixels * 100 : 0, under5: colorStatPixels ? under5 / colorStatPixels * 100 : 0, under10: colorStatPixels ? under10 / colorStatPixels * 100 : 0,
+        toolChanges, grams: Array.from(grams), layerFilaments, foundationOpacity,
+        familyCount: families.filter(f => f.pixelCount > 0).length,
+        outOfGamutPercent, gamutGaps, gamutSize: gamut ? gamut.length : 0, smoothLevel,
+        vectorFlat: !!options.vectorFlat,
+        vectorFlatFamilies: vectorInfo ? vectorInfo.families : 0, vectorFlatPixels: vectorInfo ? vectorInfo.pixels : 0,
+      vectorFlatIslandPixels: vectorInfo ? (vectorInfo.islandPixels || 0) : 0,
+      vectorFlatBoundaryPixels: vectorInfo ? (vectorInfo.boundaryPixels || 0) : 0,
+        smoothMode: smoothMm != null ? 'physical' : 'level', smoothMm, lineWidthMm,
+        smoothRadiusPx: smoothMm != null ? physSmooth.familyR : null, flatSmoothRadiusPx: smoothMm != null ? physSmooth.flatR : null,
+        structureCleanupPixels: structureCleanup.mergedPixels, structureCleanupComponents: structureCleanup.mergedComponents,
+        structureCleanupMinAreaPx: structureCleanup.minAreaPx, structureCleanupEdgeOnly: structureCleanup.edgeOnly,
+        mergeDeltaE: Number(options.mergeDeltaE) || 0, mergedGroups: mergeResult.groups,
+        sharedBasePercent: gradCount > 0 ? sharedBasePixels / gradCount * 100 : 0,
+        lineMode, lineApplied: lineActive, lineStrokePercent: lineInfo.strokeFraction * 100,
+        lineDirectPercent: n ? lineDirectCount / n * 100 : 0,
+        edgeClean: edgeCleanLevel, edgeCleanRequested, edgePixelPercent: n ? edgePixelCount / n * 100 : 0,
+        supportAddedPixels, supportAddedLayers,
+        heightMergeDeltaE: options.heightMergeDeltaE == null ? 1.5 : Number(options.heightMergeDeltaE),
+        heightShortenedFamilies: heightMerge ? heightMerge.changed : 0,
+        heightMergedFamilies: heightMerge ? heightMerge.groups : 0,
+        heightSavedLayers: heightMerge ? Math.max(0, heightMerge.oldMax - heightMerge.newMax) : 0
+      },
+      warnings,
+      createdAt: Date.now()
+    };
+  }
+
+  // Palette suggestion for the TD engine from the filament library.
+  // Black and white are structural: they set the value range and make large
+  // neutral areas printable as true solids. The remaining slots chase the
+  // dominant chromatic clusters of the artwork.
+  function recommendPalette(imageData, library, count, brandFilter) {
+    const { lab } = imageToLab(imageData);
+    const w = imageData.width, h = imageData.height, n = w * h;
+    const step = Math.max(1, Math.floor(n / 8000));
+    const flat = [];
+    for (let i = 0; i < n; i += step) { flat.push(lab[i * 3], lab[i * 3 + 1], lab[i * 3 + 2]); }
+    const sources = (library || []).filter(f => f.td != null && (!brandFilter || f.brand === brandFilter));
+    const total = Math.min(count || 4, 6);
+    const chosen = [], used = new Set();
+    const add = (f) => {
+      if (!f || used.has(f.id) || chosen.length >= total) return false;
+      used.add(f.id);
+      chosen.push({ id: f.id, name: f.name, brand: f.brand, material: f.material, hex: f.hex, td: f.td });
+      return true;
+    };
+    const white = sources.find(f => /jade white|^white$/i.test(f.name));
+    const black = sources.find(f => /^black$/i.test(f.name));
+    add(white);
+    add(black);
+    const centers = kmeansLab(Float32Array.from(flat), Math.max(total * 3, 9), 99, 8);
+    const counts = new Uint32Array(centers.length);
+    for (let i = 0; i < flat.length; i += 3) {
+      let best = 0, bestD = Infinity;
+      for (let c = 0; c < centers.length; c++) {
+        const dl = flat[i] - centers[c].L, da = flat[i + 1] - centers[c].a, db = flat[i + 2] - centers[c].b;
+        const d = dl * dl + da * da + db * db;
+        if (d < bestD) { bestD = d; best = c; }
+      }
+      counts[best]++;
+    }
+    const chroma = (c) => Math.hypot(c.a, c.b);
+    const hue = (c) => (Math.atan2(c.b, c.a) * 180 / Math.PI + 360) % 360;
+    const hueDist = (a, b) => { let d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; };
+    const order = centers.map((c, i) => ({ c, count: counts[i] })).sort((a, b) => b.count - a.count);
+    const chosenHues = [];
+    for (const { c } of order) {
+      if (chosen.length >= total) break;
+      if (chroma(c) < 8) continue;
+      const h = hue(c);
+      if (chosenHues.some(x => hueDist(x, h) < 26)) continue;
+      let best = null, bestD = Infinity;
+      for (const f of sources) {
+        if (used.has(f.id)) continue;
+        const fl = C.hexToLab(f.hex);
+        if (Math.hypot(fl.a, fl.b) < 8) continue;
+        const d = C.deltaE2000(c, fl);
+        if (d < bestD) { bestD = d; best = f; }
+      }
+      if (add(best)) chosenHues.push(h);
+    }
+    // fill remaining slots with the closest unused palette entries
+    for (const f of sources) { if (chosen.length >= total) break; add(f); }
+    return chosen;
+  }
+
+  function filamentAt(plan, x, y, z) {
+    const i = y * plan.w + x;
+    if (plan.printMask && !plan.printMask[i]) return -1;
+    if (plan.flatMask[i]) return z < plan.flatLayers ? plan.flatFilament[i] : -1;
+    if (z < plan.gradStartLayer) return plan.foundationIndex;
+    const f = plan.familyId[i];
+    if (f < 0) return -1;
+    const li = z - plan.gradStartLayer;
+    if (li >= 0 && li < plan.families[f].recipe.length) return plan.families[f].recipe[li];
+    return -1;
+    return -1;
+  }
+
+  CS.engine = {
+    buildPlan, recommendPalette, buildLutPalette, buildUserPalette,
+    imageToLab, filamentAt, compositeLinear, stackTransmission, localStd,
+    autoStdThreshold, nearestLut, kmeansLab, mergeIneffectiveHeights, physicalSmoothParams,
+    mergeSmallRegions, buildPrintMask, buildStrokeInfo
+  };
+})(typeof globalThis !== 'undefined' ? globalThis : this);

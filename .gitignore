@@ -1,0 +1,31 @@
+# Third-party research snapshots; not part of the application's source history.
+research/
+
+# Generated calibration models, previews and test reports.
+tests/*.3mf
+tests/sample-plan.json
+tests/sample-plan.md
+app/previews/
+
+# Temporary test and runtime output.
+tests/.tmp*/
+node_modules/
+__pycache__/
+*.log
+deploy/online-*.js
+deploy/online-*.html
+
+# Local editor and operating-system files.
+.qoder/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Never commit local credentials.
+.env
+.env.*
+!.env.example
+credentials/
+*.pem
+*.key

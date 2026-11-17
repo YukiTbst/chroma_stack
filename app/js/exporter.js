@@ -1,0 +1,984 @@
+/* ChromaStack exporters: preview PNG helpers (browser), print plan JSON/Markdown,
+   and slicer-ready multi-material 3MF (one assembly object, one watertight part
+   per colour / contiguous layer run). */
+(function (root) {
+  'use strict';
+  const CS = root.CS = root.CS || {};
+  const C = CS.color;
+
+  const escapeXml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const round = (v, d = 4) => {
+    const p = Math.pow(10, d);
+    return Math.round(v * p) / p;
+  };
+
+  function samplePlane(plan, ew, eh) {
+    if (ew === plan.w && eh === plan.h) {
+      // Native export must be the exact plan shown by the web layer/3D views.
+      // Do not run another regional vote or cleanup at identical resolution.
+      return {
+        ew, eh,
+        flatMask: new Uint8Array(plan.flatMask),
+        flatFilament: new Uint16Array(plan.flatFilament),
+        familyId: new Int16Array(plan.familyId),
+        printMask: plan.printMask ? new Uint8Array(plan.printMask) : null,
+        structureCleanup: null
+      };
+    }
+    // Nearest-centre downsampling can turn one source pixel into a new island,
+    // even after the engine removed every such island. Vote over the actual
+    // source footprint instead. Protected/direct strokes win a tie so a thin
+    // continuous outline is not erased merely by its alignment to the grid.
+    const x0 = new Int32Array(ew), x1 = new Int32Array(ew);
+    const y0 = new Int32Array(eh), y1 = new Int32Array(eh);
+    for (let x = 0; x < ew; x++) {
+      x0[x] = Math.min(plan.w - 1, Math.floor(x * plan.w / ew));
+      x1[x] = Math.min(plan.w, Math.max(x0[x] + 1, Math.floor((x + 1) * plan.w / ew)));
+    }
+    for (let y = 0; y < eh; y++) {
+      y0[y] = Math.min(plan.h - 1, Math.floor(y * plan.h / eh));
+      y1[y] = Math.min(plan.h, Math.max(y0[y] + 1, Math.floor((y + 1) * plan.h / eh)));
+    }
+    const flatMask = new Uint8Array(ew * eh);
+    const flatFilament = new Uint16Array(ew * eh);
+    const familyId = new Int16Array(ew * eh);
+    const printMask = plan.printMask ? new Uint8Array(ew * eh) : null;
+    const lab = new Float32Array(ew * eh * 3);
+    const hasSilhouette = !!(plan.background && plan.background.enabled);
+    const canCleanup = !!(!hasSilhouette && plan.structureCleanup && plan.structureCleanup.minAreaPx > 1 && !plan.structureCleanup.edgeOnly &&
+      plan.predicted && plan.families && plan.palette && CS.engine && CS.engine.mergeSmallRegions);
+    for (let y = 0; y < eh; y++) {
+      for (let x = 0; x < ew; x++) {
+        const di = y * ew + x;
+        const centerX = Math.min(plan.w - 1, Math.floor((x + 0.5) * plan.w / ew));
+        const centerY = Math.min(plan.h - 1, Math.floor((y + 0.5) * plan.h / eh));
+        const centerI = centerY * plan.w + centerX;
+        const centerKey = plan.printMask && !plan.printMask[centerI] ? 0 : (plan.flatMask[centerI] ? plan.flatFilament[centerI] + 1 : -(plan.familyId[centerI] + 2));
+        const votes = new Map();
+        for (let yy = y0[y]; yy < y1[y]; yy++) {
+          for (let xx = x0[x]; xx < x1[x]; xx++) {
+            const si = yy * plan.w + xx;
+            const key = plan.printMask && !plan.printMask[si] ? 0 : (plan.flatMask[si] ? plan.flatFilament[si] + 1 : -(plan.familyId[si] + 2));
+            const vote = votes.get(key) || { key, count: 0, protected: 0, sumL: 0, sumA: 0, sumB: 0 };
+            vote.count++;
+            const sourcePred = plan.predicted && plan.predicted[si];
+            if (sourcePred && sourcePred.lab) {
+              vote.sumL += sourcePred.lab.L; vote.sumA += sourcePred.lab.a; vote.sumB += sourcePred.lab.b;
+            }
+            if ((plan.lineProtectMask && plan.lineProtectMask[si]) || (plan.lineDirectMask && plan.lineDirectMask[si])) vote.protected++;
+            votes.set(key, vote);
+          }
+        }
+        let best = null;
+        for (const vote of votes.values()) {
+          if (!best || vote.count > best.count ||
+            (vote.count === best.count && vote.protected > best.protected) ||
+            (vote.count === best.count && vote.protected === best.protected && vote.key === centerKey)) best = vote;
+        }
+        if (best.key === 0) {
+          if (printMask) printMask[di] = 0;
+          flatMask[di] = 0; flatFilament[di] = 0xffff; familyId[di] = -1;
+        } else {
+          if (printMask) printMask[di] = 1;
+          if (best.key > 0) {
+            flatMask[di] = 1; flatFilament[di] = best.key - 1; familyId[di] = -1;
+          } else {
+            flatMask[di] = 0; flatFilament[di] = 0xffff; familyId[di] = -best.key - 2;
+          }
+        }
+        // Cleanup colour must describe the region that actually won the vote,
+        // not a potentially unrelated centre pixel from a minority colour.
+        lab[di * 3] = best.sumL / best.count;
+        lab[di * 3 + 1] = best.sumA / best.count;
+        lab[di * 3 + 2] = best.sumB / best.count;
+      }
+    }
+    let structureCleanup = null;
+    if (canCleanup) {
+      // Voting avoids sampling bias, but even a perfect sampler can split a
+      // thin region at a coarser grid. Re-apply only the already-requested
+      // nozzle-scale cleanup on the actual export plane, never on raw/off plans.
+      const pixelSize = plan.widthMm / ew;
+      const featureMm = (Number(plan.lineWidthMm) || 0.42) * 2;
+      const minAreaPx = Math.max(2, Math.round(Math.PI * (featureMm / 2) ** 2 / (pixelSize * pixelSize)));
+      structureCleanup = CS.engine.mergeSmallRegions(flatMask, flatFilament, familyId, lab, plan.families, plan.palette, ew, eh, minAreaPx, null);
+      for (let i = 0; i < flatMask.length; i++) if (!flatMask[i]) flatFilament[i] = 0xffff;
+    }
+    return { ew, eh, flatMask, flatFilament, familyId, printMask, structureCleanup };
+  }
+
+  function buildLayerMasks(plan, plane, z) {
+    const { ew, eh, flatMask, flatFilament, familyId, printMask } = plane;
+    const K = plan.palette.length;
+    const masks = new Array(K);
+    for (let f = 0; f < K; f++) masks[f] = new Uint8Array(ew * eh);
+    const n = ew * eh;
+    for (let i = 0; i < n; i++) {
+      if (printMask && !printMask[i]) continue;
+      let fi = -1;
+      if (flatMask[i]) {
+        if (z < plan.flatLayers) fi = flatFilament[i];
+      } else {
+        if (z < plan.gradStartLayer) fi = plan.foundationIndex;
+        else {
+          const f = familyId[i];
+          if (f >= 0) {
+            const li = z - plan.gradStartLayer;
+            if (li >= 0 && li < plan.families[f].recipe.length) fi = plan.families[f].recipe[li];
+          }
+        }
+      }
+      if (fi >= 0) masks[fi][i] = 1;
+    }
+    return masks;
+  }
+
+  function masksEqual(a, b) {
+    if (a === b) return true;
+    if (!a || !b || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
+
+  function buildPrisms(plan, plane) {
+    const K = plan.palette.length;
+    const prisms = Array.from({ length: K }, () => []);
+    const active = new Array(K).fill(null);
+    const activeStart = new Int32Array(K);
+    for (let z = 0; z < plan.maxLayers; z++) {
+      const masks = buildLayerMasks(plan, plane, z);
+      for (let f = 0; f < K; f++) {
+        const mask = masks[f];
+        let any = false;
+        for (let i = 0; i < mask.length; i++) if (mask[i]) { any = true; break; }
+        if (!any) {
+          if (active[f]) { prisms[f].push({ mask: active[f], z0: activeStart[f], z1: z }); active[f] = null; }
+          continue;
+        }
+        if (active[f] && masksEqual(active[f], mask)) continue;
+        if (active[f]) prisms[f].push({ mask: active[f], z0: activeStart[f], z1: z });
+        active[f] = mask;
+        activeStart[f] = z;
+      }
+    }
+    for (let f = 0; f < K; f++) {
+      if (active[f]) prisms[f].push({ mask: active[f], z0: activeStart[f], z1: plan.maxLayers });
+    }
+    return prisms;
+  }
+
+  function traceLoops(mask, w, h) {
+    const edges = [];
+    const outgoing = new Map();
+    const key = (x, y) => y * (w + 1) + x;
+    const add = (x0, y0, x1, y1, ox, oy) => {
+      const e = { x0, y0, x1, y1, out: { x: ox, y: oy }, used: false };
+      edges.push(e);
+      const k = key(x0, y0);
+      let arr = outgoing.get(k);
+      if (!arr) { arr = []; outgoing.set(k, arr); }
+      arr.push(e);
+    };
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        if (!mask[y * w + x]) continue;
+        if (y === 0 || !mask[(y - 1) * w + x]) add(x, y, x + 1, y, 0, -1);
+        if (x === w - 1 || !mask[y * w + x + 1]) add(x + 1, y, x + 1, y + 1, 1, 0);
+        if (y === h - 1 || !mask[(y + 1) * w + x]) add(x + 1, y + 1, x, y + 1, 0, 1);
+        if (x === 0 || !mask[y * w + x - 1]) add(x, y + 1, x, y, -1, 0);
+      }
+    }
+    const loops = [];
+    for (const start of edges) {
+      if (start.used) continue;
+      const pts = [], outs = [];
+      let cur = start;
+      let guard = 0;
+      while (cur && !cur.used && guard++ < edges.length + 8) {
+        cur.used = true;
+        pts.push({ x: cur.x0, y: cur.y0 });
+        outs.push(cur.out);
+        const cands = (outgoing.get(key(cur.x1, cur.y1)) || []).filter(e => !e.used);
+        if (!cands.length) break;
+        const inAng = Math.atan2(cur.y1 - cur.y0, cur.x1 - cur.x0);
+        let next = null, bestTurn = Infinity;
+        for (const c of cands) {
+          const ang = Math.atan2(c.y1 - c.y0, c.x1 - c.x0);
+          let turn = ang - inAng;
+          while (turn < 0) turn += Math.PI * 2;
+          while (turn >= Math.PI * 2) turn -= Math.PI * 2;
+          if (turn < 1e-7) turn = Math.PI * 2;
+          if (turn < bestTurn) { bestTurn = turn; next = c; }
+        }
+        cur = next;
+        if (cur === start) break;
+      }
+      if (pts.length >= 4) loops.push({ pts, outs });
+    }
+    return loops;
+  }
+
+  function simplifyLoop(loop) {
+    const pts = loop.pts, outs = loop.outs;
+    const n = pts.length;
+    if (n <= 4) return loop;
+    const keepPts = [], keepOuts = [];
+    for (let i = 0; i < n; i++) {
+      const prev = pts[(i - 1 + n) % n], cur = pts[i], next = pts[(i + 1) % n];
+      const cross = (cur.x - prev.x) * (next.y - cur.y) - (cur.y - prev.y) * (next.x - cur.x);
+      if (Math.abs(cross) > 1e-9) { keepPts.push(cur); keepOuts.push(outs[i]); }
+    }
+    if (keepPts.length < 4) return loop;
+    return { pts: keepPts, outs: keepOuts };
+  }
+
+  function loopArea(loop) {
+    let a = 0;
+    const pts = loop.pts;
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i], q = pts[(i + 1) % pts.length];
+      a += p.x * q.y - q.x * p.y;
+    }
+    return a / 2;
+  }
+
+  function pointInLoop(pt, loop) {
+    const pts = loop.pts;
+    let inside = false;
+    for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+      const xi = pts[i].x, yi = pts[i].y, xj = pts[j].x, yj = pts[j].y;
+      if (((yi > pt.y) !== (yj > pt.y)) && (pt.x < (xj - xi) * (pt.y - yi) / (yj - yi) + xi)) inside = !inside;
+    }
+    return inside;
+  }
+
+  function morphMask(mask, w, h, radius, grow) {
+    const out = new Uint8Array(mask.length);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        let hit = grow ? 0 : 1;
+        for (let dy = -radius; dy <= radius && (grow ? !hit : hit); dy++) {
+          const yy = Math.max(0, Math.min(h - 1, y + dy));
+          for (let dx = -radius; dx <= radius; dx++) {
+            const xx = Math.max(0, Math.min(w - 1, x + dx));
+            const v = mask[yy * w + xx];
+            if (grow && v) { hit = 1; break; }
+            if (!grow && !v) { hit = 0; break; }
+          }
+        }
+        out[y * w + x] = hit;
+      }
+    }
+    return out;
+  }
+
+  function fillDiagonalPinches(mask, w, h) {
+    const out = new Uint8Array(mask);
+    for (let pass = 0; pass < 4; pass++) {
+      let changed = false;
+      for (let y = 0; y < h - 1; y++) {
+        for (let x = 0; x < w - 1; x++) {
+          const i = y * w + x;
+          const a = out[i], b = out[i + 1], c = out[i + w], d = out[i + w + 1];
+          if (a && d && !b && !c) { out[i + 1] = 1; changed = true; }
+          else if (b && c && !a && !d) { out[i] = 1; changed = true; }
+        }
+      }
+      if (!changed) break;
+    }
+    return out;
+  }
+
+  function validateLocalEdges(indices, startIdx) {
+    const edges = new Map();
+    for (let i = startIdx; i < indices.length; i += 3) {
+      const tri = [indices[i], indices[i + 1], indices[i + 2]];
+      for (let k = 0; k < 3; k++) {
+        const a = tri[k], b = tri[(k + 1) % 3];
+        const key = a < b ? a + ',' + b : b + ',' + a;
+        const n = (edges.get(key) || 0) + 1;
+        edges.set(key, n);
+        if (n > 2) return false;
+      }
+    }
+    for (const n of edges.values()) if (n !== 2) return false;
+    return true;
+  }
+
+
+  function simplifyOpen(pts, tol) {
+    const n = pts.length;
+    if (n <= 2) return pts.slice();
+    const keep = new Uint8Array(n); keep[0] = 1; keep[n - 1] = 1;
+    const stack = [[0, n - 1]];
+    while (stack.length) {
+      const [a, b] = stack.pop();
+      const p = pts[a], q = pts[b];
+      const dx = q.x - p.x, dy = q.y - p.y;
+      const len = Math.hypot(dx, dy) || 1;
+      let maxD = -1, maxI = -1;
+      for (let i = a + 1; i < b; i++) {
+        const d = Math.abs(dy * (pts[i].x - p.x) - dx * (pts[i].y - p.y)) / len;
+        if (d > maxD) { maxD = d; maxI = i; }
+      }
+      if (maxD > tol && maxI > a) {
+        keep[maxI] = 1;
+        stack.push([a, maxI], [maxI, b]);
+      }
+    }
+    return pts.filter((_, i) => keep[i]);
+  }
+
+  function simplifyClosed(pts, tol) {
+    const n = pts.length;
+    if (n < 6 || !(tol > 0)) return pts;
+    const half = Math.floor(n / 2);
+    const a = pts.slice(0, half + 1);
+    const b = pts.slice(half).concat([pts[0]]);
+    const sa = simplifyOpen(a, tol);
+    const sb = simplifyOpen(b, tol);
+    const out = sa.slice(0, -1).concat(sb.slice(0, -1));
+    return out.length >= 3 ? out : pts;
+  }
+
+  function meshPrismMarch(mask, w, h, pixelSize, z0, z1, positions, indices) {
+    const earcutFn = (root.earcut && (root.earcut.default || root.earcut)) || CS.earcut;
+    if (typeof earcutFn !== 'function') throw new Error('earcut 未加载');
+    const startPos = positions.length / 3;
+    const startIdx = indices.length;
+    const get = (x, y) => (x >= 0 && x < w && y >= 0 && y < h) ? mask[y * w + x] : 0;
+    const pt = (x, y) => ({ x, y, key: Math.round(x * 2) + ',' + Math.round(y * 2) });
+    const segs = [];
+    const addSeg = (a, b) => segs.push({ a, b });
+    for (let y = -1; y < h; y++) {
+      for (let x = -1; x < w; x++) {
+        const a = get(x, y), b = get(x + 1, y), c = get(x + 1, y + 1), d = get(x, y + 1);
+        if (!a && !b && !c && !d) continue;
+        if (a && b && c && d) continue;
+        const code = (a ? 8 : 0) | (b ? 4 : 0) | (c ? 2 : 0) | (d ? 1 : 0);
+        const L = pt(x, y + 0.5), T = pt(x + 0.5, y), R = pt(x + 1, y + 0.5), B = pt(x + 0.5, y + 1);
+        // Bit order: a=NW(8), b=NE(4), c=SE(2), d=SW(1).
+        switch (code) {
+          case 1: addSeg(B, L); break;              // SW only
+          case 2: addSeg(R, B); break;              // SE only
+          case 3: addSeg(L, R); break;              // bottom half
+          case 4: addSeg(T, R); break;              // NE only
+          case 5: addSeg(T, R); addSeg(B, L); break; // NE + SW diagonal
+          case 6: addSeg(T, B); break;              // right half
+          case 7: addSeg(T, L); break;              // missing NW
+          case 8: addSeg(L, T); break;              // NW only
+          case 9: addSeg(T, B); break;              // left half
+          case 10: addSeg(L, T); addSeg(R, B); break; // NW + SE diagonal
+          case 11: addSeg(T, R); break;             // missing NE
+          case 12: addSeg(L, R); break;             // top half
+          case 13: addSeg(R, B); break;             // missing SE
+          case 14: addSeg(B, L); break;             // missing SW
+          default: break;
+        }
+      }
+    }
+    if (!segs.length) return false;
+    const adj = new Map();
+    segs.forEach((s, i) => {
+      for (const p of [s.a, s.b]) {
+        let arr = adj.get(p.key);
+        if (!arr) { arr = []; adj.set(p.key, arr); }
+        arr.push(i);
+      }
+    });
+    const used = new Uint8Array(segs.length);
+    const loops = [];
+    for (let i = 0; i < segs.length; i++) {
+      if (used[i]) continue;
+      const start = segs[i].a;
+      let current = start;
+      let edge = i;
+      const pts = [start];
+      let broken = false;
+      for (let guard = 0; guard < segs.length + 8; guard++) {
+        used[edge] = 1;
+        const s = segs[edge];
+        const next = s.a.key === current.key ? s.b : s.a;
+        if (next.key === start.key) break;
+        pts.push(next);
+        const cands = (adj.get(next.key) || []).filter(e => !used[e]);
+        if (!cands.length) { broken = true; break; }
+        edge = cands[0];
+        current = next;
+      }
+      if (broken || pts.length < 3) continue;
+      // remove exact collinear points
+      const out = [];
+      for (let k = 0; k < pts.length; k++) {
+        const p0 = pts[(k - 1 + pts.length) % pts.length], p1 = pts[k], p2 = pts[(k + 1) % pts.length];
+        const cross = (p1.x - p0.x) * (p2.y - p1.y) - (p1.y - p0.y) * (p2.x - p1.x);
+        if (Math.abs(cross) > 1e-9) out.push(p1);
+      }
+      if (out.length >= 3) loops.push(simplifyClosed(out, 0.55));
+    }
+    if (!loops.length) return false;
+    // containment depth: even = outer, odd = hole
+    const infos = loops.map(pts => {
+      let area = 0;
+      for (let i = 0; i < pts.length; i++) {
+        const p = pts[i], q = pts[(i + 1) % pts.length];
+        area += p.x * q.y - q.x * p.y;
+      }
+      return { pts, area: area / 2, depth: 0, parent: -1 };
+    });
+    for (let i = 0; i < infos.length; i++) {
+      const li = infos[i];
+      for (let j = 0; j < infos.length; j++) {
+        if (i === j) continue;
+        const lj = infos[j];
+        if (Math.abs(lj.area) > Math.abs(li.area) && pointInLoop(li.pts[0], { pts: lj.pts })) li.depth++;
+      }
+    }
+    const outers = [], holes = [];
+    for (let i = 0; i < infos.length; i++) {
+      if (infos[i].depth % 2 === 0) outers.push(i); else holes.push(i);
+    }
+    for (const hi of holes) {
+      let parent = -1;
+      for (const oi of outers) {
+        if (infos[oi].depth !== infos[hi].depth - 1) continue;
+        if (pointInLoop(infos[hi].pts[0], { pts: infos[oi].pts })) {
+          if (parent < 0 || Math.abs(infos[oi].area) < Math.abs(infos[parent].area)) parent = oi;
+        }
+      }
+      infos[hi].parent = parent;
+    }
+    const X = (x) => (x + 0.5) * pixelSize - w * pixelSize / 2;
+    const Y = (y) => h * pixelSize / 2 - (y + 0.5) * pixelSize;
+    const vmap = new Map();
+    const addVertex = (x, y, z) => {
+      const xi = Math.round(x * 100000), yi = Math.round(y * 100000), zi = Math.round(z * 100000);
+      const key = xi + ',' + yi + ',' + zi;
+      let idx = vmap.get(key);
+      if (idx === undefined) { idx = positions.length / 3; vmap.set(key, idx); positions.push(x, y, z); }
+      return idx;
+    };
+    const addTri = (a, b, c) => { if (a !== b && b !== c && a !== c) indices.push(a, b, c); };
+    const addTriOriented = (p0, p1, p2, outward) => {
+      const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
+      const vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
+      const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+      if (nx * outward[0] + ny * outward[1] + nz * outward[2] < 0) { const t = p1; p1 = p2; p2 = t; }
+      addTri(addVertex(...p0), addVertex(...p1), addVertex(...p2));
+    };
+    const addQuad = (p0, p1, p2, p3, outward) => {
+      const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
+      const vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
+      const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+      if (nx * outward[0] + ny * outward[1] + nz * outward[2] < 0) { const t = p1; p1 = p3; p3 = t; }
+      const a = addVertex(...p0), b = addVertex(...p1), c = addVertex(...p2), d = addVertex(...p3);
+      addTri(a, b, c); addTri(a, c, d);
+    };
+    // caps
+    for (const oi of outers) {
+      const outer = infos[oi];
+      const groupHoles = holes.filter(hi => infos[hi].parent === oi);
+      const flat = [], holeIndex = [];
+      for (const p of outer.pts) flat.push(p.x, p.y);
+      for (const hi of groupHoles) {
+        holeIndex.push(flat.length / 2);
+        for (const p of infos[hi].pts) flat.push(p.x, p.y);
+      }
+      const tris = earcutFn(flat, holeIndex, 2);
+      for (let i = 0; i < tris.length; i += 3) {
+        const ia = tris[i] * 2, ib = tris[i + 1] * 2, ic = tris[i + 2] * 2;
+        const p0 = [X(flat[ia]), Y(flat[ia + 1]), z1];
+        const p1 = [X(flat[ib]), Y(flat[ib + 1]), z1];
+        const p2 = [X(flat[ic]), Y(flat[ic + 1]), z1];
+        addTriOriented(p0, p1, p2, [0, 0, 1]);
+        addTriOriented([p0[0], p0[1], z0], [p1[0], p1[1], z0], [p2[0], p2[1], z0], [0, 0, -1]);
+      }
+    }
+    // walls
+    for (let li = 0; li < infos.length; li++) {
+      const pts = infos[li].pts;
+      for (let i = 0; i < pts.length; i++) {
+        const p = pts[i], q = pts[(i + 1) % pts.length];
+        const mx = (p.x + q.x) / 2, my = (p.y + q.y) / 2;
+        const dx = q.x - p.x, dy = q.y - p.y;
+        const len = Math.hypot(dx, dy) || 1;
+        let nx = dy / len, ny = -dx / len;
+        const plus = get(Math.round(mx + nx * 0.3), Math.round(my + ny * 0.3));
+        const minus = get(Math.round(mx - nx * 0.3), Math.round(my - ny * 0.3));
+        let ox = nx, oy = ny;
+        if (plus && !minus) { ox = -nx; oy = -ny; }
+        else if (minus && !plus) { ox = nx; oy = ny; }
+        else {
+          const nIn = pointInLoop({ x: mx + nx * 0.3, y: my + ny * 0.3 }, { pts });
+          const isOuter = infos[li].depth % 2 === 0;
+          if (isOuter) { ox = nIn ? -nx : nx; oy = nIn ? -ny : ny; }
+          else { ox = nIn ? nx : -nx; oy = nIn ? ny : -ny; }
+        }
+        const w0 = [X(p.x), Y(p.y), z0];
+        const w1 = [X(q.x), Y(q.y), z0];
+        const w2 = [X(q.x), Y(q.y), z1];
+        const w3 = [X(p.x), Y(p.y), z1];
+        addQuad(w0, w1, w2, w3, [ox, -oy, 0]);
+      }
+    }
+    return validateLocalEdges(indices, startIdx);
+  }
+
+  function meshPrism(mask, w, h, pixelSize, z0, z1, positions, indices) {
+    const startPos = positions.length / 3;
+    const startIdx = indices.length;
+    if (meshPrismMarch(mask, w, h, pixelSize, z0, z1, positions, indices)) return 'march';
+    positions.length = startPos * 3;
+    indices.length = startIdx;
+    return meshPrismLegacy(mask, w, h, pixelSize, z0, z1, positions, indices);
+  }
+
+  function meshPrismLegacy(mask, w, h, pixelSize, z0, z1, positions, indices, depth = 0) {
+    const earcutFn = (root.earcut && (root.earcut.default || root.earcut)) || CS.earcut;
+    if (typeof earcutFn !== 'function') throw new Error('earcut 未加载');
+    // 3x3 close removes sub-line-width pinches/notches that would otherwise
+    // create non-manifold wall junctions. The on-screen preview stays exact.
+    mask = morphMask(mask, w, h, 1, true);
+    mask = morphMask(mask, w, h, 1, false);
+    mask = fillDiagonalPinches(mask, w, h);
+    const rawLoops = traceLoops(mask, w, h).map(simplifyLoop).filter(l => Math.abs(loopArea(l)) > 1e-9);
+    if (!rawLoops.length) return;
+    const outers = [], holes = [];
+    for (const loop of rawLoops) (loopArea(loop) > 0 ? outers : holes).push(loop);
+    if (!outers.length) return;
+    const groups = outers.map(o => ({ outer: o, holes: [], area: Math.abs(loopArea(o)) }));
+    for (const hole of holes) {
+      let best = null;
+      for (const g of groups) {
+        if (pointInLoop(hole.pts[0], g.outer) && (!best || g.area < best.area)) best = g;
+      }
+      if (best) best.holes.push(hole);
+    }
+    const startPos = positions.length / 3;
+    const startIdx = indices.length;
+    const vmap = new Map();
+    const addVertex = (x, y, z) => {
+      const xi = Math.round(x * 100000), yi = Math.round(y * 100000), zi = Math.round(z * 100000);
+      const key = xi + ',' + yi + ',' + zi;
+      let idx = vmap.get(key);
+      if (idx === undefined) {
+        idx = positions.length / 3;
+        vmap.set(key, idx);
+        positions.push(x, y, z);
+      }
+      return idx;
+    };
+    const addTri = (a, b, c) => {
+      if (a === b || b === c || a === c) return;
+      indices.push(a, b, c);
+    };
+    const addQuad = (p0, p1, p2, p3, outward) => {
+      // Ensure the quad winds outward: use triangle p0,p1,p2 and flip if needed.
+      const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
+      const vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
+      const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+      const dot = nx * outward[0] + ny * outward[1] + nz * outward[2];
+      if (dot < 0) { const tmp = p1; p1 = p3; p3 = tmp; }
+      const a = addVertex(p0[0], p0[1], p0[2]);
+      const b = addVertex(p1[0], p1[1], p1[2]);
+      const c = addVertex(p2[0], p2[1], p2[2]);
+      const d = addVertex(p3[0], p3[1], p3[2]);
+      addTri(a, b, c); addTri(a, c, d);
+    };
+    const X = (x) => (x - w / 2) * pixelSize;
+    const Y = (y) => (h / 2 - y) * pixelSize;
+    const zBottom = z0;
+    const zTop = z1;
+    const addTriOriented = (p0, p1, p2, outward) => {
+      const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
+      const vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
+      const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+      if (nx * outward[0] + ny * outward[1] + nz * outward[2] < 0) { const t = p1; p1 = p2; p2 = t; }
+      const a = addVertex(p0[0], p0[1], p0[2]);
+      const b = addVertex(p1[0], p1[1], p1[2]);
+      const c = addVertex(p2[0], p2[1], p2[2]);
+      addTri(a, b, c);
+    };
+    // Triangulate caps once and reuse for top and bottom. Holes are grouped
+    // with their containing outer ring; no T-junctions, no internal faces.
+    for (const group of groups) {
+      const flat = [], holeIndex = [];
+      for (const p of group.outer.pts) flat.push(p.x, p.y);
+      for (const hole of group.holes) {
+        holeIndex.push(flat.length / 2);
+        for (const p of hole.pts) flat.push(p.x, p.y);
+      }
+      const tris = earcutFn(flat, holeIndex, 2);
+      for (let i = 0; i < tris.length; i += 3) {
+        const ia = tris[i] * 2, ib = tris[i + 1] * 2, ic = tris[i + 2] * 2;
+        const p0 = [X(flat[ia]), Y(flat[ia + 1]), zTop];
+        const p1 = [X(flat[ib]), Y(flat[ib + 1]), zTop];
+        const p2 = [X(flat[ic]), Y(flat[ic + 1]), zTop];
+        addTriOriented(p0, p1, p2, [0, 0, 1]);
+        addTriOriented([p0[0], p0[1], zBottom], [p1[0], p1[1], zBottom], [p2[0], p2[1], zBottom], [0, 0, -1]);
+      }
+    }
+    // Walls follow the same simplified boundary segments used by the caps.
+    const allLoops = [];
+    for (const group of groups) { allLoops.push(group.outer); for (const h of group.holes) allLoops.push(h); }
+    for (const loop of allLoops) {
+      const pts = loop.pts;
+      for (let i = 0; i < pts.length; i++) {
+        const p = pts[i], q = pts[(i + 1) % pts.length], out = loop.outs[i];
+        const w0 = [X(p.x), Y(p.y), zBottom];
+        const w1 = [X(q.x), Y(q.y), zBottom];
+        const w2 = [X(q.x), Y(q.y), zTop];
+        const w3 = [X(p.x), Y(p.y), zTop];
+        addQuad(w0, w1, w2, w3, [out.x, -out.y, 0]);
+      }
+    }
+    // Complex pixel masks can contain pinch points where two boundary runs
+    // meet. Verify 2-manifold edges; if not, use a guaranteed-watertight
+    // per-cell tiling for this prism (a little heavier, but exact).
+    const edgeCounts = new Map();
+    let nonManifold = false;
+    for (let i = startIdx; i < indices.length; i += 3) {
+      const tri = [indices[i], indices[i + 1], indices[i + 2]];
+      for (let k = 0; k < 3; k++) {
+        const a = tri[k], b = tri[(k + 1) % 3];
+        const key = a < b ? a + ',' + b : b + ',' + a;
+        const n = (edgeCounts.get(key) || 0) + 1;
+        edgeCounts.set(key, n);
+        if (n > 2) { nonManifold = true; break; }
+      }
+      if (nonManifold) break;
+    }
+    if (!nonManifold) {
+      for (const n of edgeCounts.values()) if (n !== 2) { nonManifold = true; break; }
+    }
+    if (nonManifold) {
+      if (depth < 1) {
+        // A 1-pixel dilation separates point-contact boundaries. It is only
+        // used for the rare prism that the cap/wall skeleton cannot resolve.
+        positions.length = startPos * 3;
+        indices.length = startIdx;
+        const grown = morphMask(mask, w, h, 1, true);
+        return meshPrism(grown, w, h, pixelSize, z0, z1, positions, indices, depth + 1);
+      }
+      // guaranteed-watertight per-cell tiling as a last resort
+      positions.length = startPos * 3;
+      indices.length = startIdx;
+      vmap.clear();
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          if (!mask[y * w + x]) continue;
+          const X0 = X(x), X1 = X(x + 1), Ytop = Y(y), Ybot = Y(y + 1);
+          addQuad([X0, Ybot, zTop], [X1, Ybot, zTop], [X1, Ytop, zTop], [X0, Ytop, zTop], [0, 0, 1]);
+          addQuad([X0, Ybot, zBottom], [X0, Ytop, zBottom], [X1, Ytop, zBottom], [X1, Ybot, zBottom], [0, 0, -1]);
+          if (y === 0 || !mask[(y - 1) * w + x]) addQuad([X0, Ytop, zBottom], [X1, Ytop, zBottom], [X1, Ytop, zTop], [X0, Ytop, zTop], [0, 1, 0]);
+          if (y === h - 1 || !mask[(y + 1) * w + x]) addQuad([X0, Ybot, zBottom], [X1, Ybot, zBottom], [X1, Ybot, zTop], [X0, Ybot, zTop], [0, -1, 0]);
+          if (x === 0 || !mask[y * w + x - 1]) addQuad([X0, Ytop, zBottom], [X0, Ybot, zBottom], [X0, Ybot, zTop], [X0, Ytop, zTop], [-1, 0, 0]);
+          if (x === w - 1 || !mask[y * w + x + 1]) addQuad([X1, Ytop, zBottom], [X1, Ybot, zBottom], [X1, Ybot, zTop], [X1, Ytop, zTop], [1, 0, 0]);
+        }
+      }
+      return 'fallback';
+    }
+    return 'earcut';
+  }
+
+  function build3MFParts(plan, options = {}) {
+    if (!plan) throw new Error('没有可导出的方案');
+    // Native resolution is the correctness default: the web preview and 3MF
+    // must share the same per-pixel recipes and exposed top colours. Compact
+    // downsampling remains available only when explicitly requested.
+    const exportMax = options.exportMax != null
+      ? Math.max(80, Math.min(1024, Number(options.exportMax) || 300))
+      : Math.max(plan.w, plan.h);
+    const scale = Math.min(1, exportMax / Math.max(plan.w, plan.h));
+    const ew = Math.max(1, Math.round(plan.w * scale));
+    const eh = Math.max(1, Math.round(plan.h * scale));
+    const plane = samplePlane(plan, ew, eh);
+    const pixelSize = plan.widthMm / ew;
+    const prisms = buildPrisms(plan, plane);
+
+    const used = [];
+    const palette = plan.palette;
+    for (let f = 0; f < palette.length; f++) if (prisms[f].length) used.push(f);
+
+    const objects = [];
+    const componentMeta = [];
+    let nextId = 2;
+    // One watertight object per prism (colour + contiguous layer range).
+    // Do not merge these into one mesh per colour: coincident horizontal caps
+    // between stacked prisms would be welded by some loaders and become
+    // non-manifold. Separate objects are the format Bambu Studio/OrcaSlicer
+    // accept without the slow assembly/component path.
+    for (const f of used) {
+      for (const prism of prisms[f]) {
+        const positions = [];
+        const indices = [];
+        meshPrism(prism.mask, ew, eh, pixelSize, prism.z0 * plan.layerHeight, prism.z1 * plan.layerHeight, positions, indices);
+        if (!indices.length) continue;
+        // Bake the plate offset into the mesh. Native Bambu Studio 3MFs keep
+        // build items transform-free and store objects in plate coordinates;
+        // this also survives loaders that ignore <assemble> in the config.
+        for (let i = 0; i < positions.length; i += 3) {
+          positions[i] += 128;
+          positions[i + 1] += 128;
+        }
+        const objectId = nextId++;
+        const name = `${palette[f].name} · L${prism.z0 + 1}-${prism.z1}`;
+        objects.push({ id: objectId, filament: f, positions, indices, name });
+        componentMeta.push({ id: objectId, name, colorIdx: f + 1, triangles: indices.length / 3, vertices: positions.length / 3 });
+      }
+    }
+    if (!objects.length) throw new Error('没有可导出的几何体（检查纯色区/渐变区层数）');
+    const assemblyId = nextId++;
+
+    const parts = [];
+    parts.push('<?xml version="1.0" encoding="UTF-8"?>');
+    parts.push('<model unit="millimeter" xml:lang="zh-CN" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:BambuStudio="http://schemas.bambulab.com/package/2021" xmlns:slic3rpe="http://schemas.slic3r.org/3mf/2017/06">');
+    parts.push(' <metadata name="Application">ChromaStack</metadata>');
+    parts.push(' <metadata name="BambuStudio:3mfVersion">1</metadata>');
+    parts.push(` <metadata name="slic3rpe:layer_height">${plan.layerHeight}</metadata>`);
+    parts.push(' <resources>');
+    parts.push('  <basematerials id="1">');
+    for (const p of palette) parts.push(`   <base name="${escapeXml(p.name)}" displaycolor="#${p.hex.replace('#', '').toUpperCase()}FF" />`);
+    parts.push('  </basematerials>');
+    for (const obj of objects) {
+      parts.push(`  <object id="${obj.id}" type="model" pid="1" pindex="${obj.filament}" name="${escapeXml(obj.name)}">`);
+      parts.push('   <mesh>');
+      parts.push('    <vertices>');
+      for (let i = 0; i < obj.positions.length; i += 3) {
+        parts.push(`     <vertex x="${round(obj.positions[i], 4)}" y="${round(obj.positions[i + 1], 4)}" z="${round(obj.positions[i + 2], 4)}" />`);
+      }
+      parts.push('    </vertices>');
+      parts.push('    <triangles>');
+      for (let i = 0; i < obj.indices.length; i += 3) {
+        // Triangle-level colour is what Bambu Studio's standard-3MF colour
+        // parser reads. Object-level pid/pindex alone is treated as plain
+        // geometry, and the whole model falls back to the slicer's default
+        // two filaments (the "why only 2 filaments?" symptom).
+        parts.push(`     <triangle v1="${obj.indices[i]}" v2="${obj.indices[i + 1]}" v3="${obj.indices[i + 2]}" pid="1" pindex="${obj.filament}" />`);
+      }
+      parts.push('    </triangles>');
+      parts.push('   </mesh>');
+      parts.push('  </object>');
+    }
+    parts.push(`  <object id="${assemblyId}" type="model" name="ChromaStack_Model">`);
+    parts.push('   <components>');
+    for (const obj of objects) parts.push(`    <component objectid="${obj.id}" />`);
+    parts.push('   </components>');
+    parts.push('  </object>');
+    parts.push(' </resources>');
+    parts.push(' <build>');
+    parts.push(`  <item objectid="${assemblyId}" />`);
+    parts.push(' </build>');
+    parts.push('</model>');
+
+    const assemblyFaces = objects.reduce((s, obj) => s + obj.indices.length / 3, 0);
+    const modelSettings = `<?xml version="1.0" encoding="UTF-8"?>
+<config>
+ <object id="${assemblyId}">
+  <metadata key="name" value="ChromaStack Model"/>
+  <metadata key="extruder" value="1"/>
+  <metadata face_count="${assemblyFaces}"/>
+${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
+   <metadata key="name" value="${escapeXml(obj.name)}"/>
+   <metadata key="extruder" value="${obj.filament + 1}"/>
+   <mesh_stat face_count="${obj.indices.length / 3}" edges_fixed="0" degenerate_facets="0" facets_removed="0" facets_reversed="0" backwards_edges="0"/>
+  </part>`).join('\n')}
+ </object>
+ <plate>
+  <metadata key="plater_id" value="1"/>
+  <metadata key="plater_name" value=""/>
+  <metadata key="locked" value="false"/>
+  <metadata key="filament_map_mode" value="Auto For Flush"/>
+  <model_instance>
+   <metadata key="object_id" value="${assemblyId}"/>
+   <metadata key="instance_id" value="0"/>
+   <metadata key="identify_id" value="1"/>
+  </model_instance>
+ </plate>
+ <assemble>
+  <assemble_item object_id="${assemblyId}" instance_id="0" transform="1 0 0 0 1 0 0 0 1 0 0 0" offset="0 0 0" />
+ </assemble>
+</config>`;
+
+    // Minimal Bambu/Orca project profile. Without it Bambu Studio reports
+    // "3mf 文件配置无效，仅加载几何数据" and drops every part-to-extruder
+    // assignment. ChromaStack is not a printer preset on purpose: the studio
+    // keeps the user's current machine and only takes the filament colours,
+    // layer height and infill from here.
+    const projectSettings = {
+      layer_height: String(plan.layerHeight),
+      initial_layer_print_height: String(plan.layerHeight),
+      wall_loops: '2',
+      sparse_infill_density: '100%',
+      printer_model: 'ChromaStack',
+      printer_settings_id: 'ChromaStack 0.4 nozzle',
+      nozzle_diameter: ['0.4'],
+      printable_height: '256',
+      filament_colour: palette.map(p => p.hex),
+      filament_type: palette.map(() => 'PLA'),
+      filament_settings_id: palette.map(() => 'Generic PLA @ChromaStack 0.4 nozzle'),
+      filament_vendor: palette.map(p => /Bambu/i.test(p.brand || '') ? 'Bambu Lab' : 'Generic')
+    };
+
+    const contentTypes = `<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+ <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+ <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>
+ <Default Extension="png" ContentType="image/png"/>
+ <Default Extension="config" ContentType="text/xml"/>
+ <Default Extension="json" ContentType="application/json"/>
+</Types>`;
+    const rels = `<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+ <Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
+</Relationships>`;
+    const meta = {
+      app: 'ChromaStack', engine: plan.engine, widthMm: plan.widthMm, heightMm: plan.heightMm,
+      layerHeight: plan.layerHeight, flatLayers: plan.flatLayers, gradStartLayer: plan.gradStartLayer,
+      gradTopLayer: plan.gradTopLayer, reliefMm: plan.reliefMm,
+      background: plan.background || { enabled: false }, palette: palette.map(p => ({ name: p.name, hex: p.hex, td: p.td })),
+      stats: { meanDE: plan.stats.meanDE, p90: plan.stats.p90, toolChanges: plan.stats.toolChanges, smoothLevel: plan.smoothLevel || 0,
+        smoothMm: plan.smoothMm ?? null, lineWidthMm: plan.lineWidthMm ?? null, smoothRadiusPx: plan.smoothRadiusPx ?? null,
+        heightMergeDeltaE: plan.heightMergeDeltaE || 0, heightShortenedFamilies: plan.stats.heightShortenedFamilies || 0,
+        edgeClean: plan.edgeClean || 0, edgePixelPercent: +(plan.edgePixelPercent || 0).toFixed(1),
+        supportAddedPixels: plan.stats.supportAddedPixels || 0, supportAddedLayers: plan.stats.supportAddedLayers || [],
+        heightMergedFamilies: plan.stats.heightMergedFamilies || 0, heightSavedLayers: plan.stats.heightSavedLayers || 0,
+        lineMode: plan.lineMode || 'auto', lineApplied: !!plan.lineApplied,
+        lineStrokePercent: +((plan.lineInfo && plan.lineInfo.strokePercent) || 0).toFixed(2),
+        lineDirectPercent: +((plan.lineInfo && plan.lineInfo.directPercent) || 0).toFixed(2) },
+      exportGrid: [ew, eh], triangles: componentMeta.reduce((s, c) => s + c.triangles, 0)
+    };
+    const files = [
+      { name: '[Content_Types].xml', data: contentTypes },
+      { name: '_rels/.rels', data: rels },
+      { name: '3D/3dmodel.model', data: parts.join('\n') },
+      { name: 'Metadata/model_settings.config', data: modelSettings },
+      { name: 'Metadata/project_settings.config', data: JSON.stringify(projectSettings, null, 2) },
+      { name: 'Metadata/chromastack.json', data: JSON.stringify(meta, null, 2) }
+    ];
+    return { files, meta, objects: componentMeta, ew, eh, pixelSize };
+  }
+
+  function build3MFBytes(plan, options) {
+    const out = build3MFParts(plan, options);
+    return { bytes: CS.zip.createZip(out.files), meta: out.meta, objects: out.objects, ew: out.ew, eh: out.eh, pixelSize: out.pixelSize };
+  }
+
+  async function build3MFBytesAsync(plan, options) {
+    const out = build3MFParts(plan, options);
+    const bytes = CS.zip.createZipAsync ? await CS.zip.createZipAsync(out.files) : CS.zip.createZip(out.files);
+    return { bytes, meta: out.meta, objects: out.objects, ew: out.ew, eh: out.eh, pixelSize: out.pixelSize };
+  }
+
+  function build3MFBlob(plan, options) {
+    const out = build3MFBytes(plan, options);
+    return { blob: new Blob([out.bytes], { type: 'model/3mf' }), meta: out.meta };
+  }
+
+  async function build3MFBlobAsync(plan, options) {
+    const out = await build3MFBytesAsync(plan, options);
+    return { blob: new Blob([out.bytes], { type: 'model/3mf' }), meta: out.meta };
+  }
+
+  function planSummary(plan) {
+    return {
+      app: 'ChromaStack',
+      engine: plan.engine,
+      lut: plan.lutKey,
+      physical: { widthMm: +plan.widthMm.toFixed(2), heightMm: +plan.heightMm.toFixed(2), pixelSizeMm: +plan.pixelSize.toFixed(4) },
+      layers: { layerHeight: plan.layerHeight, flatLayers: plan.flatLayers, gradientStartLayer: plan.gradStartLayer, gradientTopLayer: plan.gradTopLayer, maxLayers: plan.maxLayers, flatTopMm: +plan.flatTopMm.toFixed(3), gradientTopMm: +plan.gradTopMm.toFixed(3), actualGradientTopMm: +(plan.actualGradTopMm || plan.gradTopMm).toFixed(3), reliefMm: +plan.reliefMm.toFixed(3), variableHeight: !!plan.variableHeight },
+      palette: plan.palette.map((p, i) => ({ slot: i + 1, name: p.name, hex: p.hex, td: p.td, hdMm: +(p.hd || 0).toFixed(3), brand: p.brand, material: p.material })),
+      foundation: plan.foundation.name,
+      background: plan.background || { enabled: false },
+      stats: {
+        meanDeltaE00: +plan.stats.meanDE.toFixed(2), medianDeltaE00: plan.stats.median, p90DeltaE00: plan.stats.p90,
+        maxDeltaE00: +plan.stats.maxDE.toFixed(2), under5Percent: +plan.stats.under5.toFixed(1),
+        flatPercent: +plan.stats.flatPercent.toFixed(1), gradientPercent: +plan.stats.gradPercent.toFixed(1),
+        families: plan.stats.familyCount, toolChangeLowerBound: plan.stats.toolChanges,
+        outOfGamutPercent: +(plan.stats.outOfGamutPercent || 0).toFixed(1), variableHeight: !!plan.variableHeight, smoothLevel: plan.smoothLevel || 0,
+        smoothMm: plan.smoothMm ?? null, lineWidthMm: plan.lineWidthMm ?? null, smoothRadiusPx: plan.smoothRadiusPx ?? null, flatSmoothRadiusPx: plan.flatSmoothRadiusPx ?? null,
+        structureCleanupPixels: plan.stats.structureCleanupPixels || 0, structureCleanupComponents: plan.stats.structureCleanupComponents || 0,
+        structureCleanupMinAreaPx: plan.stats.structureCleanupMinAreaPx || 0, structureCleanupEdgeOnly: !!plan.stats.structureCleanupEdgeOnly,
+        vectorFlat: !!plan.vectorFlat, vectorFlatFamilies: plan.vectorFlatFamilies || 0, vectorFlatPixels: plan.vectorFlatPixels || 0,
+        vectorFlatIslandPixels: plan.vectorFlatIslandPixels || 0, vectorFlatBoundaryPixels: plan.vectorFlatBoundaryPixels || 0,
+        mergeDeltaE: plan.mergeDeltaE || 0, mergedGroups: plan.stats.mergedGroups || 0, sharedBasePercent: +(plan.stats.sharedBasePercent || 0).toFixed(1),
+        heightMergeDeltaE: plan.heightMergeDeltaE || 0, heightShortenedFamilies: plan.stats.heightShortenedFamilies || 0,
+        edgeClean: plan.edgeClean || 0, edgePixelPercent: +(plan.edgePixelPercent || 0).toFixed(1),
+        supportAddedPixels: plan.stats.supportAddedPixels || 0, supportAddedLayers: plan.stats.supportAddedLayers || [],
+        heightMergedFamilies: plan.stats.heightMergedFamilies || 0, heightSavedLayers: plan.stats.heightSavedLayers || 0,
+        lineProtect: plan.lineMode || 'auto', lineApplied: !!plan.lineApplied,
+        lineStrokePercent: +((plan.lineInfo && plan.lineInfo.strokePercent) || 0).toFixed(1),
+        lineDirectPercent: +((plan.lineInfo && plan.lineInfo.directPercent) || 0).toFixed(1),
+        filamentGrams: plan.palette.map((p, i) => +plan.stats.grams[i].toFixed(2))
+      },
+      warnings: plan.warnings,
+      families: plan.families.map((f, i) => ({
+        id: i, pixels: f.pixelCount, targetHex: f.targetHex, predictedHex: f.predictedHex,
+        deltaE00: +f.deltaE.toFixed(2), layers: f.recipe.length, topMm: +((plan.gradStartLayer + f.recipe.length) * plan.layerHeight).toFixed(3),
+        recipeBottomToTop: f.recipe.map(x => plan.palette[x].name)
+      })).filter(f => f.pixels > 0).sort((a, b) => b.pixels - a.pixels),
+      layerSchedule: plan.stats.layerFilaments.map((arr, z) => ({
+        layer: z, zMm: +(z * plan.layerHeight).toFixed(3), filaments: arr.map(x => plan.palette[x].name)
+      }))
+    };
+  }
+
+  function buildPlanMarkdown(plan) {
+    const s = planSummary(plan);
+    const lines = [];
+    lines.push(`# ${plan.engine === 'lut' ? '物理 LUT' : 'TD 立体浮雕'}混合彩绘打印计划`);
+    lines.push('');
+    lines.push(`- 成品尺寸：${s.physical.widthMm} × ${s.physical.heightMm} mm`);
+    lines.push(`- 层高：${s.layers.layerHeight} mm；纯色区 ${s.layers.flatLayers} 层 (${s.layers.flatTopMm} mm)；渐变区 ${s.layers.gradientStartLayer}–${s.layers.gradientTopLayer} 层；浮雕差 ${s.layers.reliefMm} mm`);
+    lines.push(`- 颜色预测：平均 ΔE00 ${s.stats.meanDeltaE00}，P90 ${s.stats.p90DeltaE00}，ΔE00≤5 占 ${s.stats.under5Percent}%`);
+    lines.push(`- 纯色区占比 ${s.stats.flatPercent}%，渐变区占比 ${s.stats.gradientPercent}%，渐变配方 ${s.stats.families} 个；平滑 ${s.stats.smoothMm != null ? s.stats.smoothMm.toFixed(2) + ' mm（半径 ' + (s.stats.smoothRadiusPx || 0) + 'px，线宽 ' + (s.stats.lineWidthMm || 0.42).toFixed(2) + 'mm）' : (s.stats.smoothLevel || 0) + '/4'}；层序合并 ${s.stats.mergeDeltaE || 0} ΔE，${s.stats.mergedGroups || 0} 组共享底层（${s.stats.sharedBasePercent || 0}% 渐变像素）`);
+    if (s.stats.heightMergeDeltaE) {
+      lines.push(`- 边缘光晕清理 ${s.stats.edgeClean || 0}/3，抗锯齿带 ${s.stats.edgePixelPercent || 0}% 像素。`);
+    if (s.stats.vectorFlat) lines.push(`- 矢量化色块直印：${s.stats.vectorFlatFamilies} 个色族 / ${(s.stats.vectorFlatPixels / (plan.w * plan.h) * 100).toFixed(1)}% 像素改为纯色，清理 ${s.stats.vectorFlatIslandPixels || 0} px 边缘小岛、归并 ${s.stats.vectorFlatBoundaryPixels || 0} px 抗锯齿边界。`);
+    lines.push(`- 悬空检查：${s.stats.supportAddedPixels ? '发现 '+s.stats.supportAddedPixels+' 个新增无支撑像素（第 '+s.stats.supportAddedLayers.join('、')+' 层）' : '无新增面积，所有层都有下层支撑'}。`);
+    lines.push(`- 高度去重 ${s.stats.heightMergeDeltaE} ΔE：${s.stats.heightShortenedFamilies} 个色族改用更短配方，${s.stats.heightMergedFamilies} 个重复色族合并，最高降低 ${s.stats.heightSavedLayers} 层。`);
+    }
+    lines.push(`- 线稿保护：${s.stats.lineProtect}${s.stats.lineApplied ? '（已启用）' : '（未启用）'}；保护细线 ${s.stats.lineStrokePercent}% 像素，其中直接纯色 ${s.stats.lineDirectPercent}%。`);
+    lines.push(`- 层内换色下界：约 ${s.stats.toolChangeLowerBound} 次（切片器/擦料塔会改变实际值）`);
+    lines.push('');
+    lines.push('## AMS 槽位');
+    lines.push('');
+    lines.push('| 槽位 | 耗材 | 颜色 | TD | 推算 HD | 预估用量 |');
+    lines.push('| --- | --- | --- | --- | --- | --- |');
+    s.palette.forEach((p, i) => {
+      lines.push(`| ${i + 1} | ${p.brand} ${p.material} ${p.name} | ${p.hex} | ${p.td} | ${p.hdMm} mm | ${s.stats.filamentGrams[i]} g |`);
+    });
+    lines.push('');
+    lines.push('## 层叠结构');
+    lines.push('');
+    lines.push(`- 纯色区：0–${s.layers.flatLayers} 层使用该区域最近的槽位颜色。`);
+    lines.push(`- 渐变区：0–${s.layers.gradientStartLayer} 层为基底（${s.foundation}），随后各色块按 1–${s.layers.gradientTopLayer - s.layers.gradientStartLayer} 层配方叠色；${s.layers.variableHeight ? '短线配方形成低台阶，最长配方到 ' + s.layers.actualGradientTopMm + ' mm。' : '所有渐变块等高。'}
+- 纯色区顶面 ${s.layers.flatTopMm} mm，渐变区最高 ${s.layers.actualGradientTopMm} mm；最高浮雕差 ${s.layers.reliefMm} mm。`);
+    lines.push('- 3MF 是一个多 part 对象：每个“颜色 × 连续层区间”是一个水密 part，已写入 extruder 编号；导入 Bambu Studio 若提示“配置无效，仅加载几何数据”，点确认即可。');
+    lines.push('');
+    lines.push('## 层内耗材（下界）');
+    lines.push('');
+    lines.push('| 层 | Z (mm) | 该层出现的耗材 |');
+    lines.push('| --- | --- | --- |');
+    s.layerSchedule.forEach(l => lines.push(`| ${l.layer} | ${l.zMm} | ${l.filaments.join(' / ')} |`));
+    lines.push('');
+    if (s.warnings.length) {
+      lines.push('## 注意');
+      lines.push('');
+      s.warnings.forEach(w => lines.push('- ' + w));
+      lines.push('');
+    }
+    lines.push('## 切片建议');
+    lines.push('');
+    lines.push('- 使用 0.4 mm 喷嘴；LUT 校准线宽为 0.42 mm，层高 0.08 mm。');
+    lines.push('- 100% 填充，关闭顶/底壳的“仅一层”之类的省料选项；保证叠色层完整。');
+    lines.push('- 先用小样确认实际颜色；不同批次、温度、层高与线宽都会影响混色。');
+    lines.push('- 若使用平滑/模糊皮肤，请关闭，以免破坏颜色边界。');
+    return lines.join('\n');
+  }
+
+  CS.exporter = {
+    build3MFBytes, build3MFBytesAsync, build3MFBlob, build3MFBlobAsync, planSummary, buildPlanMarkdown, samplePlane, buildPrisms,
+    traceLoops, simplifyLoop, loopArea, pointInLoop, meshPrism
+  };
+})(typeof globalThis !== 'undefined' ? globalThis : this);

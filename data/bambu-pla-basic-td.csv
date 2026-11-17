@@ -1,0 +1,17 @@
+﻿颜色,Hex,TD,HD_mm(TD*0.1),品牌,材料,来源
+BambuLab Green,#00ae42,4,0.4,BambuLab Basic,PLA,HueForge affiliate library
+Beige,#e7ceb5,8,0.8,BambuLab Basic,PLA,HueForge affiliate library
+Black,#000000,0.6,0.06,BambuLab Basic,PLA,HueForge affiliate library
+Blue,#00358e,4,0.4,BambuLab Basic,PLA,HueForge affiliate library
+Blue Gray,#4c5f71,3,0.3,BambuLab Basic,PLA,HueForge affiliate library
+Brown,#9d432c,2,0.2,BambuLab Basic,PLA,HueForge affiliate library
+Cyan,#0086D6,3.5,0.35,BambuLab Basic,PLA,Bambu CMYK guide + CMYW reference TD
+Gray,#8e9089,2,0.2,BambuLab Basic,PLA,HueForge affiliate library
+Green,#003b3b,2,0.2,BambuLab Basic,PLA,HueForge affiliate library
+Jade White,#ffffff,5,0.5,BambuLab Basic,PLA,HueForge affiliate library
+Magenta,#EC008C,3.0,0.3,BambuLab Basic,PLA,Bambu CMYK guide + CMYW reference TD
+Orange,#ff6a13,7,0.7,BambuLab Basic,PLA,HueForge affiliate library
+Pink,#ff5869,8,0.8,BambuLab Basic,PLA,HueForge affiliate library
+Red,#c00d1e,5,0.5,BambuLab Basic,PLA,HueForge affiliate library
+Silver,#a6a9aa,0.5,0.05,BambuLab Basic,PLA,HueForge affiliate library
+Yellow,#fce300,6,0.6,BambuLab Basic,PLA,HueForge affiliate library
