@@ -120,6 +120,14 @@ function rot90cw(img) {
   }
   return { width: N, height: N, data };
 }
+function mirrorX(img) {
+  const data = new Uint8ClampedArray(N * N * 4);
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+    const p = (y * N + x) * 4, q = (y * N + (N - 1 - x)) * 4;
+    for (let c = 0; c < 4; c++) data[p + c] = img.data[q + c];
+  }
+  return { width: N, height: N, data };
+}
 
 const palette = [
   { id: 'k', name: 'Black', hex: '#000000', td: 0.6, brand: 'T', material: 'PLA' },
@@ -150,6 +158,10 @@ function checkResult(result, tag) {
 
 checkResult(M.analyzeMatrixPhoto(warped(), palette), 'warped');
 checkResult(M.analyzeMatrixPhoto(rot90cw(warped()), palette), 'rotated90');
+const mirrored = M.analyzeMatrixPhoto(mirrorX(warped()), palette);
+checkResult(mirrored, 'mirrored');
+assert.equal(mirrored.orientation.mirror, true, 'mirrored photo detected as reflection');
+assert.equal(M.analyzeMatrixPhoto(rot90cw(warped()), palette).orientation.mirror, false, 'rotated photo not flagged mirrored');
 
 /* wrong board type must fail loudly, not silently mis-fit */
 const blank = { width: 400, height: 400, data: new Uint8ClampedArray(400 * 400 * 4).fill(128) };

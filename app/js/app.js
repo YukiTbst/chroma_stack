@@ -1857,6 +1857,13 @@
     }
     const checks = result.matrixChecks ? ` · 混色交叉验证 ΔE 平均 ${result.matrixChecks.meanDE.toFixed(1)} / 最大 ${result.matrixChecks.maxDE.toFixed(1)}` : '';
     $('batchPhotoSummary').textContent = `平均识别置信度 ${(result.score * 100).toFixed(0)}% · 白平衡增益 ${result.whiteBalance.gains.map(g => g.toFixed(2)).join(' / ')}${checks}`;
+    const warn = $('batchPhotoWarn');
+    if (result.matrixChecks && result.matrixChecks.meanDE > 6) {
+      warn.hidden = false;
+      warn.textContent = result.matrixChecks.meanDE > 10
+        ? '交叉验证色差过大，禁止应用：照片疑似经过 HDR/AI 场景优化/美颜（黑底被提亮、白底被压暗、颜色被加饱和），或反光/阴影严重。请关闭 HDR 与 AI 优化、用均匀漫射光重拍后再识别。'
+        : '交叉验证色差偏大：请检查反光、阴影与对焦，必要时关闭 HDR/AI 优化重拍；应用前请自行确认采样框对齐。';
+    } else { warn.hidden = true; warn.textContent = ''; }
     $('batchPhotoResults').innerHTML = result.results.map(r => `<div class="family-item"><span class="family-swatch" style="background:${r.hex}"></span><b>${esc(r.name)}</b> · ${r.hex} · TD ${r.td.toFixed(2)} · 置信度 ${(r.score * 100).toFixed(0)}%</div>`).join('');
     openModal('batchPhotoModal');
   }
@@ -1913,6 +1920,10 @@
   function applyBatchPhoto() {
     const result = state.batchPhotoResult;
     if (!result) return;
+    if (result.matrixChecks && result.matrixChecks.meanDE > 10) {
+      toast('交叉验证色差过大，已阻止应用：请关闭 HDR/AI 优化并用均匀漫射光重拍');
+      return;
+    }
     const palette = currentCalibrationPalette();
     for (const r of result.results) {
       const index = palette.findIndex(p => (r.id && p.id === r.id) || (p.name === r.name && p.brand === r.brand && p.material === r.material));
