@@ -14,8 +14,44 @@
   const clamp = (v, a, b) => v < a ? a : (v > b ? b : v);
   const CODES = ['K', 'W', 'O', 'Y', 'C', 'M'];
 
-  /* Mirrors tests/generate-multicolor-td-100mm-6color.py (metadata version 2). */
-  function buildMatrixLayout() {
+  /* Mirrors tests/generate-multicolor-td-100mm-6color.py (metadata version 2).
+     version 'v1' reproduces the earlier 75 mm four-colour board for
+     re-calibrating boards that were already printed. */
+  function buildMatrixLayout(version) {
+    if (version === 'v1') {
+      const board = 75, layerHeight = 0.08, firstLayer = 0.24, baseLayers = 2;
+      const baseHeight = firstLayer + layerHeight;
+      const steps = [1, 4, 10];
+      const mixLeft = [['W', 'R'], ['R', 'W'], ['W', 'U'], ['U', 'W'], ['R', 'U', 'R'], ['U', 'R', 'U']];
+      const mixRight = [['K', 'R'], ['R', 'K'], ['K', 'U'], ['U', 'K'], ['R', 'W', 'R'], ['U', 'W', 'U']];
+      const cells = [];
+      for (let side = 0; side < 2; side++) {
+        const base = side === 0 ? 'K' : 'W';
+        const recipes = [];
+        for (const f of ['W', 'K', 'R', 'U']) for (const n of steps) recipes.push({ kind: 'single', filament: f, recipe: new Array(n).fill(f), layers: n });
+        for (const recipe of (side === 0 ? mixLeft : mixRight)) recipes.push({ kind: 'mixed', recipe, layers: recipe.length });
+        for (let row = 0; row < 6; row++) for (let col = 0; col < 3; col++) {
+          const r = recipes[row * 3 + col];
+          const x = 6.75 + (side * 3 + col) * 10.5, y = 6.75 + row * 10.5;
+          cells.push({ id: `${side === 0 ? 'B' : 'W'}-${row + 1}${col + 1}`, x, y, size: 9, cx: x + 4.5, cy: y + 4.5, base, ...r });
+        }
+      }
+      const markers = [
+        { x: 1.5, y: 1.5, cx: 3, cy: 3, size: 3, filament: 'W' },
+        { x: 70.5, y: 1.5, cx: 72, cy: 3, size: 3, filament: 'K' },
+        { x: 70.5, y: 70.5, cx: 72, cy: 72, size: 3, filament: 'K' },
+        { x: 1.5, y: 70.5, cx: 3, cy: 72, size: 3, filament: 'W' }
+      ];
+      return {
+        version: 'v1', codes: ['K', 'W', 'R', 'U'], polarity: ['B', 'D', 'D', 'B'],
+        boardW: board, boardD: board, layerHeight, firstLayer, baseLayers, baseHeight,
+        totalLayers: baseLayers + Math.max(...steps), maxHeight: firstLayer + (baseLayers + Math.max(...steps) - 1) * layerHeight,
+        steps, cells, markers,
+        baseSamples: { K: [[20, 3.5], [20, 71.5], [16.5, 37.5]], W: [[55, 3.5], [55, 71.5], [48, 37.5]] },
+        printMode: 'multi-filament-per-layer',
+        note: '75mm 黑白双基底四色板（旧版）：每色 1/4/10 层锚点 + 6 个跨色配方；左黑右白。'
+      };
+    }
     const board = 100, layerHeight = 0.08, firstLayer = 0.24, baseLayers = 2;
     const baseHeight = firstLayer + layerHeight;
     const steps = [1, 2, 4, 8];
@@ -50,6 +86,7 @@
       { x: 1.5, y: 95.5, cx: 3, cy: 97, size: 3, filament: 'K' }
     ];
     return {
+      version: 'v2', codes: CODES, polarity: ['B', 'B', 'D', 'D'],
       boardW: board, boardD: board, layerHeight, firstLayer, baseLayers, baseHeight,
       totalLayers: baseLayers + Math.max(...steps), maxHeight: firstLayer + (baseLayers + Math.max(...steps) - 1) * layerHeight,
       steps, cells, markers,
@@ -172,7 +209,6 @@
     return ordered.map(m => ({ ...m, bright: m.meanY > m.ring }));
   }
 
-  const POLARITY = ['B', 'B', 'D', 'D']; // markers tl,tr,br,bl = W,W,K,K
   /* The polarity pattern is a palindrome, so it cannot tell a rotated photo
      from a mirrored one (slicer flip or front camera). Enumerate all eight
      dihedral pairings, keep those matching polarity, then let the content
@@ -180,6 +216,7 @@
      with thickness towards the filament's own colour. Opaque filaments (black)
      show almost no spread and are skipped instead of voting with noise. */
   function chooseMarkerMap(layout, detected, imageData) {
+    const codes = layout.codes || CODES, POLARITY = layout.polarity || ['B', 'B', 'D', 'D'];
     let best = null;
     for (let rot = 0; rot < 4; rot++) for (const mirror of [false, true]) {
       const idx = i => mirror ? (rot - i + 4) % 4 : (i + rot) % 4;
@@ -191,7 +228,7 @@
       // produce out-of-range or non-monotone T. Palette-independent.
       const WGT = [0.2126, 0.7152, 0.0722];
       let score = 0;
-      for (const code of CODES) {
+      for (const code of codes) {
         const cells = layout.cells.filter(c => c.kind === 'single' && c.filament === code);
         const pairs = [];
         for (const d of [...new Set(cells.map(c => c.layers))]) {
@@ -250,80 +287,69 @@
     return B.searchScalar(evaluate, Math.log(0.05), Math.log(10));
   }
 
-  /* Differential transmission estimator. At equal thickness the two halves
-     differ only by what the substrate contributes:
-       Y_white(d) - Y_black(d) = T(d) * (Y_baseWhite - Y_baseBlack)
-     so T(d) follows from luminance differences alone — opaque colour, gloss
-     veil and camera gain all cancel. Regressing log10 T against d gives HD
-     without fitting any of the corrupted unknowns. The opaque colour is then
-     solved from the 4/10-layer anchors (thin cells carry gloss/chroma noise),
-     with clipped channels censored from the linear solve. */
-  function fitMatrixAnchors(anchorsByCode) {
-    const WGT = [0.2126, 0.7152, 0.0722];
+  /* Per-channel differential transmission estimator. Real filaments absorb
+     selectively (yellow blocks blue far more than red), so each channel gets
+     its own HD from the black/white substrate difference at equal thickness:
+       T_c(d) = (obs_w_c - obs_k_c) / (baseW_c - baseK_c)
+     Regressing log10 T_c against d gives HD_c; below-noise pairs only bound the
+     slope from below (opaque filaments). The opaque colour per channel is then
+     solved from the 4/8-layer anchors with clipped channels censored. */
+  function fitMatrixAnchors(anchorsByCode, codes) {
+    codes = codes || CODES;
     const data = {};
-    for (const code of CODES) data[code] = anchorsByCode[code].map(s => ({
+    for (const code of codes) data[code] = anchorsByCode[code].map(s => ({
       d: s.thickness, half: s.base, rgb: s.rgb,
       o: s.rgb.map(v => C.srgbToLinear(v / 255)),
       b: s.substrate.map(v => C.srgbToLinear(v / 255)),
       ok: s.rgb.map(v => v > 2 && v < 254)
     }));
-    const hd = {}, fits = {};
-    for (const code of CODES) {
+    const fits = {};
+    for (const code of codes) {
       const rows = data[code];
-      let sdd = 0, sdt = 0, slopeMin = 0;
-      for (const d of [...new Set(rows.map(r => r.d))]) {
-        const k = rows.find(r => r.d === d && r.half === 'K');
-        const w = rows.find(r => r.d === d && r.half === 'W');
-        if (!k || !w) continue;
-        // Both halves must be compared over the same unclipped channels,
-        // otherwise a clipped red channel on one side breaks the difference.
-        const mask = [0, 1, 2].filter(c => k.ok[c] && w.ok[c]);
-        if (!mask.length) continue;
-        const ly = lin => {
-          let num = 0, den = 0;
-          for (const c of mask) { num += WGT[c] * lin[c]; den += WGT[c]; }
-          return num / den;
-        };
-        const db = ly(w.b) - ly(k.b);
-        const dy = ly(w.o) - ly(k.o);
-        if (db < 0.05) continue;
-        if (Math.abs(dy) < 0.006) {
-          // Below the noise floor the pair only bounds T from above, i.e. the
-          // slope from below — vital for opaque filaments whose thin-cell
-          // signal is chroma noise and would otherwise set HD arbitrarily.
-          slopeMin = Math.max(slopeMin, -Math.log10(0.006 / db) / d);
-          continue;
+      const hd = [0.05, 0.05, 0.05];
+      for (let c = 0; c < 3; c++) {
+        let sdd = 0, sdt = 0, slopeMin = 0;
+        for (const d of [...new Set(rows.map(r => r.d))]) {
+          const k = rows.find(r => r.d === d && r.half === 'K');
+          const w = rows.find(r => r.d === d && r.half === 'W');
+          if (!k || !w || !k.ok[c] || !w.ok[c]) continue;
+          const db = w.b[c] - k.b[c], dy = w.o[c] - k.o[c];
+          if (db < 0.03) continue;
+          if (Math.abs(dy) < 0.004) {
+            slopeMin = Math.max(slopeMin, -Math.log10(0.004 / db) / d);
+            continue;
+          }
+          const T = clamp(dy / db, 0.002, 0.998);
+          sdd += d * d; sdt += d * -Math.log10(T);
         }
-        const T = clamp(dy / db, 0.002, 0.998);
-        sdd += d * d; sdt += d * -Math.log10(T);
+        const slope = Math.max(sdd > 1e-9 ? sdt / sdd : 0, slopeMin, 1e-3);
+        hd[c] = clamp(1 / slope, 0.01, 2);
       }
-      const slopeLS = sdd > 1e-9 ? sdt / sdd : 0;
-      hd[code] = clamp(1 / Math.max(slopeLS, slopeMin, 1e-6), 0.05, 10);
       const thick = rows.filter(r => r.d >= 0.3);
       const use = thick.length >= 2 ? thick : rows;
-      const T = use.map(r => Math.pow(10, -r.d / hd[code]));
       const linear = [0, 1, 2].map(c => {
         let num = 0, den = 0, low = 0, high = 0, n = 0;
-        for (let i = 0; i < use.length; i++) {
+        for (const s of use) {
           n++;
-          if (use[i].rgb[c] <= 2) low++;
-          if (use[i].rgb[c] >= 254) high++;
-          if (!use[i].ok[c]) continue;
-          num += (1 - T[i]) * (use[i].o[c] - use[i].b[c] * T[i]);
-          den += (1 - T[i]) ** 2;
+          if (s.rgb[c] <= 2) low++;
+          if (s.rgb[c] >= 254) high++;
+          if (!s.ok[c]) continue;
+          const T = Math.pow(10, -s.d / hd[c]);
+          num += (1 - T) * (s.o[c] - s.b[c] * T);
+          den += (1 - T) ** 2;
         }
         if (den > 1e-10) return clamp(num / den, 0, 4);
-        // Fully censored channel: clipped low means the filament reflects
-        // nothing there (blue has no red); clipped high only bounds it below.
         if (low === n) return 0;
         if (high === n) return 1;
         return 0.5;
       });
       let error = 0;
-      for (let i = 0; i < use.length; i++) for (let c = 0; c < 3; c++) {
-        error += (C.linearToSrgb8(linear[c] * (1 - T[i]) + use[i].b[c] * T[i]) - use[i].rgb[c]) ** 2;
+      for (const s of use) for (let c = 0; c < 3; c++) {
+        const T = Math.pow(10, -s.d / hd[c]);
+        error += (C.linearToSrgb8(linear[c] * (1 - T) + s.b[c] * T) - s.rgb[c]) ** 2;
       }
-      fits[code] = { hd: hd[code], linear, error: error / (use.length * 3), rgb: linear.map(v => C.linearToSrgb8(v)) };
+      const hdAvg = (hd[0] + hd[1] + hd[2]) / 3;
+      fits[code] = { hd: hdAvg, hdR: hd[0], hdG: hd[1], hdB: hd[2], linear, error: error / (use.length * 3), rgb: linear.map(v => C.linearToSrgb8(v)) };
     }
     return { fits, illumination: { K: 1, W: 1 } };
   }
@@ -341,7 +367,19 @@
     return (h * 60 + 360) % 360;
   }
 
-  function matchMatrixPalette(palette) {
+  function matchMatrixPalette(palette, version) {
+    if (version === 'v1') {
+      // Legacy 75 mm board: darkest / lightest / reddest / bluest.
+      if (!palette || palette.length < 4) throw new Error('矩阵标定需要当前耗材里至少有黑、白、红、蓝四类耗材');
+      const lab = palette.map(p => C.hexToLab(p.hex));
+      const arg = (fn, exclude = []) => lab.reduce((best, l, i) => (exclude.includes(i) || (best >= 0 && !fn(l, lab[best]))) ? best : i, -1);
+      const K = arg((l, b) => l.L < b.L);
+      const W = arg((l, b) => l.L > b.L);
+      const R = arg((l, b) => l.a > b.a, [K, W]);
+      const U = arg((l, b) => l.b < b.b, [K, W, R]);
+      if (new Set([K, W, R, U]).size !== 4) throw new Error('无法从当前耗材区分黑/白/红/蓝四类，请检查耗材颜色');
+      return { K, W, R, U };
+    }
     if (!palette || palette.length < 6) throw new Error('矩阵标定需要当前耗材里至少有黑、白、橙、黄、青、品红六类耗材');
     const lab = palette.map(p => C.hexToLab(p.hex));
     const hues = palette.map(p => hueOf(p.hex));
@@ -372,8 +410,9 @@
   }
 
   function analyzeMatrixPhoto(imageData, palette, options = {}) {
-    const layout = options.layout || buildMatrixLayout();
-    const mapping = options.mapping || matchMatrixPalette(palette);
+    const layout = options.layout || buildMatrixLayout(options.version);
+    const codes = layout.codes || CODES;
+    const mapping = options.mapping || matchMatrixPalette(palette, layout.version || 'v2');
     const detected = detectMatrixMarkers(imageData);
     const orient = chooseMarkerMap(layout, detected, imageData);
     const map = orient.map;
@@ -426,24 +465,24 @@
       return { rgb, x: ctr.x, y: ctr.y };
     };
     const anchors = {};
-    for (const code of CODES) {
+    for (const code of codes) {
       anchors[code] = layout.cells.filter(c => c.kind === 'single' && c.filament === code).map(c => {
         const s = sampleCell(c);
         return { cellId: c.id, thickness: c.layers * layout.layerHeight, rgb: s.rgb, x: s.x, y: s.y, substrate: substrateOf(c), base: c.base };
       });
     }
-    const joint = fitMatrixAnchors(anchors);
+    const joint = fitMatrixAnchors(anchors, codes);
     const fits = joint.fits, illum = joint.illumination;
     // White opaque is pure white by definition, so its camera-space opaque
     // colour IS the per-channel camera gain (linear space).
     const gains = fits.W.linear.map(g => clamp(g, 0.25, 4));
     const results = [];
-    for (const code of CODES) {
+    for (const code of codes) {
       const k = mapping[code], fit = fits[code], samples = anchors[code];
       const spread = Math.max(...[0, 1, 2].map(c => Math.max(...samples.map(s => s.rgb[c])) - Math.min(...samples.map(s => s.rgb[c]))));
       const identifiable = spread >= 5 && Number.isFinite(fit.hd) && Number.isFinite(fit.error) && fit.error < 2500;
       const nominalHd = Number(palette[k].hd) || Number(palette[k].td) * 0.1 || 0.5;
-      const hd = identifiable ? fit.hd : nominalHd;
+      const hd = identifiable ? [fit.hdR, fit.hdG, fit.hdB] : [nominalHd, nominalHd, nominalHd];
       const sceneLinear = code === 'W' ? [1, 1, 1] : fit.linear.map((v, c) => clamp(v / gains[c], 0, 1));
       const opaqueCam = identifiable ? fit.linear : sceneLinear.map((v, c) => v * gains[c]);
       const opaque = code === 'W' ? [255, 255, 255] : sceneLinear.map(v => C.linearToSrgb8(v));
@@ -452,20 +491,24 @@
         const kk = illum[s.base];
         const o = s.rgb.map(v => C.srgbToLinear(v / 255) / kk);
         const b = s.substrate.map(v => C.srgbToLinear(v / 255));
-        let num = 0, den = 0;
         for (let c = 0; c < 3; c++) {
           if (s.rgb[c] <= 2 || s.rgb[c] >= 254) continue; // censored channel
-          num += (o[c] - fit.linear[c]) * (b[c] - fit.linear[c]); den += (b[c] - fit.linear[c]) ** 2;
+          const den = b[c] - opaqueCam[c];
+          if (Math.abs(den) < 1e-4) continue;
+          const T = (o[c] - opaqueCam[c]) / den;
+          if (T > 0.0005 && T < 0.995) residuals.push(Math.abs(Math.log10(T) + s.thickness / hd[c]));
         }
-        const T = den > 1e-10 ? clamp(num / den, 0, 1) : 1;
-        if (T > 0.0005 && T < 0.995) residuals.push(Math.abs(Math.log10(T) + s.thickness / hd));
       }
       residuals.sort((a, b) => a - b);
       let residual = residuals.length ? residuals[(residuals.length / 2) | 0] : 1;
       if (!identifiable) residual = Math.max(residual, 0.4);
+      const tdR = clamp(hd[0] * 10, 0.1, 20), tdG = clamp(hd[1] * 10, 0.1, 20), tdB = clamp(hd[2] * 10, 0.1, 20);
+      const td = 0.2126 * tdR + 0.7152 * tdG + 0.0722 * tdB;
       results.push({
         index: k, code, id: palette[k].id, name: palette[k].name, brand: palette[k].brand, material: palette[k].material,
-        hex: C.rgbToHex(opaque[0], opaque[1], opaque[2]), hd, td: clamp(hd * 10, 0.1, 20),
+        hex: C.rgbToHex(opaque[0], opaque[1], opaque[2]),
+        hd: (hd[0] + hd[1] + hd[2]) / 3, hdR: hd[0], hdG: hd[1], hdB: hd[2],
+        td, tdR, tdG, tdB,
         score: clamp(1 - residual * 2, 0, 1), residual, samples,
         railSample: baseSample[code === 'W' ? 'K' : 'W'],
         fitError: fit.error, opaqueFit: identifiable
@@ -474,16 +517,17 @@
     // Independent cross-check: predict every mixed recipe from the fitted
     // parameters and compare with the photographed cell.
     const camLinear = {};
-    for (const code of CODES) camLinear[code] = fits[code].linear;
+    for (const code of codes) camLinear[code] = fits[code].linear;
     const checks = [];
     for (const cell of layout.cells.filter(c => c.kind === 'mixed')) {
       const s = sampleCell(cell);
       const sub = { rgb: substrateOf(cell) };
       let lin = sub.rgb.map(v => C.srgbToLinear(v / 255));
+      const hdOf = r => [r.hdR != null ? r.hdR : r.hd, r.hdG != null ? r.hdG : r.hd, r.hdB != null ? r.hdB : r.hd];
       for (const f of cell.recipe) {
         const r = results.find(x => x.code === f);
-        const T = Math.pow(10, -layout.layerHeight / r.hd);
-        lin = lin.map((v, c) => camLinear[f][c] * (1 - T) + v * T);
+        const T = hdOf(r).map(h => Math.pow(10, -layout.layerHeight / h));
+        lin = lin.map((v, c) => camLinear[f][c] * (1 - T[c]) + v * T[c]);
       }
       const predHex = C.rgbToHex(...lin.map(v => C.linearToSrgb8(v * illum[cell.base])));
       const obsHex = C.rgbToHex(s.rgb[0], s.rgb[1], s.rgb[2]);
@@ -499,7 +543,7 @@
         blackBase: baseSample.K.rgb, whiteBase: baseSample.W.rgb,
         gainsMax: Math.max(...gains), whiteFitError: fits.W.error
       },
-      whiteBalance: { white: baseSample.W.rgb, gains: gains.map(g => 1 / g), cameraGains: gains, hd: fits.W.hd, residual: fits.W.error },
+      whiteBalance: { white: baseSample.W.rgb, gains: gains.map(g => 1 / g), cameraGains: gains, hd: fits.W.hd, hdR: fits.W.hdR, hdG: fits.W.hdG, hdB: fits.W.hdB, residual: fits.W.error },
       matrixChecks: { meanDE, maxDE: Math.max(...checks.map(c => c.de)), cells: checks }
     };
   }

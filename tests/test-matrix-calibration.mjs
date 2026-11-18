@@ -25,6 +25,21 @@ assert.equal(layout.totalLayers, 10);
 assert.ok(Math.abs(layout.maxHeight - 0.96) < 1e-9);
 assert.equal(layout.boardW, 100);
 
+/* Legacy 75 mm four-colour board remains available for re-calibration. */
+const v1 = M.buildMatrixLayout('v1');
+assert.equal(v1.boardW, 75);
+assert.equal(v1.cells.length, 36);
+assert.equal(v1.cells.filter(c => c.kind === 'mixed').length, 12);
+assert.deepEqual(v1.steps, [1, 4, 10]);
+assert.equal(v1.totalLayers, 12);
+assert.ok(Math.abs(v1.maxHeight - 1.12) < 1e-9);
+assert.deepEqual(v1.polarity, ['B', 'D', 'D', 'B']);
+const legacyMap = M.matchMatrixPalette([
+  { name: 'K', hex: '#101010' }, { name: 'W', hex: '#ffffff' },
+  { name: 'R', hex: '#c00d1e' }, { name: 'U', hex: '#00358e' }
+], 'v1');
+assert.deepEqual(legacyMap, { K: 0, W: 1, R: 2, U: 3 }, 'legacy four-colour roles');
+
 /* Parity with the physical board generator when its 3MF is present. */
 const mf = path.join(path.dirname(fileURLToPath(import.meta.url)), 'ChromaStack_TD_Matrix_100mm_6color.3mf');
 if (fs.existsSync(mf)) {
@@ -148,7 +163,11 @@ function checkResult(result, tag) {
   assert.equal(result.results.length, 6);
   for (const r of result.results) {
     const truth = TRUE_HD[r.code];
+    for (const key of ['hdR', 'hdG', 'hdB']) {
+      assert.ok(Math.abs(r[key] - truth) / truth < 0.12, `${tag} ${r.code} ${key} ${r[key].toFixed(3)} vs ${truth}`);
+    }
     assert.ok(Math.abs(r.hd - truth) / truth < 0.12, `${tag} ${r.code} HD ${r.hd.toFixed(3)} vs ${truth}`);
+    assert.ok(r.tdR > 0 && r.tdG > 0 && r.tdB > 0, `${tag} ${r.code} per-channel TD present`);
     const de = C.deltaE2000(C.hexToLab(r.hex), C.hexToLab(OPAQUE[r.code]));
     assert.ok(de < 3, `${tag} ${r.code} hex ΔE ${de.toFixed(2)}`);
     assert.ok(r.opaqueFit, `${tag} ${r.code} identifiable`);

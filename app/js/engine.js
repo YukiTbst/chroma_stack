@@ -376,7 +376,7 @@
       const rgb = C.hexToRgb(hex);
       return {
         index: i, name: p.name, hex, brand: p.brand || 'BambuLab', material: p.material || 'PLA Basic',
-        td, hd: td * 0.1, rgb,
+        td, tdR: td, tdG: td, tdB: td, hd: td * 0.1, hdR: td * 0.1, hdG: td * 0.1, hdB: td * 0.1, rgb,
         lin: { r: C.srgbToLinear(rgb.r / 255), g: C.srgbToLinear(rgb.g / 255), b: C.srgbToLinear(rgb.b / 255) },
         lab: C.hexToLab(hex), fromLut: true
       };
@@ -387,10 +387,11 @@
     return list.map((p, i) => {
       const hex = p.hex || '#808080';
       const td = Number(p.td) || 5;
+      const tdR = Number(p.tdR) || td, tdG = Number(p.tdG) || td, tdB = Number(p.tdB) || td;
       const rgb = C.hexToRgb(hex);
       return {
         index: i, name: p.name || ('耗材 ' + (i + 1)), hex, brand: p.brand || '', material: p.material || 'PLA',
-        td, hd: td * 0.1, rgb,
+        td, tdR, tdG, tdB, hd: td * 0.1, hdR: tdR * 0.1, hdG: tdG * 0.1, hdB: tdB * 0.1, rgb,
         lin: { r: C.srgbToLinear(rgb.r / 255), g: C.srgbToLinear(rgb.g / 255), b: C.srgbToLinear(rgb.b / 255) },
         lab: C.hexToLab(hex), fromLut: false
       };
@@ -780,10 +781,12 @@
   function compositeLinear(bg, seq, palette, layerHeight) {
     let cur = { r: bg.r, g: bg.g, b: bg.b };
     for (let i = 0; i < seq.length; i++) {
-      const fg = palette[seq[i]].lin;
-      const hd = palette[seq[i]].hd;
-      const T = stackTransmission(layerHeight, hd);
-      cur = { r: fg.r * (1 - T) + cur.r * T, g: fg.g * (1 - T) + cur.g * T, b: fg.b * (1 - T) + cur.b * T };
+      const p = palette[seq[i]], fg = p.lin;
+      // Real filaments are spectrally selective: each channel has its own HD.
+      const Tr = stackTransmission(layerHeight, p.hdR != null ? p.hdR : p.hd);
+      const Tg = stackTransmission(layerHeight, p.hdG != null ? p.hdG : p.hd);
+      const Tb = stackTransmission(layerHeight, p.hdB != null ? p.hdB : p.hd);
+      cur = { r: fg.r * (1 - Tr) + cur.r * Tr, g: fg.g * (1 - Tg) + cur.g * Tg, b: fg.b * (1 - Tb) + cur.b * Tb };
     }
     return cur;
   }
@@ -848,8 +851,11 @@
       const next = [];
       for (const st of beam) {
         for (let ci = 0; ci < palette.length; ci++) {
-          const fg = palette[ci].lin, T = stackTransmission(layerHeight, palette[ci].hd);
-          const lin = { r: fg.r * (1 - T) + st.lin.r * T, g: fg.g * (1 - T) + st.lin.g * T, b: fg.b * (1 - T) + st.lin.b * T };
+          const fg = palette[ci].lin;
+          const Tr = stackTransmission(layerHeight, palette[ci].hdR != null ? palette[ci].hdR : palette[ci].hd);
+          const Tg = stackTransmission(layerHeight, palette[ci].hdG != null ? palette[ci].hdG : palette[ci].hd);
+          const Tb = stackTransmission(layerHeight, palette[ci].hdB != null ? palette[ci].hdB : palette[ci].hd);
+          const lin = { r: fg.r * (1 - Tr) + st.lin.r * Tr, g: fg.g * (1 - Tg) + st.lin.g * Tg, b: fg.b * (1 - Tb) + st.lin.b * Tb };
           const lab = C.rgb01ToLab({ r: C.linearToSrgb(lin.r), g: C.linearToSrgb(lin.g), b: C.linearToSrgb(lin.b) });
           const cost = C.deltaE2000(lab, targetLab);
           next.push({ seq: st.seq.concat([ci]), lin, last: ci, cost });

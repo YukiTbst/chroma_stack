@@ -22,6 +22,9 @@
       calibrations[key] = Object.assign({}, calibrations[key], {
         id: p.id || '', name: p.name, brand: p.brand || '', material: p.material || 'PLA',
         hex: p.hex, td: p.td,
+        ...(p.tdR != null || p.tdG != null || p.tdB != null
+          ? { tdR: p.tdR != null ? p.tdR : p.td, tdG: p.tdG != null ? p.tdG : p.td, tdB: p.tdB != null ? p.tdB : p.td }
+          : {}),
         source: (calibrations[key] && calibrations[key].source) || 'manual'
       });
     }

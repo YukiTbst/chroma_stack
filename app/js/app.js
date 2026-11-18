@@ -180,7 +180,13 @@
   function applyCalibrationRecord(p) {
     const saved = state.filamentCalibrations[CS.settings.filamentKey(p)];
     if (!saved) return p;
-    return { ...p, hex: saved.hex || p.hex, td: clamp(Number(saved.td) || p.td || 5, 0.1, 20) };
+    const out = { ...p, hex: saved.hex || p.hex, td: clamp(Number(saved.td) || p.td || 5, 0.1, 20) };
+    if (saved.tdR != null || saved.tdG != null || saved.tdB != null) {
+      out.tdR = clamp(Number(saved.tdR) || out.td, 0.1, 20);
+      out.tdG = clamp(Number(saved.tdG) || out.td, 0.1, 20);
+      out.tdB = clamp(Number(saved.tdB) || out.td, 0.1, 20);
+    }
+    return out;
   }
 
   function restoreSettings(saved) {
@@ -632,9 +638,13 @@
           <div class="palette-td"><input value="${p.td != null ? p.td : ''}" disabled aria-label="TD"><span>TD</span></div>
           <span class="palette-note">LUT</span>`;
       } else {
+        const hasTri = p.tdR != null || p.tdG != null || p.tdB != null;
+        const tri = hasTri
+          ? `TD ${(Number(p.tdR ?? p.td) || 0).toFixed(1)}/${(Number(p.tdG ?? p.td) || 0).toFixed(1)}/${(Number(p.tdB ?? p.td) || 0).toFixed(1)} R/G/B`
+          : `HD ${((Number(p.td) || 0) * 0.1).toFixed(2)} mm`;
         item.innerHTML = `
           <span class="swatch-wrap"><input type="color" value="${esc(p.hex || '#808080')}" data-hex="${i}" aria-label="颜色"></span>
-          <div class="palette-info"><strong>${esc(p.name || ('耗材 ' + (i + 1)))}</strong><small>${esc(p.brand || '自定义')} · HD ${((Number(p.td) || 0) * 0.1).toFixed(2)} mm</small></div>
+          <div class="palette-info"><strong>${esc(p.name || ('耗材 ' + (i + 1)))}</strong><small>${esc(p.brand || '自定义')} · ${tri}</small></div>
           <div class="palette-td"><input type="number" value="${p.td != null ? p.td : 5}" min="0.1" max="20" step="0.1" data-td="${i}" aria-label="TD"><span>TD</span></div>
           <button class="icon-btn" data-remove="${i}" title="移除">×</button>`;
       }
@@ -644,7 +654,7 @@
     $('btnRecommend').disabled = isLut || !state.imageData;
     $('paletteHint').textContent = isLut
       ? 'LUT 模式锁定为校准配色；切换到 TD 浮雕可使用任意耗材与 TD。'
-      : 'TD 为透光距离；HD ≈ TD × 0.1。渐变随配方变高，色域视图会标出覆盖不了的区域。';
+      : 'TD 为逐通道透光距离（R/G/B），标定后自动写入；手动修改 TD 会把三个通道设为同一值。HD ≈ TD × 0.1。';
     fillFoundationSelect();
   }
 
@@ -1625,7 +1635,10 @@
       } else if (tdIdx != null) {
         const i = Number(tdIdx);
         if (state.tdPalette[i]) {
-          state.tdPalette[i].td = clamp(Number(e.target.value) || 5, 0.1, 20);
+          const v = clamp(Number(e.target.value) || 5, 0.1, 20);
+          state.tdPalette[i].td = v;
+          // Manual edit overrides the per-channel calibration with a uniform value.
+          state.tdPalette[i].tdR = v; state.tdPalette[i].tdG = v; state.tdPalette[i].tdB = v;
           markDirty(false);
         }
       }
@@ -1919,6 +1932,7 @@
   function analyzeMatrixPhotoFile(file) {
     if (!file) return;
     const palette = currentCalibrationPalette();
+    const version = ($('matrixBoardType') && $('matrixBoardType').value) || 'v2';
     const url = URL.createObjectURL(file), img = new Image();
     img.onload = () => {
       try {
@@ -1928,9 +1942,9 @@
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const result = CS.matrixCalibration.analyzeMatrixPhoto(imageData, palette);
+        const result = CS.matrixCalibration.analyzeMatrixPhoto(imageData, palette, { version });
         showBatchPhotoResult(result, imageData);
-        $('matrixCalibStatus').textContent = `矩阵识别完成：混色交叉验证平均 ΔE ${result.matrixChecks.meanDE.toFixed(1)}、最大 ${result.matrixChecks.maxDE.toFixed(1)}。请在弹窗核对采样框与定位点后应用。`;
+        $('matrixCalibStatus').textContent = `矩阵识别完成（${version === 'v1' ? '75mm 四色旧板' : '100mm 六色板'}）：混色交叉验证平均 ΔE ${result.matrixChecks.meanDE.toFixed(1)}、最大 ${result.matrixChecks.maxDE.toFixed(1)}。请在弹窗核对采样框与定位点后应用。`;
       } catch (e) {
         console.error(e);
         toast('矩阵照片识别失败：' + (e.message || e));
@@ -1962,11 +1976,14 @@
       const index = palette.findIndex(p => (r.id && p.id === r.id) || (p.name === r.name && p.brand === r.brand && p.material === r.material));
       const p = index >= 0 ? palette[index] : palette[r.index];
       if (!p) continue;
-      p.hex = r.hex; p.td = r.td;
+      const tdR = r.tdR != null ? r.tdR : r.td;
+      const tdG = r.tdG != null ? r.tdG : r.td;
+      const tdB = r.tdB != null ? r.tdB : r.td;
+      p.hex = r.hex; p.td = r.td; p.tdR = tdR; p.tdG = tdG; p.tdB = tdB;
       const key = CS.settings.filamentKey(p);
       state.filamentCalibrations[key] = {
         id: p.id || '', name: p.name, brand: p.brand || '', material: p.material || 'PLA',
-        hex: r.hex, td: r.td, source: 'photo', score: r.score, updatedAt: Date.now()
+        hex: r.hex, td: r.td, tdR, tdG, tdB, source: 'photo', score: r.score, updatedAt: Date.now()
       };
       if (state.engine === 'lut') {
         const tdOverrides = state.lutTdOverrides[state.lutKey] || (state.lutTdOverrides[state.lutKey] = {});
