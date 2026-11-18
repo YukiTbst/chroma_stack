@@ -376,7 +376,9 @@
     // Transparent PNGs are composited on white (the printed foundation).
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, w, h);
-    ctx.drawImage(source, 0, 0, w, h);
+    // Progressive halving keeps thin black linework intact at 1x imports;
+    // one-shot bilinear at 2x+ reduction breaks 1-px strokes into noise.
+    drawDownscaled(ctx, source, w, h);
     const imageData = ctx.getImageData(0, 0, w, h);
     state.workingCanvas = canvas;
     state.imageData = imageData;
@@ -1010,6 +1012,24 @@
   }
 
   /* ---------------- stage render ---------------- */
+
+  /* Chrome's bilinear drawImage softens badly at >2x reduction (a 1280 plan
+     squeezed into a ~590 px stage looked blurrier than the 640 plan). Halve
+     progressively so large plans downscale with proper box-like filtering. */
+  function drawDownscaled(ctx, src, dw, dh) {
+    let cur = src, cw = src.width || src.naturalWidth, ch = src.height || src.naturalHeight;
+    while (cw > dw * 2 && ch > dh * 2) {
+      const nw = Math.max(dw, Math.round(cw / 2)), nh = Math.max(dh, Math.round(ch / 2));
+      const tmp = document.createElement('canvas');
+      tmp.width = nw; tmp.height = nh;
+      const tctx = tmp.getContext('2d');
+      tctx.imageSmoothingEnabled = true; tctx.imageSmoothingQuality = 'high';
+      tctx.drawImage(cur, 0, 0, nw, nh);
+      cur = tmp; cw = nw; ch = nh;
+    }
+    ctx.drawImage(cur, 0, 0, dw, dh);
+  }
+
   function renderStage() {
     const canvas = $('stageCanvas');
     const stage = $('canvasStage');
@@ -1070,30 +1090,30 @@
     ctx.imageSmoothingQuality = 'high';
     const silhouette = !!(p && p.background && p.background.enabled);
     if (state.view === 'original' || !p) {
-      ctx.drawImage(state.workingCanvas, 0, 0, cssW, cssH);
+      drawDownscaled(ctx, state.workingCanvas, cssW, cssH);
     } else if (state.view === 'sim') {
       const off = imageDataCanvas(new ImageData(new Uint8ClampedArray(p.preview), p.w, p.h));
       if (silhouette) drawChecker(ctx, cssW, cssH, 12);
-      ctx.drawImage(off, 0, 0, cssW, cssH);
+      drawDownscaled(ctx, off, cssW, cssH);
     } else if (state.view === 'regions') {
       const off = buildRegionCanvas(p, state.overrideMask || p.flatMask);
       if (silhouette) drawChecker(ctx, cssW, cssH, 12);
-      ctx.drawImage(off, 0, 0, cssW, cssH);
+      drawDownscaled(ctx, off, cssW, cssH);
     } else if (state.view === 'height') {
       const off = buildHeightCanvas(p, state.overrideMask || p.flatMask);
       if (silhouette) drawChecker(ctx, cssW, cssH, 12);
-      ctx.drawImage(off, 0, 0, cssW, cssH);
+      drawDownscaled(ctx, off, cssW, cssH);
     } else if (state.view === 'gamut') {
       const off = buildGamutCanvas(p, state.overrideMask || p.flatMask);
       if (silhouette) drawChecker(ctx, cssW, cssH, 12);
-      ctx.drawImage(off, 0, 0, cssW, cssH);
+      drawDownscaled(ctx, off, cssW, cssH);
     } else if (state.view === 'three') {
       const stack = state.threeMode === 'stack';
       el.innerHTML = `<span>${stack ? '材料堆叠：顶面光学混色，侧面/剖面真实耗材' : '成品混色：最终预测色'}</span><span>高度夸张 <b>${state.exaggeration}×</b>（仅预览）</span><span>拖动旋转 · 滚轮缩放</span>`;
     } else if (state.view === 'layer') {
       const off = buildLayerCanvas(p, state.layer, state.overrideMask || p.flatMask);
       drawChecker(ctx, cssW, cssH, 12);
-      ctx.drawImage(off, 0, 0, cssW, cssH);
+      drawDownscaled(ctx, off, cssW, cssH);
       drawLayerHud(ctx, p, cssW);
     }
     renderLegend(p);

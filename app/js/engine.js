@@ -1024,7 +1024,7 @@
       if (score < bestScore) { bestScore = score; bestDE = de; best = g; }
     }
     // Hard preference: an all-neutral (K/W) stack within 3 ΔE wins for greys.
-    if (Math.hypot(targetLab.a, targetLab.b) < 6 && bestNeutral && bestNeutralDE <= (best ? bestDE : Infinity) + 3) {
+    if (Math.hypot(targetLab.a, targetLab.b) < 8 && bestNeutral && bestNeutralDE <= (best ? bestDE : Infinity) + 5) {
       best = bestNeutral; bestDE = bestNeutralDE;
     }
     return best ? {
@@ -1040,8 +1040,8 @@
   function neutralBias(targetLab, chromaFrac) {
     if (!(chromaFrac > 0)) return 0;
     const chroma = Math.hypot(targetLab.a, targetLab.b);
-    if (chroma >= 12) return 0;
-    return 3.0 * chromaFrac * (1 - chroma / 12);
+    if (chroma >= 16) return 0;
+    return 3.5 * chromaFrac * (1 - chroma / 16);
   }
 
 
@@ -1166,13 +1166,13 @@
     // Hard preference: for near-neutral targets an all-neutral K/W stack within
     // 3 ΔE of the best chromatic recipe wins, so grey scenes never dither into
     // colour speckle.
-    if (Math.hypot(targetLab.a, targetLab.b) < 6 && gamut.neutral && gamut.neutral.length) {
+    if (Math.hypot(targetLab.a, targetLab.b) < 8 && gamut.neutral && gamut.neutral.length) {
       let nBest = null, nDe = Infinity;
       for (const e of gamut.neutral) {
         const de = C.deltaE2000(targetLab, e.lab);
         if (de < nDe) { nDe = de; nBest = e; }
       }
-      if (nBest && nDe <= bestDE + 3) { g = nBest; bestDE = nDe; }
+      if (nBest && nDe <= bestDE + 5) { g = nBest; bestDE = nDe; }
     }
     return {
       seq: g.seq.slice(), lab: g.lab, lin: g.lin, hex: g.hex,
@@ -1252,7 +1252,7 @@
       if (score < bestScore) { bestScore = score; bestDE = de; best = g; }
     }
     if (!best) return null;
-    if (Math.hypot(targetLab.a, targetLab.b) < 6 && gamut.neutral && gamut.neutral.length) {
+    if (Math.hypot(targetLab.a, targetLab.b) < 8 && gamut.neutral && gamut.neutral.length) {
       let nBest = null, nDe = Infinity;
       for (const e of gamut.neutral) {
         let ok = true;
@@ -1261,7 +1261,7 @@
         const de = C.deltaE2000(targetLab, e.lab);
         if (de < nDe) { nDe = de; nBest = e; }
       }
-      if (nBest && nDe <= bestDE + 3) { best = nBest; bestDE = nDe; }
+      if (nBest && nDe <= bestDE + 5) { best = nBest; bestDE = nDe; }
     }
     return {
       seq: best.seq.slice(), lab: best.lab, lin: best.lin, hex: best.hex,
@@ -2011,6 +2011,10 @@
     } else {
       edgeCleanLevel = 0;
     }
+    // Anti-alias transition pixels must never become their own colour families:
+    // even with the "edge halo" slider off, snap the 1-px transition band to
+    // the adjacent family (line-protected pixels are exempt inside the helper).
+    const snapMask = edgeMask || (gradCount > 0 ? buildEdgeMask(lab, w, h, 1) : null);
     const variableHeight = engine === 'td' && options.variableHeight !== false;
     const gamut = engine === 'td' && gradCount > 0
       ? buildTdGamut(palette, foundation, layerHeight, colorLayers, variableHeight)
@@ -2087,8 +2091,8 @@
       }
       repairLineGaps(lab, lineInfo, flatMask, nearest, familyId, lineDirect, lineProtectMask, w, h, printMask, families, palette);
       const lineDirectFilament = lineDirect ? new Uint16Array(nearest) : null;
-      if (edgeMask) {
-        familyId = snapEdgeFamilies(lab, flatMask, familyId, edgeMask, lineProtectMask, families, w, h, edgeCleanLevel);
+      if (snapMask) {
+        familyId = snapEdgeFamilies(lab, flatMask, familyId, snapMask, lineProtectMask, families, w, h, Math.max(1, edgeCleanLevel));
         familyPixels = new Uint32Array(families.length);
         for (let i = 0; i < n; i++) if (!flatMask[i] && familyId[i] >= 0) familyPixels[familyId[i]]++;
       }
