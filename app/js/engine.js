@@ -819,11 +819,13 @@
   function optimizeTdStack(targetLab, palette, foundation, layerHeight, layers) {
     const bg = foundation ? foundation.lin : { r: 1, g: 1, b: 1 };
     const runPenalty = 0.35;
+    const neutralF = palette.map(p => Math.hypot(p.lab.a, p.lab.b) < 8);
+    const chromaFrac = seq => seq.reduce((n, i) => n + (neutralF[i] ? 0 : 1), 0) / Math.max(1, seq.length);
     let bestSeq = null, bestLab = null, bestCost = Infinity;
     const consider = (seq) => {
       const lin = compositeLinear(bg, seq, palette, layerHeight);
       const lab = C.rgb01ToLab({ r: C.linearToSrgb(lin.r), g: C.linearToSrgb(lin.g), b: C.linearToSrgb(lin.b) });
-      const cost = C.deltaE2000(lab, targetLab) + runPenalty * Math.max(0, runsInSeq(seq) - 1);
+      const cost = C.deltaE2000(lab, targetLab) + runPenalty * Math.max(0, runsInSeq(seq) - 1) + neutralBias(targetLab, chromaFrac(seq));
       if (cost < bestCost) { bestCost = cost; bestSeq = seq.slice(); bestLab = lab; }
       return { lin, lab, cost };
     };
@@ -857,8 +859,9 @@
           const Tb = stackTransmission(layerHeight, palette[ci].hdB != null ? palette[ci].hdB : palette[ci].hd);
           const lin = { r: fg.r * (1 - Tr) + st.lin.r * Tr, g: fg.g * (1 - Tg) + st.lin.g * Tg, b: fg.b * (1 - Tb) + st.lin.b * Tb };
           const lab = C.rgb01ToLab({ r: C.linearToSrgb(lin.r), g: C.linearToSrgb(lin.g), b: C.linearToSrgb(lin.b) });
-          const cost = C.deltaE2000(lab, targetLab);
-          next.push({ seq: st.seq.concat([ci]), lin, last: ci, cost });
+          const seq2 = st.seq.concat([ci]);
+          const cost = C.deltaE2000(lab, targetLab) + neutralBias(targetLab, chromaFrac(seq2));
+          next.push({ seq: seq2, lin, last: ci, cost });
         }
       }
       next.sort((a, b) => a.cost - b.cost);
@@ -873,7 +876,7 @@
     }
     for (const st of beam) {
       const lab = C.rgb01ToLab({ r: C.linearToSrgb(st.lin.r), g: C.linearToSrgb(st.lin.g), b: C.linearToSrgb(st.lin.b) });
-      const cost = C.deltaE2000(lab, targetLab) + runPenalty * Math.max(0, runsInSeq(st.seq) - 1);
+      const cost = C.deltaE2000(lab, targetLab) + runPenalty * Math.max(0, runsInSeq(st.seq) - 1) + neutralBias(targetLab, chromaFrac(st.seq));
       if (cost < bestCost) { bestCost = cost; bestSeq = st.seq.slice(); bestLab = lab; }
     }
     const lin = compositeLinear(bg, bestSeq, palette, layerHeight);
@@ -901,6 +904,8 @@
     const budget = 120000;
     const entries = [];
     const seen = new Map();
+    const neutralF = palette.map(p => Math.hypot(p.lab.a, p.lab.b) < 8);
+    const chromaFracOf = seq => seq.reduce((n, i) => n + (neutralF[i] ? 0 : 1), 0) / Math.max(1, seq.length);
     const pushSeq = (seq, runs) => {
       const { lin, lab } = compositeLab(bg, seq, palette, layerHeight);
       const key = Math.round(lab.L * 2) + '|' + Math.round(lab.a * 2) + '|' + Math.round(lab.b * 2)
@@ -908,12 +913,12 @@
       const existing = seen.get(key);
       if (existing !== undefined) {
         if (!variableHeight && entries[existing].seq.length > seq.length) {
-          entries[existing] = { seq: seq.slice(), lab, lin, length: seq.length, runs, hex: C.linearToHex(lin) };
+          entries[existing] = { seq: seq.slice(), lab, lin, length: seq.length, runs, hex: C.linearToHex(lin), chromaFrac: chromaFracOf(seq) };
         }
         return;
       }
       seen.set(key, entries.length);
-      entries.push({ seq: seq.slice(), lab, lin, length: seq.length, runs, hex: C.linearToHex(lin) });
+      entries.push({ seq: seq.slice(), lab, lin, length: seq.length, runs, hex: C.linearToHex(lin), chromaFrac: chromaFracOf(seq) });
     };
     const permutations = (r) => {
       const out = [];
@@ -1000,21 +1005,42 @@
         pushSeq(buildRunSeq(colors, lengths), r);
       }
     }
+    Object.defineProperty(entries, 'neutral', {
+      value: entries.filter(e => !e.chromaFrac),
+      enumerable: false
+    });
     return entries;
   }
 
   function matchGamutAtLength(targetLab, gamut, length) {
     let best = null, bestScore = Infinity, bestDE = Infinity;
+    let bestNeutral = null, bestNeutralDE = Infinity;
     for (const g of gamut) {
       if (g.length !== length) continue;
       const de = C.deltaE2000(targetLab, g.lab);
-      const score = de + 0.12 * Math.max(0, (g.runs || 1) - 1);
+      if (!g.chromaFrac && de < bestNeutralDE) { bestNeutralDE = de; bestNeutral = g; }
+      const score = de + 0.12 * Math.max(0, (g.runs || 1) - 1) + neutralBias(targetLab, g.chromaFrac || 0);
       if (score < bestScore) { bestScore = score; bestDE = de; best = g; }
+    }
+    // Hard preference: an all-neutral (K/W) stack within 3 ΔE wins for greys.
+    if (Math.hypot(targetLab.a, targetLab.b) < 6 && bestNeutral && bestNeutralDE <= (best ? bestDE : Infinity) + 3) {
+      best = bestNeutral; bestDE = bestNeutralDE;
     }
     return best ? {
       seq: best.seq.slice(), lab: best.lab, lin: best.lin, hex: best.hex,
       deltaE: bestDE, length: best.length, runs: best.runs
     } : null;
+  }
+
+  /* Scene grays are reachable with neutral black/white stacks along the L axis;
+     chromatic recipes often win by a fraction of a ΔE but leave visible red/
+     yellow/blue speckle around dark lines. Penalise chromatic usage in recipes
+     for near-neutral targets so K/W wins ties (max ~2.2 ΔE of bias). */
+  function neutralBias(targetLab, chromaFrac) {
+    if (!(chromaFrac > 0)) return 0;
+    const chroma = Math.hypot(targetLab.a, targetLab.b);
+    if (chroma >= 12) return 0;
+    return 3.0 * chromaFrac * (1 - chroma / 12);
   }
 
   function matchGamut(targetLab, gamut) {
@@ -1040,11 +1066,22 @@
     for (const c of shortlist) {
       const g = gamut[c.i];
       const de = C.deltaE2000(targetLab, g.lab);
-      const score = de + 0.12 * Math.max(0, (g.runs || 1) - 1);
+      const score = de + 0.12 * Math.max(0, (g.runs || 1) - 1) + neutralBias(targetLab, g.chromaFrac || 0);
       if (score < bestScore) { bestScore = score; bestDE = de; chosen = c.i; }
     }
     if (chosen == null) return null;
-    const g = gamut[chosen];
+    let g = gamut[chosen];
+    // Hard preference: for near-neutral targets an all-neutral K/W stack within
+    // 3 ΔE of the best chromatic recipe wins, so grey scenes never dither into
+    // colour speckle.
+    if (Math.hypot(targetLab.a, targetLab.b) < 6 && gamut.neutral && gamut.neutral.length) {
+      let nBest = null, nDe = Infinity;
+      for (const e of gamut.neutral) {
+        const de = C.deltaE2000(targetLab, e.lab);
+        if (de < nDe) { nDe = de; nBest = e; }
+      }
+      if (nBest && nDe <= bestDE + 3) { g = nBest; bestDE = nDe; }
+    }
     return {
       seq: g.seq.slice(), lab: g.lab, lin: g.lin, hex: g.hex,
       deltaE: bestDE, length: g.length, runs: g.runs
@@ -1119,10 +1156,21 @@
       for (let i = 0; i < b; i++) if (g.seq[i] !== prefix[i]) { ok = false; break; }
       if (!ok) continue;
       const de = C.deltaE2000(targetLab, g.lab);
-      const score = de + 0.12 * Math.max(0, (g.runs || 1) - 1);
+      const score = de + 0.12 * Math.max(0, (g.runs || 1) - 1) + neutralBias(targetLab, g.chromaFrac || 0);
       if (score < bestScore) { bestScore = score; bestDE = de; best = g; }
     }
     if (!best) return null;
+    if (Math.hypot(targetLab.a, targetLab.b) < 6 && gamut.neutral && gamut.neutral.length) {
+      let nBest = null, nDe = Infinity;
+      for (const e of gamut.neutral) {
+        let ok = true;
+        for (let i = 0; i < b; i++) if (e.seq[i] !== prefix[i]) { ok = false; break; }
+        if (!ok) continue;
+        const de = C.deltaE2000(targetLab, e.lab);
+        if (de < nDe) { nDe = de; nBest = e; }
+      }
+      if (nBest && nDe <= bestDE + 3) { best = nBest; bestDE = nDe; }
+    }
     return {
       seq: best.seq.slice(), lab: best.lab, lin: best.lin, hex: best.hex,
       deltaE: bestDE, length: best.length, runs: best.runs
