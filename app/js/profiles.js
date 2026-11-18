@@ -15,13 +15,10 @@
   function apiBase() {
     let base = null;
     try { base = root.localStorage.getItem(BASE_KEY); } catch (e) { /* private mode */ }
-    if (!base) {
-      // Local dev servers have no /api backend; use the deployed one so the
-      // local page shares the same profiles. Override via localStorage key.
-      const host = root.location && root.location.hostname;
-      base = (host === 'localhost' || host === '127.0.0.1' || host === '[::1]')
-        ? 'http://example.com/chromastack/api/' : 'api/';
-    }
+    // No server coordinates are shipped in the repo: the API is same-origin
+    // `api/` by default (reverse-proxy it to server/profile-api.js), and any
+    // other deployment is opted into per browser via the localStorage key.
+    if (!base) base = 'api/';
     return base.replace(/\/+$/, '') + '/';
   }
 

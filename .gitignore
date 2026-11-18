@@ -12,6 +12,7 @@ tests/.tmp*/
 node_modules/
 __pycache__/
 *.log
+deploy/
 deploy/online-*.js
 deploy/online-*.html
 

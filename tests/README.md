@@ -38,7 +38,7 @@ cd app
 python -m http.server 8123
 ```
 
-打开 `http://127.0.0.1:8123/`。本地页面的标定 profile 默认直连部署服务器 API（`http://example.com/chromastack/api/`），与线上共用标定；可用 `localStorage.setItem('chromastack.api-base', …)` 覆盖。手工检查：
+打开 `http://127.0.0.1:8123/`。本地页面的标定默认走同源 `api/`（本地静态服务器没有该接口时自动离线）；要连你自己的部署服务器，用 `localStorage.setItem('chromastack.api-base', 'https://你的域名/api/')` 覆盖。手工检查：
 
 1. 默认是 **TD 浮雕**，5 色；纯色区直接铺色，渐变区变高。
 2. 在「色域」视图看红色/橙色缺口；点「加入建议耗材」应重算并降低色域外比例。

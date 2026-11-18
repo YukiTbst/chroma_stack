@@ -6,7 +6,7 @@
 
    Env:
      PORT      listen port (default 8124, bind 127.0.0.1 only)
-     DATA_DIR  storage root (default <DATA_DIR>)
+     DATA_DIR  storage root (default ./data)
 
    Routes (nginx strips the /chromastack/api prefix):
      GET    /health
@@ -23,7 +23,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PORT = Number(process.env.PORT || 8124);
-const DATA_DIR = process.env.DATA_DIR || '<DATA_DIR>';
+const DATA_DIR = process.env.DATA_DIR || './data';
 const PROFILE_DIR = path.join(DATA_DIR, 'profiles');
 const MAX_BODY = 2 * 1024 * 1024; // 2 MB per request is far above any calibration set
 const ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
