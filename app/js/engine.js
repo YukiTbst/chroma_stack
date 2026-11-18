@@ -1847,6 +1847,11 @@
       }
     }
     let maxLayers = Math.max(flatLayers, gradTopLayer);
+    // Flat regions share the gradient foundation: the substrate filament fills
+    // layers 0..flatBaseLayers-1 and the matched flat colour takes over up to
+    // flatLayers. Keep at least one colour layer so the top surface always
+    // matches the chosen filament.
+    const flatBaseLayers = Math.max(0, Math.min(gradStartLayer, flatLayers - 1));
 
     let flatCount = flatMask.reduce((a, b) => a + b, 0);
     let gradCount = n - flatCount;
@@ -2268,7 +2273,8 @@
       }
       if (flatMask[i]) {
         flatPixels++;
-        grams[flatFilament[i]] += pixelArea * flatLayers * layerHeight / 1000 * 1.24;
+        if (flatBaseLayers > 0) grams[baseIndex] += pixelArea * flatBaseLayers * layerHeight / 1000 * 1.24;
+        if (flatLayers > flatBaseLayers) grams[flatFilament[i]] += pixelArea * (flatLayers - flatBaseLayers) * layerHeight / 1000 * 1.24;
       } else {
         gradPixels++;
         grams[baseIndex] += pixelArea * gradStartLayer * layerHeight / 1000 * 1.24;
@@ -2283,7 +2289,8 @@
     const layerFilaments = new Array(maxLayers);
     for (let z = 0; z < maxLayers; z++) {
       const set = new Set();
-      if (z < flatLayers) for (let i = 0; i < n; i++) if (printMask[i] && flatMask[i]) set.add(flatFilament[i]);
+      if (z < flatBaseLayers) { if (flatCount > 0) set.add(baseIndex); }
+      else if (z < flatLayers) for (let i = 0; i < n; i++) if (printMask[i] && flatMask[i]) set.add(flatFilament[i]);
       if (z < gradStartLayer) { if (gradCount > 0 || supportOnlyPixels > 0) set.add(baseIndex); }
       else if (z < gradTopLayer) {
         const li = z - gradStartLayer;
@@ -2403,7 +2410,7 @@
 
     return {
       engine, w, h, n, pixelSize, widthMm: w * pixelSize, heightMm: h * pixelSize,
-      layerHeight, flatLayers, gradStartLayer, gradTopLayer, actualGradTopLayer, maxGradLayers: colorLayers, maxLayers, flatTopMm: flatLayers * layerHeight,
+      layerHeight, flatLayers, flatBaseLayers, gradStartLayer, gradTopLayer, actualGradTopLayer, maxGradLayers: colorLayers, maxLayers, flatTopMm: flatLayers * layerHeight,
       gradTopMm: gradTopLayer * layerHeight, actualGradTopMm: actualGradTopLayer * layerHeight, reliefMm: actualRelief, variableHeight,
       palette, foundation, foundationIndex: baseIndex, lutKey: options.lutKey || (engine === 'lut' ? 'bambu_8' : null),
       flatMask, flatFilament, familyId, families, familyPixels, nearest, residual, stds, stdT, resT,
@@ -2528,7 +2535,10 @@
   function filamentAt(plan, x, y, z) {
     const i = y * plan.w + x;
     if (plan.printMask && !plan.printMask[i]) return -1;
-    if (plan.flatMask[i]) return z < plan.flatLayers ? plan.flatFilament[i] : -1;
+    if (plan.flatMask[i]) {
+      if (z < (plan.flatBaseLayers || 0)) return plan.foundationIndex;
+      return z < plan.flatLayers ? plan.flatFilament[i] : -1;
+    }
     if (z < plan.gradStartLayer) return plan.foundationIndex;
     const f = plan.familyId[i];
     if (f < 0) return -1;

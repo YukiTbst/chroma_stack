@@ -750,7 +750,7 @@
     }
     const h = p.layerHeight;
     $('structureLine').innerHTML = `
-      <div><b>纯色区</b><span>0 → ${p.flatLayers} 层</span></div>
+      <div><b>纯色区</b><span>0–${p.flatBaseLayers || 0} 层基底 + ${p.flatBaseLayers || 0}–${p.flatLayers} 层纯色</span></div>
       <div><b>渐变区</b><span>${p.gradStartLayer} → ${p.gradTopLayer} 层</span></div>
       <div><b>浮雕差</b><span>${p.reliefMm >= 0 ? '+' : ''}${fmt(p.reliefMm, 2)} mm</span></div>`;
     $('readoutLayers').textContent = `${p.maxLayers} 层`;
@@ -1210,7 +1210,8 @@
       if (p.printMask && !p.printMask[i]) continue;
       let fi = -1;
       if (mask[i]) {
-        if (z < p.flatLayers) fi = p.flatFilament[i] !== 0xffff ? p.flatFilament[i] : p.nearest[i];
+        if (z < (p.flatBaseLayers || 0)) fi = p.foundationIndex;
+        else if (z < p.flatLayers) fi = p.flatFilament[i] !== 0xffff ? p.flatFilament[i] : p.nearest[i];
       } else {
         if (z < p.gradStartLayer) fi = p.foundationIndex;
         else {
@@ -1814,7 +1815,7 @@
       '叠彩 ChromaStack 打印计划包',
       '============================',
       `尺寸：${p.widthMm.toFixed(2)} × ${p.heightMm.toFixed(2)} mm`,
-      `层高：${p.layerHeight} mm；纯色区 ${p.flatLayers} 层；渐变区 ${p.gradStartLayer}–${p.gradTopLayer} 层（最高）；浮雕差 ${p.reliefMm.toFixed(2)} mm${p.variableHeight ? '；各色块顶高 '+(p.gradStartLayer*p.layerHeight).toFixed(2)+'–'+p.actualGradTopMm.toFixed(2)+' mm' : ''}`,
+      `层高：${p.layerHeight} mm；纯色区 ${p.flatBaseLayers || 0} 层基底 + ${p.flatLayers - (p.flatBaseLayers || 0)} 层纯色（共 ${p.flatLayers} 层）；渐变区 ${p.gradStartLayer}–${p.gradTopLayer} 层（最高）；浮雕差 ${p.reliefMm.toFixed(2)} mm${p.variableHeight ? '；各色块顶高 '+(p.gradStartLayer*p.layerHeight).toFixed(2)+'–'+p.actualGradTopMm.toFixed(2)+' mm' : ''}`,
       `引擎：${p.engine === 'lut' ? '物理 LUT（Bambu PLA Basic 5 层）' : 'TD 立体浮雕（自定义耗材）'}；平滑 ${p.smoothMm != null ? p.smoothMm.toFixed(2) + ' mm (≈' + (p.smoothRadiusPx || 0) + 'px, 线宽 ' + (p.lineWidthMm || 0.42).toFixed(2) + 'mm)' : (p.smoothLevel || 0) + '/4'}；层序合并 ${p.mergeDeltaE || 0} ΔE`,
       '',
       '文件说明：',

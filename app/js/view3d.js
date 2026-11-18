@@ -215,7 +215,10 @@ void main() {
 
   function materialAt(plan, i, z) {
     if (plan.printMask && !plan.printMask[i]) return -1;
-    if (plan.flatMask[i]) return z < plan.flatLayers ? plan.flatFilament[i] : -1;
+    if (plan.flatMask[i]) {
+      if (z < (plan.flatBaseLayers || 0)) return plan.foundationIndex;
+      return z < plan.flatLayers ? plan.flatFilament[i] : -1;
+    }
     if (z < plan.gradStartLayer) return plan.foundationIndex;
     const f = plan.familyId[i];
     if (f < 0) return -1;

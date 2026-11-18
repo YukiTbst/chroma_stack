@@ -90,4 +90,15 @@ const out = exporter.build3MFBytes(plan);
 assert.equal(out.ew, w, 'default export uses native width instead of silently downsampling to 300');
 assert.equal(out.eh, h, 'default export uses native height');
 assert.equal(Buffer.from(out.bytes.slice(0, 4)).toString('hex'), '504b0304', 'native 3MF is a valid ZIP');
+
+// Flat regions now share the gradient foundation: substrate below gradStart,
+// matched flat colour up to flatTop. Pixel 0 is a flat white pixel.
+const plan2 = { ...plan, flatBaseLayers: 5, foundationIndex: 0 };
+const native2 = exporter.samplePlane(plan2, w, h);
+const prisms2 = exporter.buildPrisms(plan2, native2);
+assert.equal(prismFilament(prisms2, 0, 0), 0, 'flat pixel starts on the foundation');
+assert.equal(prismFilament(prisms2, 0, 4), 0, 'foundation runs through gradStart-1');
+assert.equal(prismFilament(prisms2, 0, 5), 1, 'true flat colour starts at gradStartLayer');
+assert.equal(prismFilament(prisms2, 0, 19), 1, 'flat colour reaches the flat top');
+assert.equal(prismFilament(prisms2, 0, 20), -1, 'nothing above the flat top');
 console.log('all native layer-consistency checks passed');

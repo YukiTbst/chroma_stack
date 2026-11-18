@@ -117,7 +117,8 @@
       if (printMask && !printMask[i]) continue;
       let fi = -1;
       if (flatMask[i]) {
-        if (z < plan.flatLayers) fi = flatFilament[i];
+        if (z < (plan.flatBaseLayers || 0)) fi = plan.foundationIndex;
+        else if (z < plan.flatLayers) fi = flatFilament[i];
       } else {
         if (z < plan.gradStartLayer) fi = plan.foundationIndex;
         else {
@@ -884,7 +885,7 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
       engine: plan.engine,
       lut: plan.lutKey,
       physical: { widthMm: +plan.widthMm.toFixed(2), heightMm: +plan.heightMm.toFixed(2), pixelSizeMm: +plan.pixelSize.toFixed(4) },
-      layers: { layerHeight: plan.layerHeight, flatLayers: plan.flatLayers, gradientStartLayer: plan.gradStartLayer, gradientTopLayer: plan.gradTopLayer, maxLayers: plan.maxLayers, flatTopMm: +plan.flatTopMm.toFixed(3), gradientTopMm: +plan.gradTopMm.toFixed(3), actualGradientTopMm: +(plan.actualGradTopMm || plan.gradTopMm).toFixed(3), reliefMm: +plan.reliefMm.toFixed(3), variableHeight: !!plan.variableHeight },
+      layers: { layerHeight: plan.layerHeight, flatLayers: plan.flatLayers, flatBaseLayers: plan.flatBaseLayers || 0, gradientStartLayer: plan.gradStartLayer, gradientTopLayer: plan.gradTopLayer, maxLayers: plan.maxLayers, flatTopMm: +plan.flatTopMm.toFixed(3), gradientTopMm: +plan.gradTopMm.toFixed(3), actualGradientTopMm: +(plan.actualGradTopMm || plan.gradTopMm).toFixed(3), reliefMm: +plan.reliefMm.toFixed(3), variableHeight: !!plan.variableHeight },
       palette: plan.palette.map((p, i) => ({ slot: i + 1, name: p.name, hex: p.hex, td: p.td, hdMm: +(p.hd || 0).toFixed(3), brand: p.brand, material: p.material })),
       foundation: plan.foundation.name,
       background: plan.background || { enabled: false },
@@ -927,7 +928,7 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
     lines.push(`# ${plan.engine === 'lut' ? '物理 LUT' : 'TD 立体浮雕'}混合彩绘打印计划`);
     lines.push('');
     lines.push(`- 成品尺寸：${s.physical.widthMm} × ${s.physical.heightMm} mm`);
-    lines.push(`- 层高：${s.layers.layerHeight} mm；纯色区 ${s.layers.flatLayers} 层 (${s.layers.flatTopMm} mm)；渐变区 ${s.layers.gradientStartLayer}–${s.layers.gradientTopLayer} 层；浮雕差 ${s.layers.reliefMm} mm`);
+    lines.push(`- 层高：${s.layers.layerHeight} mm；纯色区 ${s.layers.flatBaseLayers || 0} 层基底 + ${s.layers.flatLayers - (s.layers.flatBaseLayers || 0)} 层纯色（共 ${s.layers.flatLayers} 层，${s.layers.flatTopMm} mm）；渐变区 ${s.layers.gradientStartLayer}–${s.layers.gradientTopLayer} 层；浮雕差 ${s.layers.reliefMm} mm`);
     lines.push(`- 颜色预测：平均 ΔE00 ${s.stats.meanDeltaE00}，P90 ${s.stats.p90DeltaE00}，ΔE00≤5 占 ${s.stats.under5Percent}%`);
     lines.push(`- 纯色区占比 ${s.stats.flatPercent}%，渐变区占比 ${s.stats.gradientPercent}%，渐变配方 ${s.stats.families} 个；平滑 ${s.stats.smoothMm != null ? s.stats.smoothMm.toFixed(2) + ' mm（半径 ' + (s.stats.smoothRadiusPx || 0) + 'px，线宽 ' + (s.stats.lineWidthMm || 0.42).toFixed(2) + 'mm）' : (s.stats.smoothLevel || 0) + '/4'}；层序合并 ${s.stats.mergeDeltaE || 0} ΔE，${s.stats.mergedGroups || 0} 组共享底层（${s.stats.sharedBasePercent || 0}% 渐变像素）`);
     if (s.stats.heightMergeDeltaE) {
@@ -949,7 +950,7 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
     lines.push('');
     lines.push('## 层叠结构');
     lines.push('');
-    lines.push(`- 纯色区：0–${s.layers.flatLayers} 层使用该区域最近的槽位颜色。`);
+    lines.push(`- 纯色区：0–${s.layers.flatBaseLayers || 0} 层用基底耗材垫底，其后到 ${s.layers.flatLayers} 层为该区域最近的槽位颜色。`);
     lines.push(`- 渐变区：0–${s.layers.gradientStartLayer} 层为基底（${s.foundation}），随后各色块按 1–${s.layers.gradientTopLayer - s.layers.gradientStartLayer} 层配方叠色；${s.layers.variableHeight ? '短线配方形成低台阶，最长配方到 ' + s.layers.actualGradientTopMm + ' mm。' : '所有渐变块等高。'}
 - 纯色区顶面 ${s.layers.flatTopMm} mm，渐变区最高 ${s.layers.actualGradientTopMm} mm；最高浮雕差 ${s.layers.reliefMm} mm。`);
     lines.push('- 3MF 是一个多 part 对象：每个“颜色 × 连续层区间”是一个水密 part，已写入 extruder 编号；导入 Bambu Studio 若提示“配置无效，仅加载几何数据”，点确认即可。');
