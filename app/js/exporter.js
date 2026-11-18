@@ -435,27 +435,29 @@
     const X = (x) => (x + 0.5) * pixelSize - w * pixelSize / 2;
     const Y = (y) => h * pixelSize / 2 - (y + 0.5) * pixelSize;
     const vmap = new Map();
-    const addVertex = (x, y, z) => {
+    // Vertices are scoped per cap/wall group: two contour groups that only
+    // touch at a point must not weld their walls into a 4-face vertical edge.
+    const addVertex = (x, y, z, scope) => {
       const xi = Math.round(x * 100000), yi = Math.round(y * 100000), zi = Math.round(z * 100000);
-      const key = xi + ',' + yi + ',' + zi;
+      const key = xi + ',' + yi + ',' + zi + (scope ? ',' + scope : '');
       let idx = vmap.get(key);
       if (idx === undefined) { idx = positions.length / 3; vmap.set(key, idx); positions.push(x, y, z); }
       return idx;
     };
     const addTri = (a, b, c) => { if (a !== b && b !== c && a !== c) indices.push(a, b, c); };
-    const addTriOriented = (p0, p1, p2, outward) => {
+    const addTriOriented = (p0, p1, p2, outward, scope) => {
       const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
       const vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
       const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
       if (nx * outward[0] + ny * outward[1] + nz * outward[2] < 0) { const t = p1; p1 = p2; p2 = t; }
-      addTri(addVertex(...p0), addVertex(...p1), addVertex(...p2));
+      addTri(addVertex(...p0, scope), addVertex(...p1, scope), addVertex(...p2, scope));
     };
-    const addQuad = (p0, p1, p2, p3, outward) => {
+    const addQuad = (p0, p1, p2, p3, outward, scope) => {
       const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
       const vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
       const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
       if (nx * outward[0] + ny * outward[1] + nz * outward[2] < 0) { const t = p1; p1 = p3; p3 = t; }
-      const a = addVertex(...p0), b = addVertex(...p1), c = addVertex(...p2), d = addVertex(...p3);
+      const a = addVertex(...p0, scope), b = addVertex(...p1, scope), c = addVertex(...p2, scope), d = addVertex(...p3, scope);
       addTri(a, b, c); addTri(a, c, d);
     };
     // caps
@@ -474,8 +476,8 @@
         const p0 = [X(flat[ia]), Y(flat[ia + 1]), z1];
         const p1 = [X(flat[ib]), Y(flat[ib + 1]), z1];
         const p2 = [X(flat[ic]), Y(flat[ic + 1]), z1];
-        addTriOriented(p0, p1, p2, [0, 0, 1]);
-        addTriOriented([p0[0], p0[1], z0], [p1[0], p1[1], z0], [p2[0], p2[1], z0], [0, 0, -1]);
+        addTriOriented(p0, p1, p2, [0, 0, 1], 'g' + oi);
+        addTriOriented([p0[0], p0[1], z0], [p1[0], p1[1], z0], [p2[0], p2[1], z0], [0, 0, -1], 'g' + oi);
       }
     }
     // walls
@@ -502,19 +504,21 @@
         const w1 = [X(q.x), Y(q.y), z0];
         const w2 = [X(q.x), Y(q.y), z1];
         const w3 = [X(p.x), Y(p.y), z1];
-        addQuad(w0, w1, w2, w3, [ox, -oy, 0]);
+        const scope = infos[li].depth % 2 === 0 ? 'g' + li : 'g' + (infos[li].parent >= 0 ? infos[li].parent : li);
+        addQuad(w0, w1, w2, w3, [ox, -oy, 0], scope);
       }
     }
     return validateLocalEdges(indices, startIdx);
   }
 
-  function meshPrism(mask, w, h, pixelSize, z0, z1, positions, indices) {
+  function meshPrism(mask, w, h, pixelSize, z0, z1, positions, indices, forceTiling, depth = 0) {
     const startPos = positions.length / 3;
     const startIdx = indices.length;
-    if (meshPrismMarch(mask, w, h, pixelSize, z0, z1, positions, indices)) return 'march';
+    if (forceTiling) return meshPrismTiling(mask, w, h, pixelSize, z0, z1, positions, indices);
+    if (meshPrismMarch(mask, w, h, pixelSize, z0, z1, positions, indices) && validateLocalEdges(indices, startIdx)) return 'march';
     positions.length = startPos * 3;
     indices.length = startIdx;
-    return meshPrismLegacy(mask, w, h, pixelSize, z0, z1, positions, indices);
+    return meshPrismLegacy(mask, w, h, pixelSize, z0, z1, positions, indices, depth);
   }
 
   function meshPrismLegacy(mask, w, h, pixelSize, z0, z1, positions, indices, depth = 0) {
@@ -539,9 +543,9 @@
     const startPos = positions.length / 3;
     const startIdx = indices.length;
     const vmap = new Map();
-    const addVertex = (x, y, z) => {
+    const addVertex = (x, y, z, scope) => {
       const xi = Math.round(x * 100000), yi = Math.round(y * 100000), zi = Math.round(z * 100000);
-      const key = xi + ',' + yi + ',' + zi;
+      const key = xi + ',' + yi + ',' + zi + (scope ? ',' + scope : '');
       let idx = vmap.get(key);
       if (idx === undefined) {
         idx = positions.length / 3;
@@ -554,36 +558,37 @@
       if (a === b || b === c || a === c) return;
       indices.push(a, b, c);
     };
-    const addQuad = (p0, p1, p2, p3, outward) => {
+    const addQuad = (p0, p1, p2, p3, outward, scope) => {
       // Ensure the quad winds outward: use triangle p0,p1,p2 and flip if needed.
       const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
       const vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
       const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
       const dot = nx * outward[0] + ny * outward[1] + nz * outward[2];
       if (dot < 0) { const tmp = p1; p1 = p3; p3 = tmp; }
-      const a = addVertex(p0[0], p0[1], p0[2]);
-      const b = addVertex(p1[0], p1[1], p1[2]);
-      const c = addVertex(p2[0], p2[1], p2[2]);
-      const d = addVertex(p3[0], p3[1], p3[2]);
+      const a = addVertex(p0[0], p0[1], p0[2], scope);
+      const b = addVertex(p1[0], p1[1], p1[2], scope);
+      const c = addVertex(p2[0], p2[1], p2[2], scope);
+      const d = addVertex(p3[0], p3[1], p3[2], scope);
       addTri(a, b, c); addTri(a, c, d);
     };
     const X = (x) => (x - w / 2) * pixelSize;
     const Y = (y) => (h / 2 - y) * pixelSize;
     const zBottom = z0;
     const zTop = z1;
-    const addTriOriented = (p0, p1, p2, outward) => {
+    const addTriOriented = (p0, p1, p2, outward, scope) => {
       const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
       const vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
       const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
       if (nx * outward[0] + ny * outward[1] + nz * outward[2] < 0) { const t = p1; p1 = p2; p2 = t; }
-      const a = addVertex(p0[0], p0[1], p0[2]);
-      const b = addVertex(p1[0], p1[1], p1[2]);
-      const c = addVertex(p2[0], p2[1], p2[2]);
+      const a = addVertex(p0[0], p0[1], p0[2], scope);
+      const b = addVertex(p1[0], p1[1], p1[2], scope);
+      const c = addVertex(p2[0], p2[1], p2[2], scope);
       addTri(a, b, c);
     };
     // Triangulate caps once and reuse for top and bottom. Holes are grouped
     // with their containing outer ring; no T-junctions, no internal faces.
-    for (const group of groups) {
+    for (let gi = 0; gi < groups.length; gi++) {
+      const group = groups[gi];
       const flat = [], holeIndex = [];
       for (const p of group.outer.pts) flat.push(p.x, p.y);
       for (const hole of group.holes) {
@@ -596,22 +601,24 @@
         const p0 = [X(flat[ia]), Y(flat[ia + 1]), zTop];
         const p1 = [X(flat[ib]), Y(flat[ib + 1]), zTop];
         const p2 = [X(flat[ic]), Y(flat[ic + 1]), zTop];
-        addTriOriented(p0, p1, p2, [0, 0, 1]);
-        addTriOriented([p0[0], p0[1], zBottom], [p1[0], p1[1], zBottom], [p2[0], p2[1], zBottom], [0, 0, -1]);
+        addTriOriented(p0, p1, p2, [0, 0, 1], 'g' + gi);
+        addTriOriented([p0[0], p0[1], zBottom], [p1[0], p1[1], zBottom], [p2[0], p2[1], zBottom], [0, 0, -1], 'g' + gi);
       }
     }
     // Walls follow the same simplified boundary segments used by the caps.
-    const allLoops = [];
-    for (const group of groups) { allLoops.push(group.outer); for (const h of group.holes) allLoops.push(h); }
-    for (const loop of allLoops) {
-      const pts = loop.pts;
-      for (let i = 0; i < pts.length; i++) {
-        const p = pts[i], q = pts[(i + 1) % pts.length], out = loop.outs[i];
-        const w0 = [X(p.x), Y(p.y), zBottom];
-        const w1 = [X(q.x), Y(q.y), zBottom];
-        const w2 = [X(q.x), Y(q.y), zTop];
-        const w3 = [X(p.x), Y(p.y), zTop];
-        addQuad(w0, w1, w2, w3, [out.x, -out.y, 0]);
+    for (let gi = 0; gi < groups.length; gi++) {
+      const group = groups[gi];
+      const loops = [group.outer, ...group.holes];
+      for (const loop of loops) {
+        const pts = loop.pts;
+        for (let i = 0; i < pts.length; i++) {
+          const p = pts[i], q = pts[(i + 1) % pts.length], out = loop.outs[i];
+          const w0 = [X(p.x), Y(p.y), zBottom];
+          const w1 = [X(q.x), Y(q.y), zBottom];
+          const w2 = [X(q.x), Y(q.y), zTop];
+          const w3 = [X(p.x), Y(p.y), zTop];
+          addQuad(w0, w1, w2, w3, [out.x, -out.y, 0], 'g' + gi);
+        }
       }
     }
     // Complex pixel masks can contain pinch points where two boundary runs
@@ -634,27 +641,80 @@
       for (const n of edgeCounts.values()) if (n !== 2) { nonManifold = true; break; }
     }
     if (nonManifold) {
-      // Exact per-cell tiling: the footprint stays bit-identical to the mask,
-      // so thin strokes and 1-px white gaps survive. (An earlier fallback grew
-      // the mask by 1 px, which visibly bolded text and sealed letter gaps.)
+      // Large organic masks are usually only unmeshable because of 1-px pinches
+      // in their jagged boundary; a single-pixel growth (+0.15 mm at this grid)
+      // lets the primary path succeed with ~20k triangles instead of millions.
+      // Thin text/line masks keep the exact per-cell tiling so their strokes and
+      // 1-px gaps stay pixel-identical.
+      let px = 0;
+      for (let i = 0; i < mask.length; i++) px += mask[i] ? 1 : 0;
       positions.length = startPos * 3;
       indices.length = startIdx;
-      vmap.clear();
-      for (let y = 0; y < h; y++) {
-        for (let x = 0; x < w; x++) {
-          if (!mask[y * w + x]) continue;
-          const X0 = X(x), X1 = X(x + 1), Ytop = Y(y), Ybot = Y(y + 1);
-          addQuad([X0, Ybot, zTop], [X1, Ybot, zTop], [X1, Ytop, zTop], [X0, Ytop, zTop], [0, 0, 1]);
-          addQuad([X0, Ybot, zBottom], [X0, Ytop, zBottom], [X1, Ytop, zBottom], [X1, Ybot, zBottom], [0, 0, -1]);
-          if (y === 0 || !mask[(y - 1) * w + x]) addQuad([X0, Ytop, zBottom], [X1, Ytop, zBottom], [X1, Ytop, zTop], [X0, Ytop, zTop], [0, 1, 0]);
-          if (y === h - 1 || !mask[(y + 1) * w + x]) addQuad([X0, Ybot, zBottom], [X1, Ybot, zBottom], [X1, Ybot, zTop], [X0, Ybot, zTop], [0, -1, 0]);
-          if (x === 0 || !mask[y * w + x - 1]) addQuad([X0, Ytop, zBottom], [X0, Ybot, zBottom], [X0, Ybot, zTop], [X0, Ytop, zTop], [-1, 0, 0]);
-          if (x === w - 1 || !mask[y * w + x + 1]) addQuad([X1, Ytop, zBottom], [X1, Ybot, zBottom], [X1, Ybot, zTop], [X1, Ytop, zTop], [1, 0, 0]);
-        }
+      if (depth < 1 && px > 20000) {
+        const grown = morphMask(mask, w, h, 1, true);
+        const mode = meshPrism(grown, w, h, pixelSize, z0, z1, positions, indices, false, depth + 1);
+        if (indices.length > startIdx) return mode;
+        positions.length = startPos * 3;
+        indices.length = startIdx;
       }
-      return 'fallback';
+      return meshPrismTiling(mask, w, h, pixelSize, z0, z1, positions, indices);
     }
     return 'earcut';
+  }
+
+  /* Exact per-cell tiling used when the contour skeleton cannot form a
+     manifold solid. The footprint stays bit-identical to the mask. Vertices
+     are keyed per grid corner AND per diagonal group, so cells that only
+     touch at a point never share the corner column and their walls cannot
+     weld into a 4-face non-manifold edge. */
+  function meshPrismTiling(mask, w, h, pixelSize, z0, z1, positions, indices) {
+    const X = x => (x - w / 2) * pixelSize;
+    const Y = y => (h / 2 - y) * pixelSize;
+    const at = (x, y) => (x >= 0 && x < w && y >= 0 && y < h) ? mask[y * w + x] : 0;
+    const vmap = new Map();
+    const vert = (cx, cy, z, g) => {
+      const key = Math.round(X(cx) * 100000) + ',' + Math.round(Y(cy) * 100000) + ',' + Math.round(z * 100000) + ',' + g;
+      let idx = vmap.get(key);
+      if (idx === undefined) {
+        idx = positions.length / 3;
+        vmap.set(key, idx);
+        positions.push(X(cx), Y(cy), z);
+      }
+      return idx;
+    };
+    const tri = (a, b, c) => { if (a !== b && b !== c && a !== c) indices.push(a, b, c); };
+    const p = i => [positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]];
+    const quad = (a, b, c, d, outward) => {
+      const [ax, ay, az] = p(a), [bx, by, bz] = p(b), [cx2, cy2, cz] = p(c), [dx, dy, dz] = p(d);
+      const ux = bx - ax, uy = by - ay, uz = bz - az;
+      const vx = cx2 - ax, vy = cy2 - ay, vz = cz - az;
+      const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+      if (nx * outward[0] + ny * outward[1] + nz * outward[2] < 0) { tri(a, c, b); tri(a, d, c); }
+      else { tri(a, b, c); tri(a, c, d); }
+    };
+    // Diagonal group of corner (cx,cy) as seen from cell (x,y).
+    const groupAt = (cx, cy, x, y) => {
+      const nw = at(cx - 1, cy - 1), ne = at(cx, cy - 1), sw = at(cx - 1, cy), se = at(cx, cy);
+      if (nw && se && !ne && !sw) return (x === cx - 1 && y === cy - 1) ? 1 : 2;
+      if (ne && sw && !nw && !se) return (x === cx && y === cy - 1) ? 1 : 2;
+      return 0;
+    };
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      if (!mask[y * w + x]) continue;
+      const gTL = groupAt(x, y, x, y), gTR = groupAt(x + 1, y, x, y);
+      const gBR = groupAt(x + 1, y + 1, x, y), gBL = groupAt(x, y + 1, x, y);
+      const TL1 = vert(x, y, z1, gTL), TR1 = vert(x + 1, y, z1, gTR);
+      const BR1 = vert(x + 1, y + 1, z1, gBR), BL1 = vert(x, y + 1, z1, gBL);
+      const TL0 = vert(x, y, z0, gTL), TR0 = vert(x + 1, y, z0, gTR);
+      const BR0 = vert(x + 1, y + 1, z0, gBR), BL0 = vert(x, y + 1, z0, gBL);
+      quad(BL1, BR1, TR1, TL1, [0, 0, 1]);
+      quad(BL0, TL0, TR0, BR0, [0, 0, -1]);
+      if (!at(x, y - 1)) quad(TL0, TR0, TR1, TL1, [0, 1, 0]);
+      if (!at(x, y + 1)) quad(BL0, BR0, BR1, BL1, [0, -1, 0]);
+      if (!at(x - 1, y)) quad(TL0, BL0, BL1, TL1, [-1, 0, 0]);
+      if (!at(x + 1, y)) quad(TR0, BR0, BR1, TR1, [1, 0, 0]);
+    }
+    return 'fallback';
   }
 
   function build3MFParts(plan, options = {}) {
