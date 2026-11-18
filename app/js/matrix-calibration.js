@@ -401,10 +401,34 @@
       const b = B.sampleMedian(imageData, map, c.cx, c.y + 9.75, 3);
       return subDe(a.rgb, c.base) <= subDe(b.rgb, c.base) ? a.rgb : b.rgb;
     };
+    // Under-extruded single/thin layers leave sparse patches in the middle of a
+    // square where the white substrate shows through, which biases a centre
+    // median toward the substrate (inflating T and HD). Sample a ring just
+    // inside the square's border instead: it is well filled and avoids the
+    // bevel highlight at the very rim.
+    const sampleCell = (cell) => {
+      const inset = 0.4, band = 0.5, step = 0.2;
+      const n = Math.round(cell.size / step);
+      const ch = [[], [], []];
+      for (let i = 0; i <= n; i++) for (let j = 0; j <= n; j++) {
+        const u = cell.size * i / n, v = cell.size * j / n;
+        const d = Math.min(u, v, cell.size - u, cell.size - v);
+        if (d < inset || d > inset + band) continue;
+        const pt = map(cell.x + u, cell.y + v);
+        const x = Math.round(pt.x), y = Math.round(pt.y);
+        if (x < 0 || y < 0 || x >= imageData.width || y >= imageData.height) continue;
+        const p = (y * imageData.width + x) * 4;
+        for (let c = 0; c < 3; c++) ch[c].push(imageData.data[p + c]);
+      }
+      const ctr = map(cell.cx, cell.cy);
+      if (!ch[0].length) return B.sampleMedian(imageData, map, cell.cx, cell.cy, radius);
+      const rgb = ch.map(a => { a.sort((p, q) => p - q); return a[(a.length / 2) | 0]; });
+      return { rgb, x: ctr.x, y: ctr.y };
+    };
     const anchors = {};
     for (const code of CODES) {
       anchors[code] = layout.cells.filter(c => c.kind === 'single' && c.filament === code).map(c => {
-        const s = B.sampleMedian(imageData, map, c.cx, c.cy, radius);
+        const s = sampleCell(c);
         return { cellId: c.id, thickness: c.layers * layout.layerHeight, rgb: s.rgb, x: s.x, y: s.y, substrate: substrateOf(c), base: c.base };
       });
     }
@@ -453,7 +477,7 @@
     for (const code of CODES) camLinear[code] = fits[code].linear;
     const checks = [];
     for (const cell of layout.cells.filter(c => c.kind === 'mixed')) {
-      const s = B.sampleMedian(imageData, map, cell.cx, cell.cy, radius);
+      const s = sampleCell(cell);
       const sub = { rgb: substrateOf(cell) };
       let lin = sub.rgb.map(v => C.srgbToLinear(v / 255));
       for (const f of cell.recipe) {
