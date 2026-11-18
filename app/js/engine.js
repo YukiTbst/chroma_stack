@@ -906,6 +906,7 @@
     const seen = new Map();
     const neutralF = palette.map(p => Math.hypot(p.lab.a, p.lab.b) < 8);
     const chromaFracOf = seq => seq.reduce((n, i) => n + (neutralF[i] ? 0 : 1), 0) / Math.max(1, seq.length);
+    const distinctOf = seq => new Set(seq).size;
     const pushSeq = (seq, runs) => {
       const { lin, lab } = compositeLab(bg, seq, palette, layerHeight);
       const key = Math.round(lab.L * 2) + '|' + Math.round(lab.a * 2) + '|' + Math.round(lab.b * 2)
@@ -913,7 +914,7 @@
       const existing = seen.get(key);
       if (existing !== undefined) {
         if (!variableHeight && entries[existing].seq.length > seq.length) {
-          entries[existing] = { seq: seq.slice(), lab, lin, length: seq.length, runs, hex: C.linearToHex(lin), chromaFrac: chromaFracOf(seq) };
+          entries[existing] = { seq: seq.slice(), lab, lin, length: seq.length, runs, hex: C.linearToHex(lin), chromaFrac: chromaFracOf(seq), distinct: distinctOf(seq) };
         }
         return;
       }
@@ -1019,7 +1020,7 @@
       if (g.length !== length) continue;
       const de = C.deltaE2000(targetLab, g.lab);
       if (!g.chromaFrac && de < bestNeutralDE) { bestNeutralDE = de; bestNeutral = g; }
-      const score = de + 0.12 * Math.max(0, (g.runs || 1) - 1) + neutralBias(targetLab, g.chromaFrac || 0);
+      const score = de + 0.12 * Math.max(0, (g.runs || 1) - 1) + 0.25 * Math.max(0, (g.distinct || 1) - 1) + neutralBias(targetLab, g.chromaFrac || 0);
       if (score < bestScore) { bestScore = score; bestDE = de; best = g; }
     }
     // Hard preference: an all-neutral (K/W) stack within 3 ΔE wins for greys.
@@ -1041,6 +1042,97 @@
     const chroma = Math.hypot(targetLab.a, targetLab.b);
     if (chroma >= 12) return 0;
     return 3.0 * chromaFrac * (1 - chroma / 12);
+  }
+
+
+  /* Top-K alternative recipes within a ΔE budget (used by the neighbour-
+     coherence pass). */
+  function matchGamutCandidates(targetLab, gamut, k, maxDE) {
+    const keep = Math.max(28, k * 8);
+    const shortlist = [];
+    for (let i = 0; i < gamut.length; i++) {
+      const e = gamut[i].lab;
+      const dl = targetLab.L - e.L, da = targetLab.a - e.a, db = targetLab.b - e.b;
+      const d = dl * dl + da * da + db * db;
+      if (shortlist.length < keep) {
+        shortlist.push({ i, d });
+        if (shortlist.length === keep) shortlist.sort((a, b) => a.d - b.d);
+      } else if (d < shortlist[keep - 1].d) {
+        shortlist[keep - 1] = { i, d };
+        shortlist.sort((a, b) => a.d - b.d);
+      }
+    }
+    const out = [];
+    for (const c of shortlist) {
+      const g = gamut[c.i];
+      const de = C.deltaE2000(targetLab, g.lab);
+      if (de > maxDE) continue;
+      const score = de + 0.12 * Math.max(0, (g.runs || 1) - 1) + 0.25 * Math.max(0, (g.distinct || 1) - 1) + neutralBias(targetLab, g.chromaFrac || 0);
+      out.push({ g, de, score });
+    }
+    out.sort((a, b) => a.score - b.score);
+    return out.slice(0, k);
+  }
+
+  /* Adjacent families may each pick a different recipe with nearly the same
+     ΔE; that dithers colour layer by layer at boundaries. Re-pick recipes
+     within a small ΔE budget so neighbouring families agree on as many layers
+     as possible (greedy ICM on the family adjacency graph). */
+  function refineFamilyRecipes(families, familyId, w, h, gamut, gradStartLayer, layerHeight) {
+    const F = families.length;
+    if (F < 2 || !gamut || !gamut.length) return 0;
+    const adj = [];
+    for (let i = 0; i < F; i++) adj.push(new Map());
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = y * w + x, f = familyId[i];
+      if (f < 0) continue;
+      if (x + 1 < w) { const g = familyId[i + 1]; if (g >= 0 && g !== f) { adj[f].set(g, (adj[f].get(g) || 0) + 1); adj[g].set(f, (adj[g].get(f) || 0) + 1); } }
+      if (y + 1 < h) { const g = familyId[i + w]; if (g >= 0 && g !== f) { adj[f].set(g, (adj[f].get(g) || 0) + 1); adj[g].set(f, (adj[g].get(f) || 0) + 1); } }
+    }
+    const colorAt = (rec, L) => (L < rec.length ? rec[L] : -1);
+    const mismatch = (a, b) => {
+      const len = Math.max(a.length, b.length);
+      if (!len) return 0;
+      let m = 0;
+      for (let L = 0; L < len; L++) if (colorAt(a, L) !== colorAt(b, L)) m++;
+      return m / len;
+    };
+    const opts = families.map(f => {
+      const list = [{ seq: f.recipe, de: f.deltaE, lab: f.predictedLab, hex: f.predictedHex }];
+      for (const c of matchGamutCandidates(f.targetLab, gamut, 5, f.deltaE + 2)) {
+        list.push({ seq: c.g.seq, de: c.de, lab: c.g.lab, hex: c.g.hex });
+      }
+      return list;
+    });
+    let changedTotal = 0;
+    for (let pass = 0; pass < 2; pass++) {
+      let changed = 0;
+      for (let fi = 0; fi < F; fi++) {
+        if (adj[fi].size === 0) continue;
+        let best = null, bestCost = Infinity;
+        for (const opt of opts[fi]) {
+          let s = 0, wsum = 0;
+          for (const [g, wgt] of adj[fi]) { s += wgt * mismatch(opt.seq, families[g].recipe); wsum += wgt; }
+          const coh = wsum ? s / wsum : 0;
+          const cost = opt.de + 2.0 * coh;
+          if (cost < bestCost) { bestCost = cost; best = opt; }
+        }
+        if (best && best.seq !== families[fi].recipe) {
+          const f = families[fi];
+          f.recipe = best.seq.slice();
+          f.deltaE = best.de;
+          f.predictedLab = best.lab;
+          f.predictedHex = best.hex;
+          f.layers = f.recipe.length;
+          f.topLayer = gradStartLayer + f.recipe.length;
+          f.topMm = f.topLayer * layerHeight;
+          changed++;
+        }
+      }
+      changedTotal += changed;
+      if (!changed) break;
+    }
+    return changedTotal;
   }
 
   function matchGamut(targetLab, gamut) {
@@ -1066,7 +1158,7 @@
     for (const c of shortlist) {
       const g = gamut[c.i];
       const de = C.deltaE2000(targetLab, g.lab);
-      const score = de + 0.12 * Math.max(0, (g.runs || 1) - 1) + neutralBias(targetLab, g.chromaFrac || 0);
+      const score = de + 0.12 * Math.max(0, (g.runs || 1) - 1) + 0.25 * Math.max(0, (g.distinct || 1) - 1) + neutralBias(targetLab, g.chromaFrac || 0);
       if (score < bestScore) { bestScore = score; bestDE = de; chosen = c.i; }
     }
     if (chosen == null) return null;
@@ -1156,7 +1248,7 @@
       for (let i = 0; i < b; i++) if (g.seq[i] !== prefix[i]) { ok = false; break; }
       if (!ok) continue;
       const de = C.deltaE2000(targetLab, g.lab);
-      const score = de + 0.12 * Math.max(0, (g.runs || 1) - 1) + neutralBias(targetLab, g.chromaFrac || 0);
+      const score = de + 0.12 * Math.max(0, (g.runs || 1) - 1) + 0.25 * Math.max(0, (g.distinct || 1) - 1) + neutralBias(targetLab, g.chromaFrac || 0);
       if (score < bestScore) { bestScore = score; bestDE = de; best = g; }
     }
     if (!best) return null;
@@ -2001,6 +2093,9 @@
         for (let i = 0; i < n; i++) if (!flatMask[i] && familyId[i] >= 0) familyPixels[familyId[i]]++;
       }
       for (let f = 0; f < families.length; f++) families[f].pixelCount = familyPixels[f] || 0;
+      if (engine === 'td' && gamut && families.length > 1) {
+        refineFamilyRecipes(families, familyId, w, h, gamut, gradStartLayer, layerHeight);
+      }
       let vectorConverted = { families: 0, pixels: 0 };
       vectorInfo = vectorConverted;
       if (options.vectorFlat && gradCount > 0) {
