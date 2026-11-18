@@ -387,15 +387,25 @@
         x: pts[0].x, y: pts[0].y
       };
     }
+    // Each anchor needs a local substrate strip, but the photo may be mirrored
+    // or rotated, so "above in board coordinates" can land on the other base
+    // half. Sample both gaps and keep whichever is closer to the measured base
+    // colour of the cell's own half.
+    const labBase = {
+      K: C.hexToLab(C.rgbToHex(baseSample.K.rgb[0], baseSample.K.rgb[1], baseSample.K.rgb[2])),
+      W: C.hexToLab(C.rgbToHex(baseSample.W.rgb[0], baseSample.W.rgb[1], baseSample.W.rgb[2]))
+    };
+    const subDe = (rgb, base) => C.deltaE2000(labBase[base], C.hexToLab(C.rgbToHex(rgb[0], rgb[1], rgb[2])));
+    const substrateOf = (c) => {
+      const a = B.sampleMedian(imageData, map, c.cx, c.y - 0.75, 3);
+      const b = B.sampleMedian(imageData, map, c.cx, c.y + 9.75, 3);
+      return subDe(a.rgb, c.base) <= subDe(b.rgb, c.base) ? a.rgb : b.rgb;
+    };
     const anchors = {};
     for (const code of CODES) {
       anchors[code] = layout.cells.filter(c => c.kind === 'single' && c.filament === code).map(c => {
         const s = B.sampleMedian(imageData, map, c.cx, c.cy, radius);
-        // Real photos have uneven illumination across a base half, so each
-        // anchor gets its own substrate from the 1.5 mm base strip above it
-        // instead of one half-wide average.
-        const sub = B.sampleMedian(imageData, map, c.cx, c.y - 0.75, 3);
-        return { cellId: c.id, thickness: c.layers * layout.layerHeight, rgb: s.rgb, x: s.x, y: s.y, substrate: sub.rgb, base: c.base };
+        return { cellId: c.id, thickness: c.layers * layout.layerHeight, rgb: s.rgb, x: s.x, y: s.y, substrate: substrateOf(c), base: c.base };
       });
     }
     const joint = fitMatrixAnchors(anchors);
@@ -444,7 +454,7 @@
     const checks = [];
     for (const cell of layout.cells.filter(c => c.kind === 'mixed')) {
       const s = B.sampleMedian(imageData, map, cell.cx, cell.cy, radius);
-      const sub = B.sampleMedian(imageData, map, cell.cx, cell.y - 0.75, 3);
+      const sub = { rgb: substrateOf(cell) };
       let lin = sub.rgb.map(v => C.srgbToLinear(v / 255));
       for (const f of cell.recipe) {
         const r = results.find(x => x.code === f);
