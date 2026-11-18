@@ -8,7 +8,7 @@
 <meta http-equiv="Expires" content="0">
 <title>叠彩 ChromaStack · 混合彩绘 3D 打印规划器</title>
 <link rel="icon" type="image/x-icon" href="favicon.ico">
-<link rel="stylesheet" href="css/app.css?v=20261118m12">
+<link rel="stylesheet" href="css/app.css?v=20261118m13">
 </head>
 <body>
 <header class="app-header">
@@ -116,7 +116,7 @@
       <p class="hint" id="batchCalibStatus">黑色两层薄底 → 白色 → 其余耗材，三色阶逐层收成金字塔；每个 Z 层仅一种耗材，四角白色定位柱只在白色料带内增高。</p>
       <button class="btn wide" id="btnMatrixPhoto">上传多色矩阵照片识别</button>
       <input type="file" id="matrixPhotoInput" accept="image/*" hidden>
-      <p class="hint" id="matrixCalibStatus">75 mm 黑白双基底矩阵板（12 层）：单色 1/4/10 层锚点反解 HD/TD，跨色格做交叉验证。正上方拍全板、四角黑白定位点入镜、光线均匀不反光。</p>
+      <p class="hint" id="matrixCalibStatus">100 mm 黑白双基底六色矩阵板（10 层）：黑/白/橙/黄/青/品红每色 1/2/4/8 层锚点 + 16 个跨色格交叉验证；当前耗材需包含这六类。正上方拍全板、四角黑白定位点入镜、光线均匀不反光。</p>
     </section>
 
     <section class="card">
@@ -410,19 +410,19 @@
 
 <div class="toast" id="toast" hidden></div>
 
-<script src="js/color.js?v=20261118m12"></script>
-<script src="js/data-filaments.js?v=20261118m12"></script>
-<script src="js/data-lut.js?v=20261118m12"></script>
-<script src="js/earcut.js?v=20261118m12"></script>
-<script src="js/engine.js?v=20261118m12"></script>
-<script src="js/zip.js?v=20261118m12"></script>
-<script src="js/exporter.js?v=20261118m12"></script>
-<script src="js/calibration.js?v=20261118m12"></script>
-<script src="js/batch-calibration.js?v=20261118m12"></script>
-<script src="js/matrix-calibration.js?v=20261118m12"></script>
-<script src="js/view3d.js?v=20261118m12"></script>
-<script src="js/profiles.js?v=20261118m12"></script>
-<script src="js/settings.js?v=20261118m12"></script>
-<script src="js/app.js?v=20261118m12"></script>
+<script src="js/color.js?v=20261118m13"></script>
+<script src="js/data-filaments.js?v=20261118m13"></script>
+<script src="js/data-lut.js?v=20261118m13"></script>
+<script src="js/earcut.js?v=20261118m13"></script>
+<script src="js/engine.js?v=20261118m13"></script>
+<script src="js/zip.js?v=20261118m13"></script>
+<script src="js/exporter.js?v=20261118m13"></script>
+<script src="js/calibration.js?v=20261118m13"></script>
+<script src="js/batch-calibration.js?v=20261118m13"></script>
+<script src="js/matrix-calibration.js?v=20261118m13"></script>
+<script src="js/view3d.js?v=20261118m13"></script>
+<script src="js/profiles.js?v=20261118m13"></script>
+<script src="js/settings.js?v=20261118m13"></script>
+<script src="js/app.js?v=20261118m13"></script>
 </body>
 </html>

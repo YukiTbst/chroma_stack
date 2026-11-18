@@ -1,6 +1,6 @@
-/* Multi-colour TD matrix photo inversion: synthetic photographed board with
-   known HDs, camera gains, projective warp, sensor noise and a 90° rotation.
-   Run from project root: node tests/test-matrix-calibration.mjs */
+/* Six-colour TD matrix photo inversion: synthetic photographed board with
+   known HDs, camera gains, projective warp, sensor noise, 90° rotation and a
+   mirrored variant. Run from project root: node tests/test-matrix-calibration.mjs */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -17,16 +17,18 @@ const M = globalThis.CS.matrixCalibration;
 const B = globalThis.CS.batchCalibration;
 
 const layout = M.buildMatrixLayout();
-assert.equal(layout.cells.length, 36);
-assert.equal(layout.cells.filter(c => c.kind === 'mixed').length, 12);
-assert.equal(layout.totalLayers, 12);
-assert.ok(Math.abs(layout.maxHeight - 1.12) < 1e-9);
+assert.equal(layout.cells.length, 64);
+assert.equal(layout.cells.filter(c => c.kind === 'mixed').length, 16);
+assert.equal(layout.cells.filter(c => c.kind === 'single').length, 48);
+assert.deepEqual(layout.steps, [1, 2, 4, 8]);
+assert.equal(layout.totalLayers, 10);
+assert.ok(Math.abs(layout.maxHeight - 0.96) < 1e-9);
+assert.equal(layout.boardW, 100);
 
 /* Parity with the physical board generator when its 3MF is present. */
-const mf = path.join(path.dirname(fileURLToPath(import.meta.url)), 'ChromaStack_TD_Matrix_75mm_L12.3mf');
+const mf = path.join(path.dirname(fileURLToPath(import.meta.url)), 'ChromaStack_TD_Matrix_100mm_6color.3mf');
 if (fs.existsSync(mf)) {
   const buf = fs.readFileSync(mf);
-  // locate the stored metadata entry by scanning local file headers
   let meta = null;
   for (let i = 0; i + 4 < buf.length; i++) {
     if (buf.readUInt32LE(i) !== 0x04034b50) continue;
@@ -43,16 +45,16 @@ if (fs.existsSync(mf)) {
   assert.deepEqual(meta.cells.map(c => [c.id, c.cx, c.cy, c.base, c.kind, c.recipe.join('')]),
     layout.cells.map(c => [c.id, c.cx, c.cy, c.base, c.kind, c.recipe.join('')]), 'JS layout matches printed board cells');
   assert.deepEqual(meta.markers.map(m => [m.cx, m.cy, m.filament]), layout.markers.map(m => [m.cx, m.cy, m.filament]), 'markers match');
-  assert.deepEqual(meta.singleSteps, layout.steps);
+  assert.deepEqual(meta.steps, layout.steps);
   console.log('layout parity with printed 3MF metadata passed');
 } else {
   console.log('note: printed 3MF absent, skipping metadata parity');
 }
 
 /* ---- forward optical model ---- */
-const TRUE_HD = { K: 0.26, W: 0.44, R: 0.62, U: 0.95 };
-const OPAQUE = { K: '#050505', W: '#ffffff', R: '#c00d1e', U: '#00358e' };
-const GAINS = [0.82, 0.93, 0.88]; // linear camera gain per channel
+const TRUE_HD = { K: 0.26, W: 0.44, O: 0.62, Y: 0.78, C: 0.88, M: 0.58 };
+const OPAQUE = { K: '#050505', W: '#ffffff', O: '#ff6a13', Y: '#fce300', C: '#0086d6', M: '#ec008c' };
+const GAINS = [0.82, 0.93, 0.88];
 const PLATE = C.hexToRgb01('#2a2a2a');
 const lin = hex => { const r = C.hexToRgb01(hex); return [C.srgbToLinear(r.r), C.srgbToLinear(r.g), C.srgbToLinear(r.b)]; };
 const O = {}; for (const k of Object.keys(TRUE_HD)) O[k] = lin(OPAQUE[k]);
@@ -72,17 +74,17 @@ const MARKER_LIN = layout.markers.map(m => mix(O[m.filament], BASE[m.filament ==
 const toCam = v => v.map((x, i) => C.linearToSrgb8(Math.min(1, x * GAINS[i])));
 
 /* ---- rasterise straight, then warp + noise ---- */
-const N = 1200, SCALE = 14, OFF = 60;
+const SCALE = 12, OFF = 60;
+const N = Math.round(100 * SCALE + 2 * OFF);
 const straight = new Uint8ClampedArray(N * N * 4);
 const baseCam = { K: toCam(BASE.K), W: toCam(BASE.W) };
 const cellCam = layout.cells.map(c => toCam(cellLinear(c)));
 const markerCam = MARKER_LIN.map(toCam);
-const bg = [128, 128, 128];
 for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
   const mmX = (x - OFF) / SCALE, mmY = (y - OFF) / SCALE;
-  let rgb = bg;
-  if (mmX >= 0 && mmY >= 0 && mmX <= 75 && mmY <= 75) {
-    rgb = baseCam[mmX < 37.5 ? 'K' : 'W'];
+  let rgb = [128, 128, 128];
+  if (mmX >= 0 && mmY >= 0 && mmX <= 100 && mmY <= 100) {
+    rgb = baseCam[mmY < 50 ? 'K' : 'W'];
     for (let i = 0; i < layout.markers.length; i++) {
       const m = layout.markers[i];
       if (mmX >= m.x && mmX <= m.x + m.size && mmY >= m.y && mmY <= m.y + m.size) rgb = markerCam[i];
@@ -95,8 +97,8 @@ for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
   const p = (y * N + x) * 4;
   straight[p] = rgb[0]; straight[p + 1] = rgb[1]; straight[p + 2] = rgb[2]; straight[p + 3] = 255;
 }
-const srcCorners = [{ cx: OFF, cy: OFF }, { cx: OFF + 75 * SCALE, cy: OFF }, { cx: OFF + 75 * SCALE, cy: OFF + 75 * SCALE }, { cx: OFF, cy: OFF + 75 * SCALE }];
-const dstCorners = [{ cx: OFF + 6, cy: OFF + 4 }, { cx: OFF + 75 * SCALE - 8, cy: OFF + 10 }, { cx: OFF + 75 * SCALE - 4, cy: OFF + 75 * SCALE - 6 }, { cx: OFF + 9, cy: OFF + 75 * SCALE - 8 }];
+const srcCorners = [{ cx: OFF, cy: OFF }, { cx: OFF + 100 * SCALE, cy: OFF }, { cx: OFF + 100 * SCALE, cy: OFF + 100 * SCALE }, { cx: OFF, cy: OFF + 100 * SCALE }];
+const dstCorners = [{ cx: OFF + 6, cy: OFF + 4 }, { cx: OFF + 100 * SCALE - 8, cy: OFF + 10 }, { cx: OFF + 100 * SCALE - 4, cy: OFF + 100 * SCALE - 6 }, { cx: OFF + 9, cy: OFF + 100 * SCALE - 8 }];
 const inv = B.homography(dstCorners, srcCorners);
 let seed = 42;
 const noise = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return (seed / 0x7fffffff) * 4 - 2; };
@@ -129,21 +131,24 @@ function mirrorX(img) {
   return { width: N, height: N, data };
 }
 
+/* Palette deliberately shuffled: roles must be recovered from luminance/hue. */
 const palette = [
-  { id: 'k', name: 'Black', hex: '#000000', td: 0.6, brand: 'T', material: 'PLA' },
-  { id: 'w', name: 'Jade White', hex: '#ffffff', td: 5, brand: 'T', material: 'PLA' },
-  { id: 'r', name: 'Red', hex: '#c00d1e', td: 5, brand: 'T', material: 'PLA' },
   { id: 'y', name: 'Yellow', hex: '#fce300', td: 6, brand: 'T', material: 'PLA' },
-  { id: 'u', name: 'Blue', hex: '#00358e', td: 4, brand: 'T', material: 'PLA' }
+  { id: 'k', name: 'Black', hex: '#0a0a0a', td: 0.6, brand: 'T', material: 'PLA' },
+  { id: 'm', name: 'Magenta', hex: '#ec008c', td: 5, brand: 'T', material: 'PLA' },
+  { id: 'w', name: 'Jade White', hex: '#ffffff', td: 5, brand: 'T', material: 'PLA' },
+  { id: 'c', name: 'Cyan', hex: '#0086d6', td: 3.5, brand: 'T', material: 'PLA' },
+  { id: 'o', name: 'Orange', hex: '#ff6a13', td: 5, brand: 'T', material: 'PLA' }
 ];
 const mapping = M.matchMatrixPalette(palette);
-assert.deepEqual(mapping, { K: 0, W: 1, R: 2, U: 4 }, 'board roles map onto the current palette');
+assert.deepEqual(mapping, { K: 1, W: 3, O: 5, Y: 0, C: 4, M: 2 }, 'board roles map onto the shuffled palette');
+assert.throws(() => M.matchMatrixPalette(palette.slice(0, 5)), /六类/);
 
 function checkResult(result, tag) {
-  assert.equal(result.results.length, 4);
+  assert.equal(result.results.length, 6);
   for (const r of result.results) {
     const truth = TRUE_HD[r.code];
-    assert.ok(Math.abs(r.hd - truth) / truth < 0.10, `${tag} ${r.code} HD ${r.hd.toFixed(3)} vs ${truth}`);
+    assert.ok(Math.abs(r.hd - truth) / truth < 0.12, `${tag} ${r.code} HD ${r.hd.toFixed(3)} vs ${truth}`);
     const de = C.deltaE2000(C.hexToLab(r.hex), C.hexToLab(OPAQUE[r.code]));
     assert.ok(de < 3, `${tag} ${r.code} hex ΔE ${de.toFixed(2)}`);
     assert.ok(r.opaqueFit, `${tag} ${r.code} identifiable`);

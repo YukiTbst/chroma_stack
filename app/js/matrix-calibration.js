@@ -1,9 +1,9 @@
-/* Multi-colour TD matrix photo analysis (75 mm, 12-layer board).
-   The board carries single-filament thickness anchors (1/4/10 colour layers)
+/* Multi-colour TD matrix photo analysis (100 mm, 10-layer, six filaments).
+   The board carries single-filament thickness anchors (1/2/4/8 colour layers)
    over BOTH a black and a white base half, plus cross-colour recipe cells.
    Because front-lit mixing is linear in radiance, camera gain cancels when the
    substrate is measured in camera space: each filament's HD and camera-space
-   opaque colour are jointly fitted from its six anchors, the white anchors
+   opaque colour are jointly fitted from its eight anchors, the white anchors
    double as the white-balance reference (white opaque == 1), and the mixed
    cells are predicted afterwards as an independent cross-check. */
 (function (root) {
@@ -12,40 +12,50 @@
   const C = CS.color;
   const B = CS.batchCalibration;
   const clamp = (v, a, b) => v < a ? a : (v > b ? b : v);
-  const CODES = ['K', 'W', 'R', 'U'];
+  const CODES = ['K', 'W', 'O', 'Y', 'C', 'M'];
 
-  /* Mirrors tests/generate-multicolor-td-75mm.py (metadata version 1). */
+  /* Mirrors tests/generate-multicolor-td-100mm-6color.py (metadata version 2). */
   function buildMatrixLayout() {
-    const board = 75, layerHeight = 0.08, firstLayer = 0.24, baseLayers = 2;
+    const board = 100, layerHeight = 0.08, firstLayer = 0.24, baseLayers = 2;
     const baseHeight = firstLayer + layerHeight;
-    const steps = [1, 4, 10];
-    const mixLeft = [['W', 'R'], ['R', 'W'], ['W', 'U'], ['U', 'W'], ['R', 'U', 'R'], ['U', 'R', 'U']];
-    const mixRight = [['K', 'R'], ['R', 'K'], ['K', 'U'], ['U', 'K'], ['R', 'W', 'R'], ['U', 'W', 'U']];
+    const steps = [1, 2, 4, 8];
+    const filaments = ['K', 'W', 'O', 'Y', 'C', 'M'];
+    const mixBlack = [['W', 'O'], ['O', 'W'], ['W', 'M'], ['M', 'W'], ['W', 'Y'], ['Y', 'W'], ['W', 'C'], ['C', 'W']];
+    const mixWhite = [['O', 'Y'], ['Y', 'O'], ['C', 'M'], ['M', 'C'], ['O', 'M'], ['M', 'O'], ['Y', 'C'], ['C', 'Y']];
+    const margin = 8, seamGap = 2, pitch = 10.5, size = 9;
     const cells = [];
     for (let side = 0; side < 2; side++) {
       const base = side === 0 ? 'K' : 'W';
-      const recipes = [];
-      for (const f of ['W', 'K', 'R', 'U']) for (const n of steps) recipes.push({ kind: 'single', filament: f, recipe: new Array(n).fill(f), layers: n });
-      for (const recipe of (side === 0 ? mixLeft : mixRight)) recipes.push({ kind: 'mixed', recipe, layers: recipe.length });
-      for (let row = 0; row < 6; row++) for (let col = 0; col < 3; col++) {
-        const r = recipes[row * 3 + col];
-        const x = 6.75 + (side * 3 + col) * 10.5, y = 6.75 + row * 10.5;
-        cells.push({ id: `${side === 0 ? 'B' : 'W'}-${row + 1}${col + 1}`, x, y, size: 9, cx: x + 4.5, cy: y + 4.5, base, ...r });
+      const mixes = side === 0 ? mixBlack : mixWhite;
+      for (let row = 0; row < 4; row++) for (let col = 0; col < 8; col++) {
+        const x = margin + col * pitch;
+        // White half starts 2 mm below the base seam so the first row still has
+        // a white substrate strip above it for local sampling.
+        const y = (side === 0 ? margin : board / 2 + seamGap) + row * pitch;
+        const cell = { id: `${side === 0 ? 'B' : 'W'}-${row + 1}${col + 1}`, x, y, size, cx: x + size / 2, cy: y + size / 2, base };
+        if (col < 6) {
+          const f = filaments[col];
+          Object.assign(cell, { kind: 'single', filament: f, recipe: new Array(steps[row]).fill(f), layers: steps[row] });
+        } else {
+          const recipe = mixes[row * 2 + (col - 6)];
+          Object.assign(cell, { kind: 'mixed', recipe, layers: recipe.length });
+        }
+        cells.push(cell);
       }
     }
     const markers = [
       { x: 1.5, y: 1.5, cx: 3, cy: 3, size: 3, filament: 'W' },
-      { x: 70.5, y: 1.5, cx: 72, cy: 3, size: 3, filament: 'K' },
-      { x: 70.5, y: 70.5, cx: 72, cy: 72, size: 3, filament: 'K' },
-      { x: 1.5, y: 70.5, cx: 3, cy: 72, size: 3, filament: 'W' }
+      { x: 95.5, y: 1.5, cx: 97, cy: 3, size: 3, filament: 'W' },
+      { x: 95.5, y: 95.5, cx: 97, cy: 97, size: 3, filament: 'K' },
+      { x: 1.5, y: 95.5, cx: 3, cy: 97, size: 3, filament: 'K' }
     ];
     return {
       boardW: board, boardD: board, layerHeight, firstLayer, baseLayers, baseHeight,
       totalLayers: baseLayers + Math.max(...steps), maxHeight: firstLayer + (baseLayers + Math.max(...steps) - 1) * layerHeight,
       steps, cells, markers,
-      baseSamples: { K: [[20, 3.5], [20, 71.5], [16.5, 37.5]], W: [[55, 3.5], [55, 71.5], [48, 37.5]] },
+      baseSamples: { K: [[20, 4], [80, 4], [50, 17.75]], W: [[20, 96], [80, 96], [50, 82.25]] },
       printMode: 'multi-filament-per-layer',
-      note: '黑白双基底各 18 格：单色 1/4/10 层厚度锚点 + 6 个跨色配方；四角黑白混合定位点。'
+      note: '100mm 黑白双基底六色板：每色 1/2/4/8 层锚点 + 16 个跨色配方；四角黑白混合定位点（上黑下白基底）。'
     };
   }
 
@@ -162,7 +172,7 @@
     return ordered.map(m => ({ ...m, bright: m.meanY > m.ring }));
   }
 
-  const POLARITY = ['B', 'D', 'D', 'B']; // layout markers tl,tr,br,bl = W,K,K,W
+  const POLARITY = ['B', 'B', 'D', 'D']; // markers tl,tr,br,bl = W,W,K,K
   /* The polarity pattern is a palindrome, so it cannot tell a rotated photo
      from a mirrored one (slicer flip or front camera). Enumerate all eight
      dihedral pairings, keep those matching polarity, then let the content
@@ -318,17 +328,47 @@
     return { fits, illumination: { K: 1, W: 1 } };
   }
 
-  /* Board roles from the current palette: darkest / lightest / reddest / bluest. */
+  /* Board roles from the current palette: darkest/lightest plus four chromatic
+     roles matched by hue (orange/yellow/cyan/magenta). */
+  function hueOf(hex) {
+    const c = C.hexToRgb01(hex);
+    const max = Math.max(c.r, c.g, c.b), min = Math.min(c.r, c.g, c.b), d = max - min;
+    if (d < 1e-6) return 0;
+    let h;
+    if (max === c.r) h = ((c.g - c.b) / d) % 6;
+    else if (max === c.g) h = (c.b - c.r) / d + 2;
+    else h = (c.r - c.g) / d + 4;
+    return (h * 60 + 360) % 360;
+  }
+
   function matchMatrixPalette(palette) {
-    if (!palette || palette.length < 4) throw new Error('矩阵标定需要当前耗材里至少有黑、白、红、蓝四类耗材');
+    if (!palette || palette.length < 6) throw new Error('矩阵标定需要当前耗材里至少有黑、白、橙、黄、青、品红六类耗材');
     const lab = palette.map(p => C.hexToLab(p.hex));
-    const arg = (fn, exclude = []) => lab.reduce((best, l, i) => (exclude.includes(i) || (best >= 0 && !fn(l, lab[best]))) ? best : i, -1);
-    const K = arg((l, b) => l.L < b.L);
-    const W = arg((l, b) => l.L > b.L);
-    const R = arg((l, b) => l.a > b.a, [K, W]);
-    const U = arg((l, b) => l.b < b.b, [K, W, R]);
-    if (new Set([K, W, R, U]).size !== 4) throw new Error('无法从当前耗材区分黑/白/红/蓝四类，请检查耗材颜色');
-    return { K, W, R, U };
+    const hues = palette.map(p => hueOf(p.hex));
+    const sats = palette.map(p => {
+      const c = C.hexToRgb01(p.hex);
+      const mx = Math.max(c.r, c.g, c.b), mn = Math.min(c.r, c.g, c.b);
+      return mx < 1e-6 ? 0 : (mx - mn) / mx;
+    });
+    const K = lab.reduce((best, l, i) => l.L < lab[best].L ? i : best, 0);
+    const W = lab.reduce((best, l, i) => l.L > lab[best].L ? i : best, 0);
+    const used = new Set([K, W]);
+    const out = { K, W };
+    const targets = { O: 25, Y: 55, C: 200, M: 325 };
+    const circ = (a, b) => { const d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; };
+    for (const role of ['O', 'Y', 'C', 'M']) {
+      let best = -1, bestD = 1e9;
+      for (let i = 0; i < palette.length; i++) {
+        if (used.has(i) || sats[i] < 0.15) continue;
+        const d = circ(hues[i], targets[role]);
+        if (d < bestD) { bestD = d; best = i; }
+      }
+      if (best < 0 || bestD > 45) throw new Error('无法从当前耗材区分橙/黄/青/品红四类（需要饱和度足够、色相接近的耗材）');
+      out[role] = best;
+      used.add(best);
+    }
+    if (new Set(Object.values(out)).size !== 6) throw new Error('无法从当前耗材区分黑/白/橙/黄/青/品红六类，请检查耗材颜色');
+    return out;
   }
 
   function analyzeMatrixPhoto(imageData, palette, options = {}) {
