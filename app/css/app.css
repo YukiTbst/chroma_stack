@@ -208,6 +208,8 @@ input[type="range"]::-moz-range-thumb { width: 12px; height: 12px; border-radius
 .palette-td { width: 52px; flex: none; }
 .palette-td input { width: 100%; border: 1px solid var(--line); border-radius: 6px; background: rgba(255,252,246,.7); padding: 5px 4px; font-size: 10.5px; text-align: center; }
 .palette-td span { display: block; font-size: 8.5px; color: var(--muted); text-align: center; margin-top: 2px; }
+.palette-td.triple { width: auto; display: flex; gap: 4px; }
+.palette-td.triple > div { width: 46px; }
 .palette-note { font-size: 9px; color: var(--teal); background: var(--teal-soft); border-radius: 6px; padding: 2px 5px; }
 
 /* ---------- stage ---------- */

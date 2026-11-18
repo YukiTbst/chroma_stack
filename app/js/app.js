@@ -638,14 +638,18 @@
           <div class="palette-td"><input value="${p.td != null ? p.td : ''}" disabled aria-label="TD"><span>TD</span></div>
           <span class="palette-note">LUT</span>`;
       } else {
+        const tdR = p.tdR != null ? p.tdR : (p.td != null ? p.td : 5);
+        const tdG = p.tdG != null ? p.tdG : (p.td != null ? p.td : 5);
+        const tdB = p.tdB != null ? p.tdB : (p.td != null ? p.td : 5);
         const hasTri = p.tdR != null || p.tdG != null || p.tdB != null;
-        const tri = hasTri
-          ? `TD ${(Number(p.tdR ?? p.td) || 0).toFixed(1)}/${(Number(p.tdG ?? p.td) || 0).toFixed(1)}/${(Number(p.tdB ?? p.td) || 0).toFixed(1)} R/G/B`
-          : `HD ${((Number(p.td) || 0) * 0.1).toFixed(2)} mm`;
         item.innerHTML = `
           <span class="swatch-wrap"><input type="color" value="${esc(p.hex || '#808080')}" data-hex="${i}" aria-label="颜色"></span>
-          <div class="palette-info"><strong>${esc(p.name || ('耗材 ' + (i + 1)))}</strong><small>${esc(p.brand || '自定义')} · ${tri}</small></div>
-          <div class="palette-td"><input type="number" value="${p.td != null ? p.td : 5}" min="0.1" max="20" step="0.1" data-td="${i}" aria-label="TD"><span>TD</span></div>
+          <div class="palette-info"><strong>${esc(p.name || ('耗材 ' + (i + 1)))}</strong><small>${esc(p.brand || '自定义')} · ${hasTri ? '逐通道 TD（标定值）' : '单值 TD（未逐通道标定）'}</small></div>
+          <div class="palette-td triple">
+            <div><input type="number" value="${(Number(tdR) || 5).toFixed(1)}" min="0.1" max="20" step="0.1" data-tdr="${i}" aria-label="TD R"><span>R</span></div>
+            <div><input type="number" value="${(Number(tdG) || 5).toFixed(1)}" min="0.1" max="20" step="0.1" data-tdg="${i}" aria-label="TD G"><span>G</span></div>
+            <div><input type="number" value="${(Number(tdB) || 5).toFixed(1)}" min="0.1" max="20" step="0.1" data-tdb="${i}" aria-label="TD B"><span>B</span></div>
+          </div>
           <button class="icon-btn" data-remove="${i}" title="移除">×</button>`;
       }
       list.appendChild(item);
@@ -1624,12 +1628,22 @@
     $('paletteList').addEventListener('input', (e) => {
       const hexIdx = e.target.dataset.hex;
       const tdIdx = e.target.dataset.td;
+      const trIdx = e.target.dataset.tdr, tgIdx = e.target.dataset.tdg, tbIdx = e.target.dataset.tdb;
       if (hexIdx != null) {
         const i = Number(hexIdx);
         if (state.tdPalette[i]) {
           state.tdPalette[i].hex = e.target.value;
-          const info = e.target.closest('.palette-item').querySelector('small');
-          if (info) info.textContent = `${state.tdPalette[i].brand || '自定义'} · HD ${((Number(state.tdPalette[i].td) || 0) * 0.1).toFixed(2)} mm`;
+          markDirty(false);
+        }
+      } else if (trIdx != null || tgIdx != null || tbIdx != null) {
+        const i = Number(trIdx != null ? trIdx : (tgIdx != null ? tgIdx : tbIdx));
+        if (state.tdPalette[i]) {
+          const p = state.tdPalette[i];
+          const cur = { R: p.tdR != null ? p.tdR : p.td, G: p.tdG != null ? p.tdG : p.td, B: p.tdB != null ? p.tdB : p.td };
+          const channel = trIdx != null ? 'R' : (tgIdx != null ? 'G' : 'B');
+          cur[channel] = clamp(Number(e.target.value) || 5, 0.1, 20);
+          p.tdR = cur.R; p.tdG = cur.G; p.tdB = cur.B;
+          p.td = 0.2126 * p.tdR + 0.7152 * p.tdG + 0.0722 * p.tdB;
           markDirty(false);
         }
       } else if (tdIdx != null) {
@@ -1637,7 +1651,7 @@
         if (state.tdPalette[i]) {
           const v = clamp(Number(e.target.value) || 5, 0.1, 20);
           state.tdPalette[i].td = v;
-          // Manual edit overrides the per-channel calibration with a uniform value.
+          // Manual single-value edit overrides the per-channel calibration.
           state.tdPalette[i].tdR = v; state.tdPalette[i].tdG = v; state.tdPalette[i].tdB = v;
           markDirty(false);
         }
