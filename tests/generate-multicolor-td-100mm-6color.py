@@ -53,8 +53,10 @@ def add_box(objects, material, x0, y0, z0, x1, y1, z1):
     idx = objects[material]['idx']
     x0 -= BOARD / 2
     x1 -= BOARD / 2
-    y0 -= BOARD / 2
-    y1 -= BOARD / 2
+    # Flip Y into model space the same way the web exporter does
+    # (image row 0 -> model +Y). Without this the printed board comes out
+    # vertically mirrored relative to the metadata/preview.
+    y0, y1 = BOARD / 2 - y1, BOARD / 2 - y0
     base = len(pos) // 3
     for v in [(x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0),
               (x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)]:

@@ -31,10 +31,11 @@ def add_box(objects, material, x0, y0, z0, x1, y1, z1):
     pos = objects[material]['pos']
     idx = objects[material]['idx']
     # Geometry is centred for Bambu Studio; metadata remains in 0..75 mm coordinates.
+    # Y is flipped into model space like the web exporter (image row 0 -> +Y);
+    # without this the printed board is vertically mirrored vs the metadata.
     x0 -= BOARD / 2
     x1 -= BOARD / 2
-    y0 -= BOARD / 2
-    y1 -= BOARD / 2
+    y0, y1 = BOARD / 2 - y1, BOARD / 2 - y0
     base = len(pos) // 3
     vertices = [
         (x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0),
