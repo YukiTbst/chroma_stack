@@ -533,7 +533,7 @@
     };
   }
 
-  function repairLineGaps(lab, lineInfo, flatMask, nearest, familyId, lineDirect, lineProtectMask, w, h, printMask, families, palette, manualLock) {
+  function repairLineGaps(lab, lineInfo, flatMask, nearest, familyId, lineDirect, lineProtectMask, w, h, printMask, families, palette, manualLock, stds, stdT) {
     if (!lineProtectMask) return;
     const addFlat = new Uint8Array(flatMask), addNearest = new Uint16Array(nearest), addFamily = new Int16Array(familyId);
     const addDirect = lineDirect ? new Uint8Array(lineDirect) : null, addProtect = new Uint8Array(lineProtectMask);
@@ -547,6 +547,22 @@
         if (lineProtectMask[j]) return j;
       }
       return -1;
+    };
+    // Direction continuity: a real break has stroke ink continuing behind the
+    // endpoint along the bridge axis. Two parallel hatch lines fail this —
+    // behind each line lies fill, not more of the same stroke — so "black on
+    // both sides" alone can never bridge the gap between them. The support
+    // pixel must also match the endpoint colour, or a dark fill would count
+    // as ink evidence.
+    const continues = (j, dx, dy, ref) => {
+      const jx = j % w, jy = (j / w) | 0;
+      for (let t = 1; t <= 3; t++) {
+        const xx = jx + dx * t, yy = jy + dy * t;
+        if (xx < 0 || xx >= w || yy < 0 || yy >= h) return false;
+        const k = yy * w + xx;
+        if ((lineInfo.ink[k] || lineProtectMask[k]) && C.deltaE2000(labAt(lab, k), ref) <= 12) return true;
+      }
+      return false;
     };
     // Colour a protected endpoint would print. Direct strokes keep their
     // assigned filament even before the flat mask is finalised.
@@ -570,12 +586,19 @@
       for (let x = 0; x < w; x++) {
         const i = y * w + x;
         if ((manualLock && manualLock[i]) || lineProtectMask[i] || (!lineInfo.ink[i] && lab[i * 3] >= 90) || (printMask && !printMask[i])) continue;
+        // A locally stable pixel is fill or a smooth gradient, not a structural
+        // gap — even when the flat mask excluded it (area/residual gates). The
+        // same stds/stdT the flat gate uses decides stability; no new knob.
+        if (stds && stds[i] <= stdT) continue;
         for (const [dx, dy] of directions) {
           const a = find(x, y, dx, dy), b = find(x, y, -dx, -dy);
           if (a < 0 || b < 0) continue;
           const ca = colorOf(a), cb = colorOf(b);
           // Two different strokes must not be joined through unrelated pixels.
           if (C.deltaE2000(ca, cb) > 12) continue;
+          // Same-stroke evidence: ink must continue behind both endpoints
+          // along this axis, not merely exist on both sides of the pixel.
+          if (!continues(a, dx, dy, ca) || !continues(b, -dx, -dy, cb)) continue;
           const own = labAt(lab, i);
           if (!gapCompatible(own, ca)) continue;
           // Never overwrite a confident fill pixel with the stroke material.
@@ -2389,7 +2412,7 @@
         for (let i = 0; i < n; i++) if (!flatMask[i] && familyId[i] >= 0) familyPixels[familyId[i]]++;
       }
       if (options.lineRepair !== false) {
-        repairLineGaps(lab, lineInfo, flatMask, nearest, familyId, lineDirect, lineProtectMask, w, h, printMask, families, palette, options.manualMask);
+        repairLineGaps(lab, lineInfo, flatMask, nearest, familyId, lineDirect, lineProtectMask, w, h, printMask, families, palette, options.manualMask, stds, stdT);
       }
       const lineDirectFilament = lineDirect ? new Uint16Array(nearest) : null;
       if (snapMask) {
