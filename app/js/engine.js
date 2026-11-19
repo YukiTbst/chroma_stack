@@ -2328,6 +2328,44 @@
     };
   }
 
+  /* Pure layer-geometry derivation, factored out so the coverage warning can
+     probe which knob actually thicken the flat colour cap for the CURRENT
+     geometry. In the default coupled TD path raising flatTopMm lifts the shared
+     foundation (gradStartLayer) by the same amount, so flatTopLayers stays
+     colorLayers - reliefLayers and "raise the flat top" does NOT add colour
+     thickness. Returns the same values the inline derivation used to compute. */
+  function deriveLayerGeometry({ engine, flatTopMm, layerHeight, reliefMm, colorLayers, baseLayers, startOverride, topOverride }) {
+    const flatLayers = Math.max(2, Math.round(flatTopMm / layerHeight));
+    const reliefLayers = Math.round(reliefMm / layerHeight);
+    let gradTopLayer, gradStartLayer, cl = colorLayers;
+    if (engine === 'lut') {
+      const minTop = baseLayers + cl;
+      if (startOverride > 0) {
+        gradStartLayer = Math.max(baseLayers, startOverride);
+        gradTopLayer = gradStartLayer + cl;
+      } else {
+        gradTopLayer = Math.max(minTop, flatLayers + reliefLayers);
+        gradStartLayer = gradTopLayer - cl;
+      }
+    } else if (topOverride > 0) {
+      const desiredTop = clamp(Math.round(topOverride / layerHeight), 2, 240);
+      gradStartLayer = startOverride > 0 ? Math.max(1, startOverride) : Math.max(1, desiredTop - cl);
+      const maxTop = gradStartLayer + 24;
+      gradTopLayer = clamp(desiredTop, gradStartLayer + 1, maxTop);
+      cl = gradTopLayer - gradStartLayer;
+    } else if (startOverride > 0) {
+      gradStartLayer = Math.max(1, startOverride);
+      gradTopLayer = gradStartLayer + cl;
+    } else {
+      gradTopLayer = Math.max(1, flatLayers + reliefLayers);
+      gradStartLayer = Math.max(1, gradTopLayer - cl);
+      gradTopLayer = gradStartLayer + cl;
+    }
+    const flatBaseLayers = Math.max(0, Math.min(gradStartLayer, flatLayers - 1));
+    const flatTopLayers = Math.max(1, flatLayers - flatBaseLayers);
+    return { flatLayers, gradStartLayer, gradTopLayer, flatBaseLayers, flatTopLayers, colorLayers: cl };
+  }
+
   function buildPlan(imageData, options) {
     const w = imageData.width, h = imageData.height, n = w * h;
     const engine = options.engine === 'td' ? 'td' : 'lut';
@@ -2458,49 +2496,25 @@
       }
     }
 
-    const flatLayers = Math.max(2, Math.round(flatTopMm / layerHeight));
-    const reliefLayers = Math.round(reliefMm / layerHeight);
     const startOverride = Math.round(Number(options.gradStartLayerOverride) || 0);
     const topOverride = Number(options.gradTopMmOverride) || 0;
-    let gradTopLayer, gradStartLayer;
-    if (engine === 'lut') {
-      const minTop = baseLayers + colorLayers;
-      if (startOverride > 0) {
-        gradStartLayer = Math.max(baseLayers, startOverride);
-        gradTopLayer = gradStartLayer + colorLayers;
-      } else {
-        gradTopLayer = Math.max(minTop, flatLayers + reliefLayers);
-        gradStartLayer = gradTopLayer - colorLayers;
-      }
-    } else {
-      if (topOverride > 0) {
-        const desiredTop = clamp(Math.round(topOverride / layerHeight), 2, 240);
-        gradStartLayer = startOverride > 0
-          ? Math.max(1, startOverride)
-          : Math.max(1, desiredTop - colorLayers);
-        let maxTop = gradStartLayer + 24;
-        gradTopLayer = clamp(desiredTop, gradStartLayer + 1, maxTop);
-        colorLayers = gradTopLayer - gradStartLayer;
-      } else if (startOverride > 0) {
-        gradStartLayer = Math.max(1, startOverride);
-        gradTopLayer = gradStartLayer + colorLayers;
-      } else {
-        gradTopLayer = Math.max(1, flatLayers + reliefLayers);
-        gradStartLayer = Math.max(1, gradTopLayer - colorLayers);
-        gradTopLayer = gradStartLayer + colorLayers;
-      }
-    }
+    const requestedColorLayers = colorLayers;
+    const geoInput = { engine, flatTopMm, layerHeight, reliefMm, colorLayers: requestedColorLayers, baseLayers, startOverride, topOverride };
+    const geo = deriveLayerGeometry(geoInput);
+    const flatLayers = geo.flatLayers;
+    let gradTopLayer = geo.gradTopLayer, gradStartLayer = geo.gradStartLayer;
+    colorLayers = geo.colorLayers;
     let maxLayers = Math.max(flatLayers, gradTopLayer);
     // Flat regions share the gradient foundation: the substrate filament fills
     // layers 0..flatBaseLayers-1 and the matched flat colour takes over up to
     // flatLayers. Keep at least one colour layer so the top surface always
     // matches the chosen filament.
-    const flatBaseLayers = Math.max(0, Math.min(gradStartLayer, flatLayers - 1));
+    const flatBaseLayers = geo.flatBaseLayers;
     // Flat regions are a real finite stack: foundation below, flat colour
     // above. Predict their top surface with the same optical model as
     // gradients instead of assuming an infinitely thick filament. The
     // foundation is the same infinite backing both paths already use.
-    const flatTopLayers = Math.max(1, flatLayers - flatBaseLayers);
+    const flatTopLayers = geo.flatTopLayers;
     const flatPred = palette.map((p, fi) => {
       if (engine !== 'td') return { lab: p.lab, hex: p.hex, deltaE: 0 };
       const c = compositeLab(foundation.lin, new Array(flatTopLayers).fill(fi), palette, layerHeight);
@@ -3188,7 +3202,29 @@
     if (flatCount === n) warnings.push('整幅画都被识别为纯色区。可提高“平整阈值”或降低残差阈值。');
     if (engine === 'td' && flatBadPixels > Math.max(2, flatCount * 0.05)) {
       const pct = (flatBadPixels / Math.max(1, flatCount) * 100).toFixed(0);
-      warnings.push(`纯色区顶色只有 ${flatTopLayers} 层（基底 ${flatBaseLayers} 层）：约 ${pct}% 纯色像素实际遮盖后与所选耗材偏差 >3 ΔE（最大 ${flatMaxDE.toFixed(1)}）。提高纯色区顶高或换更不透明的基底可改善。`);
+      const topMm = (flatTopLayers * layerHeight).toFixed(2);
+      const baseMm = (flatBaseLayers * layerHeight).toFixed(2);
+      const totalMm = (flatLayers * layerHeight).toFixed(2);
+      // R8: only advise operations that actually thicken the colour cap for THIS
+      // geometry. Probe the real derivation instead of assuming "raise flatTopMm"
+      // helps — in the default coupled path it lifts the shared foundation by the
+      // same amount and leaves flatTopLayers (and the predicted colour) unchanged.
+      const probe = over => deriveLayerGeometry({ ...geoInput, ...over }).flatTopLayers;
+      const raisedGeo = deriveLayerGeometry({ ...geoInput, flatTopMm: flatTopMm + 1.6 });
+      const moreColor = probe({ colorLayers: requestedColorLayers + 2 });
+      const lessRelief = probe({ reliefMm: Math.max(0, reliefMm - 0.08) });
+      const tips = [];
+      if (moreColor > flatTopLayers) tips.push(`增加渐变层数（+2 层 → 盖色 ${moreColor} 层）`);
+      if (lessRelief > flatTopLayers) tips.push(`降低浮雕差（盖色 ${lessRelief} 层）`);
+      if (raisedGeo.flatTopLayers > flatTopLayers) tips.push(`提高纯色区顶高（盖色 ${raisedGeo.flatTopLayers} 层）`);
+      let advice;
+      if (raisedGeo.flatTopLayers <= flatTopLayers) {
+        advice = `注意：当前几何下提高纯色区顶高只会同步抬高基底（${flatBaseLayers}→${raisedGeo.flatBaseLayers} 层），盖色厚度不变，不能改善颜色。`;
+        advice += tips.length ? '有效操作：' + tips.join('；') + '；或换更不透明的基底耗材。' : '请换更不透明的基底耗材。';
+      } else {
+        advice = '有效操作：' + tips.join('；') + '；或换更不透明的基底耗材。';
+      }
+      warnings.push(`纯色区顶色只有 ${flatTopLayers} 层/${topMm} mm（基底 ${flatBaseLayers} 层/${baseMm} mm，纯色区总高 ${flatLayers} 层/${totalMm} mm）：约 ${pct}% 纯色像素实际遮盖后与所选耗材偏差 >3 ΔE（最大 ${flatMaxDE.toFixed(1)}）。${advice}`);
     }
     if (neutralAudit && neutralAudit.budgetUnmet > 0) {
       warnings.push(`中性色风险：${neutralAudit.budgetUnmet} 个源中性渐变像素没有落在 +5 ΔE 预算内的黑白叠层，仍用彩色配方叠色，灰阶可能偏色；可加入更中性或更不透明的耗材、或提高渐变层数改善。`);
