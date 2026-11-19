@@ -1210,6 +1210,18 @@
     return out.slice(0, k);
   }
 
+  function buildFamilyAdjacency(familyId, w, h, familyCount) {
+    const adj = new Array(familyCount);
+    for (let i = 0; i < familyCount; i++) adj[i] = new Map();
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = y * w + x, f = familyId[i];
+      if (f < 0) continue;
+      if (x + 1 < w) { const g = familyId[i + 1]; if (g >= 0 && g !== f) { adj[f].set(g, (adj[f].get(g) || 0) + 1); adj[g].set(f, (adj[g].get(f) || 0) + 1); } }
+      if (y + 1 < h) { const g = familyId[i + w]; if (g >= 0 && g !== f) { adj[f].set(g, (adj[f].get(g) || 0) + 1); adj[g].set(f, (adj[g].get(f) || 0) + 1); } }
+    }
+    return adj;
+  }
+
   /* Adjacent families may each pick a different recipe with nearly the same
      ΔE; that dithers colour layer by layer at boundaries. Re-pick recipes
      within a small ΔE budget so neighbouring families agree on as many layers
@@ -1217,14 +1229,7 @@
   function refineFamilyRecipes(families, familyId, w, h, gamut, gradStartLayer, layerHeight) {
     const F = families.length;
     if (F < 2 || !gamut || !gamut.length) return 0;
-    const adj = [];
-    for (let i = 0; i < F; i++) adj.push(new Map());
-    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-      const i = y * w + x, f = familyId[i];
-      if (f < 0) continue;
-      if (x + 1 < w) { const g = familyId[i + 1]; if (g >= 0 && g !== f) { adj[f].set(g, (adj[f].get(g) || 0) + 1); adj[g].set(f, (adj[g].get(f) || 0) + 1); } }
-      if (y + 1 < h) { const g = familyId[i + w]; if (g >= 0 && g !== f) { adj[f].set(g, (adj[f].get(g) || 0) + 1); adj[g].set(f, (adj[g].get(f) || 0) + 1); } }
-    }
+    const adj = buildFamilyAdjacency(familyId, w, h, F);
     const colorAt = (rec, L) => (L < rec.length ? rec[L] : -1);
     const mismatch = (a, b) => {
       const len = Math.max(a.length, b.length);
@@ -1395,23 +1400,35 @@
     };
   }
 
-  function mergeCommonBases(families, gamut, threshold, maxLayers) {
+  function mergeCommonBases(families, gamut, threshold, maxLayers, adj) {
     if (!(threshold > 0) || !gamut || !gamut.length) return { groups: 0, sharedPixels: 0 };
     const list = families.filter(f => f.pixelCount > 0);
     const n = list.length;
     for (const f of families) f.sharedBaseLayers = 0;
     if (n < 2) return { groups: 0, sharedPixels: 0 };
+    const familyIndex = new Map();
+    for (let i = 0; i < families.length; i++) familyIndex.set(families[i], i);
     // Greedy groups around a weighted target-color center. Plain union-find
     // would chain a whole smooth gradient into one giant group, which then
     // can only share a very short base. Centered groups keep the threshold
-    // meaningful and let close colors share a longer common bottom.
+    // meaningful and let close colors share a longer common bottom. With a
+    // spatial adjacency map, only families that actually touch may share.
     const groups = [];
     const sorted = list.slice().sort((a, b) => b.pixelCount - a.pixelCount);
     for (const f of sorted) {
       let best = null, bestDE = Infinity;
+      const fi = familyIndex.get(f);
       for (const g of groups) {
         const de = C.deltaE2000(f.targetLab, g.centerLab);
-        if (de <= threshold && de < bestDE) { bestDE = de; best = g; }
+        if (de > threshold || de >= bestDE) continue;
+        if (adj) {
+          const touches = g.members.some(m => {
+            const mi = familyIndex.get(m);
+            return adj[fi] && adj[fi].has(mi);
+          });
+          if (!touches) continue;
+        }
+        bestDE = de; best = g;
       }
       if (best) {
         const w0 = best.weight, w1 = f.pixelCount;
@@ -1989,6 +2006,68 @@
     return src;
   }
 
+  /* Sampled per-layer print audit: how many same-material islands are below a
+     printable minimum area. Runs on a <=512 long-side sample so a 1280/2560
+     work grid stays cheap; it is a risk screen, not a slicer simulation. */
+  function auditPrintLayers(lab, w, h, opt) {
+    const stride = Math.max(1, Math.ceil(Math.max(w, h) / 512));
+    const aw = Math.ceil(w / stride), ah = Math.ceil(h / stride);
+    const pxArea = (opt.pixelSize * stride) ** 2;
+    const minAreaMm2 = Math.max(0.2, Math.PI * ((opt.lineWidthMm || 0.42) * 0.75 / 2) ** 2);
+    const minPx = Math.max(1, Math.ceil(minAreaMm2 / pxArea));
+    const layers = Math.min(48, Math.max(1, opt.maxLayers));
+    const mat = new Int16Array(aw * ah);
+    const seen = new Uint8Array(aw * ah);
+    const stack = new Int32Array(aw * ah);
+    let belowMinIslands = 0, worstLayer = -1, worstIslands = 0;
+    for (let z = 0; z < layers; z++) {
+      seen.fill(0);
+      for (let y = 0; y < ah; y++) {
+        const sy = Math.min(h - 1, y * stride);
+        for (let x = 0; x < aw; x++) {
+          const i = sy * w + Math.min(w - 1, x * stride);
+          let m = -1;
+          if (opt.printMask && !opt.printMask[i]) m = -1;
+          else if (opt.flatMask[i]) {
+            if (z < opt.flatBaseLayers) m = opt.foundationIndex;
+            else if (z < opt.flatLayers) m = opt.flatFilament[i] !== 0xffff ? opt.flatFilament[i] : opt.foundationIndex;
+          } else {
+            const f = opt.familyId[i];
+            if (z < opt.gradStartLayer) m = opt.foundationIndex;
+            else if (f >= 0) {
+              const fam = opt.families[f];
+              const k = z - opt.gradStartLayer;
+              if (fam && k < fam.recipe.length) m = fam.recipe[k];
+            }
+          }
+          mat[y * aw + x] = m;
+        }
+      }
+      let smallHere = 0;
+      for (let start = 0; start < aw * ah; start++) {
+        if (seen[start] || mat[start] < 0) continue;
+        const m0 = mat[start];
+        let top = 0, area = 0;
+        seen[start] = 1; stack[top++] = start;
+        while (top) {
+          const idx = stack[--top]; area++;
+          const x = idx % aw, y = (idx / aw) | 0;
+          if (x > 0) { const j = idx - 1; if (!seen[j] && mat[j] === m0) { seen[j] = 1; stack[top++] = j; } }
+          if (x + 1 < aw) { const j = idx + 1; if (!seen[j] && mat[j] === m0) { seen[j] = 1; stack[top++] = j; } }
+          if (y > 0) { const j = idx - aw; if (!seen[j] && mat[j] === m0) { seen[j] = 1; stack[top++] = j; } }
+          if (y + 1 < ah) { const j = idx + aw; if (!seen[j] && mat[j] === m0) { seen[j] = 1; stack[top++] = j; } }
+        }
+        if (area < minPx) smallHere++;
+      }
+      belowMinIslands += smallHere;
+      if (smallHere > worstIslands) { worstIslands = smallHere; worstLayer = z + 1; }
+    }
+    return {
+      grid: [aw, ah], stride, minAreaMm2: +minAreaMm2.toFixed(3),
+      belowMinIslands, worstLayer, worstIslands, layersAudited: layers
+    };
+  }
+
   function buildPlan(imageData, options) {
     const w = imageData.width, h = imageData.height, n = w * h;
     const engine = options.engine === 'td' ? 'td' : 'lut';
@@ -2448,7 +2527,8 @@
         }
       }
       if (engine === 'td' && gamut && Number(options.mergeDeltaE) > 0) {
-        mergeResult = mergeCommonBases(families, gamut, Number(options.mergeDeltaE), colorLayers);
+        const familyAdj = buildFamilyAdjacency(familyId, w, h, families.length);
+        mergeResult = mergeCommonBases(families, gamut, Number(options.mergeDeltaE), colorLayers, familyAdj);
         for (const f of families) {
           if (!f.pixelCount) continue;
           f.topLayer = gradStartLayer + f.recipe.length;
@@ -2527,6 +2607,30 @@
     }
 
     const isEnvelopeSupport = (i) => background.enabled && background.envelope && !background.failed && printMask[i] && !sourcePrintMask[i];
+    // Spatial regions: connected components of the same recipe family. Recipe
+    // sharing may be global, but geometry, cleaning and audits speak in regions.
+    const regionId = new Int32Array(n).fill(-1);
+    let regionCount = 0;
+    {
+      const seen = new Uint8Array(n);
+      const stack = new Int32Array(n);
+      for (let start = 0; start < n; start++) {
+        if (seen[start] || flatMask[start] || !printMask[start]) continue;
+        const f = familyId[start];
+        if (f < 0) continue;
+        const id = regionCount++;
+        let top = 0;
+        seen[start] = 1; regionId[start] = id; stack[top++] = start;
+        while (top) {
+          const idx = stack[--top];
+          const x = idx % w, y = (idx / w) | 0;
+          if (x > 0) { const j = idx - 1; if (!seen[j] && !flatMask[j] && printMask[j] && familyId[j] === f) { seen[j] = 1; regionId[j] = id; stack[top++] = j; } }
+          if (x + 1 < w) { const j = idx + 1; if (!seen[j] && !flatMask[j] && printMask[j] && familyId[j] === f) { seen[j] = 1; regionId[j] = id; stack[top++] = j; } }
+          if (y > 0) { const j = idx - w; if (!seen[j] && !flatMask[j] && printMask[j] && familyId[j] === f) { seen[j] = 1; regionId[j] = id; stack[top++] = j; } }
+          if (y + 1 < h) { const j = idx + w; if (!seen[j] && !flatMask[j] && printMask[j] && familyId[j] === f) { seen[j] = 1; regionId[j] = id; stack[top++] = j; } }
+        }
+      }
+    }
     let supportOnlyPixels = 0;
     for (let i = 0; i < n; i++) if (isEnvelopeSupport(i)) supportOnlyPixels++;
 
@@ -2687,6 +2791,12 @@
     const diagnostics = {
       fill: { filledPixels: flatFillStats.filled, rejectedPixels: flatFillStats.rejected },
       manualPixels: manualPaintPixels,
+      regions: { count: regionCount },
+      printAudit: auditPrintLayers(lab, w, h, {
+        pixelSize, lineWidthMm: Number(options.lineWidthMm) || 0.42,
+        printMask, flatMask, flatFilament, familyId, families,
+        flatBaseLayers, flatLayers, gradStartLayer, foundationIndex: baseIndex, maxLayers
+      }),
       coverage: {
         topLayers: flatTopLayers,
         baseLayers: flatBaseLayers,
@@ -2700,6 +2810,9 @@
       }
     };
     const warnings = [];
+    if (diagnostics.printAudit.belowMinIslands > 0) {
+      warnings.push(`逐层小岛审计：${diagnostics.printAudit.belowMinIslands} 个小于 ${diagnostics.printAudit.minAreaMm2} mm² 的孤立材料块（第 ${diagnostics.printAudit.worstLayer} 层最多 ${diagnostics.printAudit.worstIslands} 个，${diagnostics.printAudit.stride > 1 ? '按 1/' + diagnostics.printAudit.stride + ' 采样' : '全分辨率'}）；可能打不出来或依赖支撑，切片预览请核对。`);
+    }
     if (engine === 'lut' && flatTopMm < (baseLayers + colorLayers) * layerHeight - 1e-6) {
       warnings.push(`纯色区高度低于 LUT 需要的 ${((baseLayers + colorLayers) * layerHeight).toFixed(2)} mm，渐变区会自动抬高。`);
     }
@@ -2764,7 +2877,7 @@
       layerHeight, flatLayers, flatBaseLayers, gradStartLayer, gradTopLayer, actualGradTopLayer, maxGradLayers: colorLayers, maxLayers, flatTopMm: flatLayers * layerHeight,
       gradTopMm: gradTopLayer * layerHeight, actualGradTopMm: actualGradTopLayer * layerHeight, reliefMm: actualRelief, variableHeight,
       palette, foundation, foundationIndex: baseIndex, lutKey: options.lutKey || (engine === 'lut' ? 'bambu_8' : null),
-      flatMask, flatFilament, familyId, families, familyPixels, nearest, residual, stds, stdT, resT,
+      flatMask, flatFilament, familyId, regionId, regionCount, families, familyPixels, nearest, residual, stds, stdT, resT,
       predicted, preview, alpha, printMask, background, holeMap, smoothLevel,
       vectorFlat: !!options.vectorFlat,
       vectorFlatFamilies: vectorInfo ? vectorInfo.families : 0, vectorFlatPixels: vectorInfo ? vectorInfo.pixels : 0,
@@ -2904,6 +3017,6 @@
     buildPlan, recommendPalette, buildLutPalette, buildUserPalette,
     imageToLab, filamentAt, compositeLinear, stackTransmission, localStd,
     autoStdThreshold, nearestLut, kmeansLab, mergeIneffectiveHeights, physicalSmoothParams,
-    mergeSmallRegions, buildPrintMask, buildStrokeInfo, buildTdGamut, gamutPenalty, gamutScore, matchGamut
+    mergeSmallRegions, buildPrintMask, buildStrokeInfo, buildTdGamut, gamutPenalty, gamutScore, matchGamut, mergeCommonBases, buildFamilyAdjacency
   };
 })(typeof globalThis !== 'undefined' ? globalThis : this);
