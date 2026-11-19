@@ -70,6 +70,9 @@
     brushSize: 18,
     overrideMask: null,
     overrideBase: null,
+    useMode: 'custom',
+    edgeSnap: true,
+    lineRepair: true,
     undo: [],
     analyzing: false,
     pending: false,
@@ -211,6 +214,7 @@
     $('backgroundEnvelope').checked = state.backgroundEnvelope;
     $('section3D').checked = state.section3D;
     $('lineProtect').value = state.lineProtect;
+    if ($('useMode')) $('useMode').value = state.useMode;
     updateEngineUI();
     renderPalette();
     $('foundationSelect').value = String(clamp(state.foundationIndex, 0, Math.max(0, (state.engine === 'lut' ? currentLutPalette() : state.tdPalette).length - 1)));
@@ -228,6 +232,7 @@
 
   function resetSettings() {
     if (!window.confirm('重置当前 profile 的耗材标定值并清除服务器上的标定数据？其他打印参数保持不变。')) return;
+    const backup = CS.profiles.backupActive('reset');
     const db = (CS.FILAMENT_DB && CS.FILAMENT_DB.filaments) || [];
     for (const p of state.tdPalette) {
       const base = db.find(f => (p.id && f.id === p.id) || (f.name === p.name && f.brand === p.brand && f.material === p.material));
@@ -238,7 +243,7 @@
     CS.settings.clear();
     syncControlsFromState();
     markDirty(false);
-    toast('已重置当前 profile 的标定；其他参数未改动');
+    toast(backup ? '已重置当前 profile 的标定；其他参数未改动（已保留可恢复备份）' : '已重置当前 profile 的标定；其他参数未改动');
   }
 
   /* ---------------- calibration profiles (server-backed) ---------------- */
@@ -290,6 +295,19 @@
     sel.innerHTML = list.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
     sel.value = CS.profiles.activeId() || '';
     updateProfileStatus(CS.profiles.isOnline() ? 'synced' : 'offline');
+  }
+
+  async function restoreCalibrationBackup() {
+    const b = CS.profiles.lastBackup();
+    if (!b) { toast('没有可恢复的标定备份'); return; }
+    if (!window.confirm(`恢复 ${new Date(b.at).toLocaleString()} 的标定备份？会覆盖当前 profile 的标定。`)) return;
+    try {
+      const data = await CS.profiles.restoreBackup();
+      adoptProfileData(data);
+      toast('已恢复上次标定备份');
+    } catch (e) {
+      toast('恢复失败：' + (e.message || e));
+    }
   }
 
   function adoptProfileData(data) {
@@ -498,6 +516,7 @@
         lineProtect: state.lineProtect, edgeClean: state.edgeClean, vectorFlat: state.vectorFlat,
         maskOverride: mask || undefined,
       manualMask: manualMask || undefined,
+      edgeSnap: state.edgeSnap !== false, lineRepair: state.lineRepair !== false,
         manualMask: manualMask || undefined,
         backgroundMode: state.backgroundMode, backgroundColor: state.backgroundColor, backgroundTolerance: state.backgroundTolerance,
         backgroundEnvelope: state.backgroundEnvelope, backgroundEnvelopeMm: state.backgroundEnvelopeMm,
@@ -1626,9 +1645,33 @@
     $('btnAnalyze').addEventListener('click', () => analyze());
     $('btnAnalyzeStage').addEventListener('click', () => analyze());
     $('btnResetSettings').addEventListener('click', resetSettings);
+    $('useMode').addEventListener('change', (e) => {
+      const id = e.target.value;
+      state.useMode = id;
+      const patch = CS.modes.preset(id);
+      if (patch) {
+        Object.assign(state, patch);
+        syncControlsFromState();
+        markDirty(false);
+        toast(CS.modes.label(id) + ' 预设已应用，点「应用并计算」生效');
+      }
+    });
+    const markModeCustom = () => {
+      if (state.useMode === 'custom') return;
+      state.useMode = 'custom';
+      if ($('useMode')) $('useMode').value = 'custom';
+    };
+    for (const ev of ['input', 'change']) {
+      document.addEventListener(ev, (e) => {
+        const t = e.target;
+        if (!t || !t.matches) return;
+        if (t.matches('#lineProtect,#vectorFlat,#edgeClean,#smoothMm,#reliefMm,#minFlatPercent,#families,#variableHeight,#gradLayers')) markModeCustom();
+      });
+    }
     $('profileSelect').addEventListener('change', e => switchProfile(e.target.value));
     if ($('profileSyncStatus')) $('profileSyncStatus').addEventListener('click', resolveProfileConflict);
     $('btnNewProfile').addEventListener('click', createProfile);
+    if ($('btnRestoreBackup')) $('btnRestoreBackup').addEventListener('click', restoreCalibrationBackup);
     $('btnRenameProfile').addEventListener('click', renameProfile);
     $('btnDeleteProfile').addEventListener('click', deleteProfile);
 

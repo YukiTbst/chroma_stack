@@ -59,6 +59,16 @@
       </div>
       <p class="hint" id="engineHint">用你实际有的耗材，在局部叠出 HueForge 式变高渐变；矩形纯色区仍然整块直印。</p>
 
+      <label class="field" id="useModeField">
+        <span>用途预设 <em class="tiny">结果层面的起点，应用后仍可手动微调</em></span>
+        <select id="useMode">
+          <option value="custom" selected>自定义（当前参数）</option>
+          <option value="sticker">贴纸 / 动漫：等高、黑线直印</option>
+          <option value="photo">照片 / 绘画：保留渐变与浮雕</option>
+          <option value="pixel">像素画 / 硬边：不吸附、不补线</option>
+        </select>
+      </label>
+
       <label class="field" id="lutField">
         <span>LUT 配色</span>
         <select id="lutSelect">
@@ -173,6 +183,7 @@
           <button class="btn small" id="btnNewProfile" title="新建 profile，复制当前标定作为起点">新建</button>
           <button class="btn small ghost" id="btnRenameProfile" title="重命名当前 profile">重命名</button>
           <button class="btn small ghost" id="btnDeleteProfile" title="删除当前 profile 及其标定">删除</button>
+          <button class="btn small ghost" id="btnRestoreBackup" title="恢复重置/迁移前自动保存的标定备份">恢复备份</button>
         </div>
         <span class="tiny" id="profileSyncStatus">连接中…</span>
       </div>
@@ -419,6 +430,7 @@
 <script src="js/data-lut.js?v=20261119m25"></script>
 <script src="js/earcut.js?v=20261119m25"></script>
 <script src="js/engine.js?v=20261119m25"></script>
+<script src="js/modes.js?v=20261119m25"></script>
 <script src="js/zip.js?v=20261119m25"></script>
 <script src="js/exporter.js?v=20261119m25"></script>
 <script src="js/calibration.js?v=20261119m25"></script>

@@ -220,6 +220,17 @@ try {
   assert.equal((await req('GET', 'profiles/' + conId)).body.data.calibrations['id:red'], undefined, 'pending clear reaches the server after reconnect');
   assert.ok(statusesClear.includes('synced'), 'clear confirms after the server acknowledges');
 
+  /* ---- calibration backup survives an accidental reset ---- */
+  CS.settings.save(localRed);
+  await CS.profiles.flush(false);
+  const backup = CS.profiles.backupActive('test');
+  assert.ok(backup && CS.profiles.lastBackup(), 'backup is stored locally');
+  await CS.profiles.clearActive();
+  assert.equal((await req('GET', 'profiles/' + conId)).body.data.calibrations['id:red'], undefined, 'reset cleared the server');
+  const restored = await CS.profiles.restoreBackup();
+  assert.equal(restored.calibrations['id:red'].td, 4.4, 'backup restores the calibration');
+  assert.equal((await req('GET', 'profiles/' + conId)).body.data.calibrations['id:red'].td, 4.4, 'restored data reached the server');
+
   /* ---- a mirror from another profile is never loaded ---- */
   const lsMix = makeLocalStorage();
   lsMix.setItem('chromastack.api-base', 'http://127.0.0.1:1/');

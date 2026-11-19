@@ -2301,7 +2301,9 @@
     // Anti-alias transition pixels must never become their own colour families:
     // even with the "edge halo" slider off, snap the 1-px transition band to
     // the adjacent family (line-protected pixels are exempt inside the helper).
-    const snapMask = edgeMask || (gradCount > 0 ? buildEdgeMask(lab, w, h, 1) : null);
+    const snapMask = options.edgeSnap === false
+      ? null
+      : (edgeMask || (gradCount > 0 ? buildEdgeMask(lab, w, h, 1) : null));
     const variableHeight = engine === 'td' && options.variableHeight !== false;
     const gamut = engine === 'td' && gradCount > 0
       ? buildTdGamut(palette, foundation, layerHeight, colorLayers, variableHeight)
@@ -2378,7 +2380,9 @@
         familyPixels = new Uint32Array(families.length);
         for (let i = 0; i < n; i++) if (!flatMask[i] && familyId[i] >= 0) familyPixels[familyId[i]]++;
       }
-      repairLineGaps(lab, lineInfo, flatMask, nearest, familyId, lineDirect, lineProtectMask, w, h, printMask, families, palette, options.manualMask);
+      if (options.lineRepair !== false) {
+        repairLineGaps(lab, lineInfo, flatMask, nearest, familyId, lineDirect, lineProtectMask, w, h, printMask, families, palette, options.manualMask);
+      }
       const lineDirectFilament = lineDirect ? new Uint16Array(nearest) : null;
       if (snapMask) {
         familyId = snapEdgeFamilies(lab, flatMask, familyId, snapMask, lineProtectMask, families, w, h, Math.max(1, edgeCleanLevel));
@@ -2937,6 +2941,7 @@
       palette, foundation, foundationIndex: baseIndex, lutKey: options.lutKey || (engine === 'lut' ? 'bambu_8' : null),
       flatMask, flatFilament, familyId, regionId, regionCount, families, familyPixels, nearest, residual, stds, stdT, resT,
       predicted, preview, alpha, printMask, background, holeMap, smoothLevel,
+      edgeSnap: options.edgeSnap !== false, lineRepair: options.lineRepair !== false,
       vectorFlat: !!options.vectorFlat,
       vectorFlatFamilies: vectorInfo ? vectorInfo.families : 0, vectorFlatPixels: vectorInfo ? vectorInfo.pixels : 0,
       vectorFlatIslandPixels: vectorInfo ? (vectorInfo.islandPixels || 0) : 0,

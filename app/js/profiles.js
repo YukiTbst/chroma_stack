@@ -8,6 +8,7 @@
   const ACTIVE_KEY = 'chromastack.active-profile.v1';
   const MIRROR_KEY = 'chromastack.offline-mirror.v1';
   const LEGACY_KEY = 'chromastack.filament-calibrations.v1';
+  const BACKUP_KEY = 'chromastack.calibration-backup.v1';
   const BASE_KEY = 'chromastack.api-base';
   const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
   const emptyData = () => ({ calibrations: {}, lutTdOverrides: {}, lutHexOverrides: {} });
@@ -79,6 +80,54 @@
       const m = JSON.parse(raw);
       return m && m.data && typeof m.data === 'object' ? m : null;
     } catch (e) { return null; }
+  }
+
+  function backupActive(reason) {
+    if (!state.activeId && !state.lastData) return null;
+    const backup = {
+      profileId: state.activeId,
+      revision: state.revision,
+      data: clone(state.lastData),
+      at: Date.now(),
+      reason: reason || 'manual'
+    };
+    lsSet(BACKUP_KEY, JSON.stringify(backup));
+    return backup;
+  }
+
+  function lastBackup() {
+    try {
+      const raw = lsGet(BACKUP_KEY);
+      if (!raw) return null;
+      const b = JSON.parse(raw);
+      return b && b.data ? b : null;
+    } catch (e) { return null; }
+  }
+
+  async function restoreBackup() {
+    const backup = lastBackup();
+    if (!backup) throw new Error('没有可恢复的标定备份');
+    if (backup.profileId && backup.profileId !== state.activeId) throw new Error('备份属于另一个 profile');
+    let revision = state.revision;
+    if (revision == null) {
+      const full = await api('GET', 'profiles/' + state.activeId);
+      revision = full.revision || 1;
+    }
+    let p;
+    try {
+      p = await api('PUT', 'profiles/' + state.activeId, { data: backup.data, expectedRevision: revision });
+    } catch (e) {
+      if (e.status !== 409) throw e;
+      const full = await api('GET', 'profiles/' + state.activeId);
+      p = await api('PUT', 'profiles/' + state.activeId, { data: backup.data, expectedRevision: full.revision || 1 });
+    }
+    state.revision = p.revision || revision + 1;
+    state.lastData = clone(backup.data);
+    state.pending = null;
+    state.conflict = null;
+    writeMirror(backup.data);
+    emit('synced', p.name);
+    return clone(backup.data);
   }
 
   function readLegacy() {
@@ -380,8 +429,8 @@
   }
 
   CS.profiles = {
-    ACTIVE_KEY, MIRROR_KEY, LEGACY_KEY, BASE_KEY,
-    init, save, flush, switchTo, create, rename, remove, clearActive, resolveConflict,
+    ACTIVE_KEY, MIRROR_KEY, LEGACY_KEY, BACKUP_KEY, BASE_KEY,
+    init, save, flush, switchTo, create, rename, remove, clearActive, resolveConflict, backupActive, lastBackup, restoreBackup,
     list: () => state.profiles.slice(),
     activeId: () => state.activeId,
     isOnline: () => state.online,
