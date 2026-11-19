@@ -387,7 +387,7 @@
       const td = (extra && extra.tdOverrides && extra.tdOverrides[i]) || p.td || 5;
       const rgb = C.hexToRgb(hex);
       return {
-        index: i, name: p.name, hex, brand: p.brand || 'BambuLab', material: p.material || 'PLA Basic',
+        index: i, key: paletteKey(p), name: p.name, hex, brand: p.brand || 'BambuLab', material: p.material || 'PLA Basic',
         td, tdR: td, tdG: td, tdB: td, hd: td * 0.1, hdR: td * 0.1, hdG: td * 0.1, hdB: td * 0.1, rgb,
         lin: { r: C.srgbToLinear(rgb.r / 255), g: C.srgbToLinear(rgb.g / 255), b: C.srgbToLinear(rgb.b / 255) },
         lab: C.hexToLab(hex), fromLut: true
@@ -402,7 +402,7 @@
       const tdR = Number(p.tdR) || td, tdG = Number(p.tdG) || td, tdB = Number(p.tdB) || td;
       const rgb = C.hexToRgb(hex);
       return {
-        index: i, name: p.name || ('耗材 ' + (i + 1)), hex, brand: p.brand || '', material: p.material || 'PLA',
+        index: i, key: paletteKey(p), name: p.name || ('耗材 ' + (i + 1)), hex, brand: p.brand || '', material: p.material || 'PLA',
         td, tdR, tdG, tdB, hd: td * 0.1, hdR: tdR * 0.1, hdG: tdG * 0.1, hdB: tdB * 0.1, rgb,
         lin: { r: C.srgbToLinear(rgb.r / 255), g: C.srgbToLinear(rgb.g / 255), b: C.srgbToLinear(rgb.b / 255) },
         lab: C.hexToLab(hex), fromLut: false
@@ -947,6 +947,12 @@
     };
   }
 
+  function paletteKey(p) {
+    if (!p) return '';
+    if (p.id) return 'id:' + p.id;
+    return ['model', p.brand || '', p.name || '', p.material || '', String(p.hex || '').toLowerCase()].join('|');
+  }
+
   // Enumerate the reachable color gamut for the selected filaments. With a
   // small palette this is exact (e.g. 4 colors × 6 layers = 5,460 stacks), so
   // matching is not greedy and unreachable colors become measurable gaps.
@@ -956,22 +962,31 @@
     const budget = 120000;
     const entries = [];
     const seen = new Map();
+    // Enumerate in a stable key order, not AMS order, so truncation and
+    // candidate sets do not depend on how the palette happens to be sorted.
+    const canonical = Array.from({ length: K }, (_, i) => i)
+      .sort((a, b) => paletteKey(palette[a]).localeCompare(paletteKey(palette[b])));
     const neutralF = palette.map(p => Math.hypot(p.lab.a, p.lab.b) < 8);
     const chromaFracOf = seq => seq.reduce((n, i) => n + (neutralF[i] ? 0 : 1), 0) / Math.max(1, seq.length);
     const distinctOf = seq => new Set(seq).size;
-    const pushSeq = (seq, runs) => {
+    const pushSeq = (canonSeq, runs) => {
+      const seq = canonSeq.map(c => canonical[c]);
       const { lin, lab } = compositeLab(bg, seq, palette, layerHeight);
       const key = Math.round(lab.L * 2) + '|' + Math.round(lab.a * 2) + '|' + Math.round(lab.b * 2)
         + (variableHeight ? '|' + seq.length : '');
-      const existing = seen.get(key);
-      if (existing !== undefined) {
-        if (!variableHeight && entries[existing].seq.length > seq.length) {
-          entries[existing] = { seq: seq.slice(), lab, lin, length: seq.length, runs, hex: C.linearToHex(lin), chromaFrac: chromaFracOf(seq), distinct: distinctOf(seq) };
-        }
-        return;
+      const distinct = distinctOf(seq);
+      const bucket = seen.get(key);
+      if (bucket) {
+        // Keep up to three structurally different recipes per near-identical
+        // colour bucket; do not discard the second just because the first was
+        // enumerated.
+        if (bucket.some(idx => entries[idx].runs === runs && entries[idx].distinct === distinct)) return;
+        if (bucket.length >= 3) return;
+        bucket.push(entries.length);
+      } else {
+        seen.set(key, [entries.length]);
       }
-      seen.set(key, entries.length);
-      entries.push({ seq: seq.slice(), lab, lin, length: seq.length, runs, hex: C.linearToHex(lin), chromaFrac: chromaFracOf(seq), distinct: distinctOf(seq) });
+      entries.push({ seq: seq.slice(), lab, lin, length: seq.length, runs, hex: C.linearToHex(lin), chromaFrac: chromaFracOf(seq), distinct });
     };
     const permutations = (r) => {
       const out = [];

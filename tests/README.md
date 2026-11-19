@@ -27,6 +27,7 @@ node tests/test-detail-preserve.mjs # 默认面积门槛下 7.5mm 灰/肤色块�
 node tests/test-neutral-refine.mjs  # 完整UI默认值下中性锁定贯穿 refine/共底/高度合并；超5ΔE预算的暗灰才允许彩灰
 node tests/test-gamut-distinct.mjs  # 色域每条候选都有 distinct；多一种耗材确实多算0.25 ΔE
 node tests/test-gamut-recall.mjs    # 小色域全扫描最优；大色域并集池对全扫描 oracle 的额外色差上限
+node tests/test-enumeration-fairness.mjs # 耗材顺序不影响候选集；近似同色桶保留结构变体；稳定键
 node tests/test-calibration-channels.mjs # 标量TD覆盖旧通道（楔形/手改/重置/profile应用）；预测色随之改变
 node tests/test-flat-coverage.mjs # 纯色区按“基底+有限顶色层”预测；薄顶不再当无限厚；遮盖不足有警告
 node tests/test-height-limit.mjs # 渐变最高高度只作上限：自然短配方不被抬到最高层

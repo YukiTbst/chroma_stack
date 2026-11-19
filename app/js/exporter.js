@@ -959,7 +959,7 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
       })(),
       diagnostics: plan.diagnostics || null,
       layers: { layerHeight: plan.layerHeight, flatLayers: plan.flatLayers, flatBaseLayers: plan.flatBaseLayers || 0, gradientStartLayer: plan.gradStartLayer, gradientTopLayer: plan.gradTopLayer, maxLayers: plan.maxLayers, flatTopMm: +plan.flatTopMm.toFixed(3), gradientTopMm: +plan.gradTopMm.toFixed(3), actualGradientTopMm: +(plan.actualGradTopMm || plan.gradTopMm).toFixed(3), reliefMm: +plan.reliefMm.toFixed(3), variableHeight: !!plan.variableHeight },
-      palette: plan.palette.map((p, i) => ({ slot: i + 1, name: p.name, hex: p.hex, td: p.td, hdMm: +(p.hd || 0).toFixed(3), brand: p.brand, material: p.material })),
+      palette: plan.palette.map((p, i) => ({ slot: i + 1, key: p.key || ('slot:' + (i + 1)), name: p.name, hex: p.hex, td: p.td, hdMm: +(p.hd || 0).toFixed(3), brand: p.brand, material: p.material })),
       foundation: plan.foundation.name,
       background: plan.background || { enabled: false },
       stats: {
