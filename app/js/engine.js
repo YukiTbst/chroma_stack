@@ -719,13 +719,16 @@
     return dilate(edge, w, h, level);
   }
 
-  function snapEdgeFamilies(lab, flatMask, familyId, edgeMask, protect, families, w, h, radius) {
+  function snapEdgeFamilies(lab, flatMask, familyId, edgeMask, protect, families, w, h, radius, neutralGuard) {
     if (!edgeMask) return familyId;
+    const neutralNeed = neutralGuard ? neutralGuard.need : null;
+    const famNeutral = neutralGuard ? neutralGuard.famNeutral : null;
     const out = new Int16Array(familyId);
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         const i = y * w + x;
         if (!edgeMask[i] || flatMask[i] || (protect && protect[i])) continue;
+        const constrained = !!(neutralNeed && neutralNeed[i]);
         const l = labAt(lab, i);
         const curF = familyId[i];
         const curP = curF >= 0 ? families[curF].predictedLab : null;
@@ -742,7 +745,10 @@
               if (j === i || flatMask[j]) continue;
               if (edgeMask[j] && !(protect && protect[j])) continue;
               const f = familyId[j];
-              if (f >= 0) famCounts.set(f, (famCounts.get(f) || 0) + 1);
+              if (f >= 0) {
+                if (constrained && famNeutral && !famNeutral[f]) continue;
+                famCounts.set(f, (famCounts.get(f) || 0) + 1);
+              }
             }
           }
           let localBest = -1, localD = Infinity, localCount = 0;
@@ -1318,6 +1324,10 @@
       let changed = 0;
       for (let fi = 0; fi < F; fi++) {
         if (adj[fi].size === 0) continue;
+        // Member-level neutral families reproduce one exact source pixel's best
+        // K/W candidate; neighbour coherence must not drift them onto a different
+        // (worse) neutral stack. They still vote as neighbours for other families.
+        if (families[fi].neutralMember) continue;
         let best = null, bestCost = Infinity;
         for (const opt of opts[fi]) {
           let s = 0, wsum = 0;
@@ -1345,11 +1355,13 @@
     return changedTotal;
   }
 
-  function matchGamut(targetLab, gamut) {
+  /* Pool scan shared by matchGamut and the member-level neutral constraint:
+     returns the best-SCORE entry and its ΔE (before any neutral lock). Small
+     gamuts are scanned exactly; larger ones use a union of Lab-nearest and
+     ΔE94-nearest pools so saturated/out-of-gamut targets are not lost to the
+     Euclidean ranking alone. The final choice still uses ΔE2000. */
+  function scanGamutBest(targetLab, gamut) {
     if (!gamut || !gamut.length) return null;
-    // Small gamuts are scanned exactly; larger ones use a union of Lab-nearest
-    // and ΔE94-nearest pools so saturated/out-of-gamut targets are not lost to
-    // the Euclidean ranking alone. The final choice still uses ΔE2000.
     let pool;
     if (gamut.length <= EXACT_SCAN_LIMIT) pool = gamut;
     else {
@@ -1363,7 +1375,13 @@
       const score = de + gamutPenalty(targetLab, e);
       if (score < bestScore) { bestScore = score; bestDE = de; g = e; }
     }
-    if (!g) return null;
+    return g ? { g, bestDE } : null;
+  }
+
+  function matchGamut(targetLab, gamut) {
+    const raw = scanGamutBest(targetLab, gamut);
+    if (!raw) return null;
+    let g = raw.g, bestDE = raw.bestDE;
     let neutralLocked = false;
     // Hard preference: for near-neutral targets an all-neutral K/W stack within
     // 5 ΔE of the best recipe wins, so grey scenes never dither into colour
@@ -1375,6 +1393,170 @@
       deltaE: bestDE, length: g.length, runs: g.runs,
       neutral: isNeutralEntry(g), neutralLocked
     };
+  }
+
+  /* R3 — member-level neutral constraint. A family center can sit outside the
+     neutral lock while individual source pixels inside that family each satisfy
+     it (a grey ramp shares one chromatic center, yet member #575757 has a feasible
+     K/W stack within +5 ΔE of its OWN best recipe). markNeutralMembers flags every
+     such source pixel; reconcileNeutralMembers then moves it onto the family that
+     reproduces its exact best neutral candidate. Demand is decided per source Lab:
+       · best neutral ≤ 5 ΔE  ⇒ locked unconditionally (best recipe ΔE ≥ 0);
+       · otherwise estimate the best-recipe ΔE from a quantised Lab cell and only
+         fall back to an exact matchGamut inside the ambiguous ±5 band, so a smooth
+         ramp cannot flip the lock at the boundary while real photos stay cheap.
+     Caches are shared across the early and late passes. */
+  function neutralOfCache(l, gamut, nbCache) {
+    const ek = l.L.toFixed(3) + '|' + l.a.toFixed(3) + '|' + l.b.toFixed(3);
+    let nb = nbCache.get(ek);
+    if (nb === undefined) {
+      const raw = bestNeutralFor(l, gamut);
+      nb = raw ? { entry: raw.entry, de: raw.de, seqKey: raw.entry.seq.join(',') } : null;
+      nbCache.set(ek, nb);
+    }
+    return nb;
+  }
+
+  /* Exact neutral-lock demand for one source Lab. nb is its best K/W candidate.
+     A best neutral within 5 ΔE is always locked (best recipe ΔE ≥ 0). Otherwise
+     the best-recipe ΔE is estimated from a quantised Lab cell; only the ambiguous
+     ±5 band falls back to an exact matchGamut, so a smooth ramp cannot flip the
+     lock at the boundary while real photos stay cheap. */
+  function neutralDemanded(l, nb, gamut, caches) {
+    if (!nb) return false;
+    if (nb.de <= 5) return true;
+    const { cellCache, exactCache } = caches;
+    const ck = Math.round(l.L) + '|' + Math.round(l.a) + '|' + Math.round(l.b);
+    let cell = cellCache.get(ck);
+    if (!cell) {
+      const cl = { L: Math.round(l.L), a: Math.round(l.a), b: Math.round(l.b) };
+      const raw = scanGamutBest(cl, gamut);
+      const cnb = bestNeutralFor(cl, gamut);
+      cell = { chosenDE: raw ? raw.bestDE : Infinity };
+      cellCache.set(ck, cell);
+    }
+    // gap = nb.de - cellChosenDE; the exact gap differs by at most ~3.5 ΔE
+    // (unit-cell Lab shift plus a possible best-entry switch), so only the
+    // middle band needs an exact decision.
+    const gap = nb.de - cell.chosenDE;
+    if (gap <= 1.5) return true;
+    if (gap > 8.5) return false;
+    const ek = l.L.toFixed(3) + '|' + l.a.toFixed(3) + '|' + l.b.toFixed(3);
+    let m = exactCache.get(ek);
+    if (m === undefined) { m = matchGamut(l, gamut); exactCache.set(ek, m); }
+    return !!(m && m.neutralLocked);
+  }
+
+  function markNeutralMembers(lab, flatMask, printMask, lineProtectMask, familyId, families, palette, gamut, w, h, need, caches) {
+    const n = w * h;
+    const F = families.length;
+    const famNeutral = new Uint8Array(F);
+    const famSeqKey = new Array(F);
+    for (let f = 0; f < F; f++) {
+      famNeutral[f] = recipeIsNeutral(families[f].recipe, palette) ? 1 : 0;
+      famSeqKey[f] = families[f].recipe ? families[f].recipe.join(',') : '';
+    }
+    for (let i = 0; i < n; i++) {
+      need[i] = 0;
+      if (flatMask[i] || (printMask && !printMask[i])) continue;
+      // Line-protected pixels are governed by the stroke/repair subsystem (R2),
+      // which may intentionally repaint an AA gap to the stroke colour; the
+      // gradient neutral-member constraint must not undo that.
+      if (lineProtectMask && lineProtectMask[i]) continue;
+      const f = familyId[i];
+      if (f < 0) continue;
+      const l = labAt(lab, i);
+      if (Math.hypot(l.a, l.b) >= 8) continue;
+      const nb = neutralOfCache(l, gamut, caches.nbCache);
+      if (!nb) continue;
+      // Already sitting on its exact best neutral recipe: nothing to constrain.
+      if (famNeutral[f] && famSeqKey[f] === nb.seqKey) continue;
+      if (neutralDemanded(l, nb, gamut, caches)) need[i] = 1;
+    }
+  }
+
+  /* Move every flagged source pixel onto the family reproducing its exact best
+     neutral candidate, reusing an existing neutral family with that recipe or
+     creating one. New families are flagged neutralMember so refine / height
+     merging cannot drift them onto a different (worse) neutral stack. */
+  function reconcileNeutralMembers(lab, need, familyId, families, palette, gamut, gradStartLayer, layerHeight, w, h, nbCache) {
+    const n = w * h;
+    const byRecipe = new Map();
+    for (let f = 0; f < families.length; f++) {
+      const fam = families[f];
+      if (fam.recipe && recipeIsNeutral(fam.recipe, palette)) byRecipe.set(fam.recipe.join(','), f);
+    }
+    let moved = 0, created = 0;
+    for (let i = 0; i < n; i++) {
+      if (!need[i]) continue;
+      const f = familyId[i];
+      if (f < 0) continue;
+      const l = labAt(lab, i);
+      const ek = l.L.toFixed(3) + '|' + l.a.toFixed(3) + '|' + l.b.toFixed(3);
+      let nb = nbCache ? nbCache.get(ek) : undefined;
+      if (nb === undefined) {
+        const raw = bestNeutralFor(l, gamut);
+        nb = raw ? { entry: raw.entry, de: raw.de, seqKey: raw.entry.seq.join(',') } : null;
+        if (nbCache) nbCache.set(ek, nb);
+      }
+      if (!nb) continue;
+      if (families[f].recipe && families[f].recipe.join(',') === nb.seqKey) continue;
+      let idx = byRecipe.get(nb.seqKey);
+      if (idx === undefined) {
+        const seq = nb.entry.seq.slice();
+        idx = families.length;
+        families.push({
+          targetLab: { L: l.L, a: l.a, b: l.b }, targetHex: C.labToHex(l),
+          predictedLab: nb.entry.lab, predictedHex: nb.entry.hex,
+          recipe: seq, deltaE: nb.de, pixelCount: 0,
+          neutralLocked: true, neutral: true, neutralMember: true,
+          layers: seq.length, topLayer: gradStartLayer + seq.length,
+          topMm: (gradStartLayer + seq.length) * layerHeight
+        });
+        byRecipe.set(nb.seqKey, idx);
+        created++;
+      }
+      familyId[i] = idx;
+      moved++;
+    }
+    return { moved, created };
+  }
+
+  /* R3 acceptance audit over the FINAL plan: every source-neutral gradient pixel
+     is compared against its own feasible neutral candidate. feasibleMissed counts
+     demanded pixels still on a chromatic (or worse-than-budget neutral) recipe and
+     must be 0 after reconcile; budgetUnmet counts grays that legitimately stay
+     chromatic because no K/W stack is within +5 ΔE — those are risk-flagged. */
+  function auditNeutralMembers(lab, flatMask, printMask, lineProtectMask, familyId, families, palette, gamut, w, h, caches) {
+    const n = w * h;
+    const F = families.length;
+    const famNeutral = new Uint8Array(F);
+    for (let f = 0; f < F; f++) famNeutral[f] = recipeIsNeutral(families[f].recipe, palette) ? 1 : 0;
+    let sourceNeutral = 0, chromaticOnNeutral = 0, feasibleMissed = 0, budgetUnmet = 0;
+    const examples = [];
+    for (let i = 0; i < n; i++) {
+      if (flatMask[i] || (printMask && !printMask[i])) continue;
+      if (lineProtectMask && lineProtectMask[i]) continue;
+      const f = familyId[i];
+      if (f < 0) continue;
+      const l = labAt(lab, i);
+      if (Math.hypot(l.a, l.b) >= 8) continue;
+      sourceNeutral++;
+      const fam = families[f];
+      const neutralRecipe = !!famNeutral[f];
+      if (!neutralRecipe) chromaticOnNeutral++;
+      const nb = neutralOfCache(l, gamut, caches.nbCache);
+      const de = C.deltaE2000(l, fam.predictedLab);
+      if (neutralDemanded(l, nb, gamut, caches)) {
+        if (!neutralRecipe || (nb && de > nb.de + 0.5)) {
+          feasibleMissed++;
+          if (examples.length < 5) examples.push({ hex: C.labToHex(l), family: fam.targetHex, recipe: fam.recipe.join(','), de: +de.toFixed(2), neutralDe: nb ? +nb.de.toFixed(2) : null });
+        }
+      } else if (!neutralRecipe) {
+        budgetUnmet++;
+      }
+    }
+    return { sourceNeutral, chromaticOnNeutral, feasibleMissed, budgetUnmet, examples };
   }
 
   function suggestFilamentForLab(targetLab, palette) {
@@ -1579,6 +1761,7 @@
       for (const e of sorted) {
         const f = e.f;
         if (f.recipe.length <= minGap) continue;
+        if (f.neutralMember) continue; // keep the exact source-member neutral stack
         let best = null;
         for (const c of entries) {
           if (c === e) continue;
@@ -1604,6 +1787,7 @@
         f.predictedHex = best.predictedHex;
         f.deltaE = C.deltaE2000(f.targetLab, f.predictedLab);
         f.neutral = best.neutral;
+        if (best.neutralLocked) f.neutralLocked = true;
         f.sharedBaseLayers = 0;
         result.savedLayerPixels += (oldLen - f.recipe.length) * f.pixelCount;
         result.savedLayers += oldLen - f.recipe.length;
@@ -1632,6 +1816,8 @@
       for (let i = 1; i < arr.length; i++) {
         const f = arr[i].f;
         canon.f.pixelCount += f.pixelCount;
+        if (f.neutralLocked) canon.f.neutralLocked = true;
+        if (f.neutralMember) canon.f.neutralMember = true;
         f.pixelCount = 0;
         f.sharedBaseLayers = 0;
         remap.set(arr[i].idx, canon.idx);
@@ -2031,10 +2217,12 @@
     return src;
   }
 
-  function smoothFamilyMap(mask, familyId, familyCount, families, w, h, radius, passes, lab, colorTol, protect) {
+  function smoothFamilyMap(mask, familyId, familyCount, families, w, h, radius, passes, lab, colorTol, protect, neutralGuard) {
     let src = new Int16Array(familyId);
     const counts = new Uint32Array(familyCount);
     const tol2 = colorTol ? colorTol * colorTol : 0;
+    const neutralNeed = neutralGuard ? neutralGuard.need : null;
+    const famNeutral = neutralGuard ? neutralGuard.famNeutral : null;
     const touched = [];
     for (let pass = 0; pass < passes; pass++) {
       const out = new Int16Array(src);
@@ -2048,6 +2236,7 @@
           // the surrounding paper still cannot erase the line, while a long
           // outline converges to a continuous family instead of dotted stacks.
           const protectedCenter = !!(protect && protect[i]);
+          const constrainedCenter = !!(neutralNeed && neutralNeed[i]);
           const x0 = Math.max(0, x - radius), x1 = Math.min(w - 1, x + radius);
           touched.length = 0;
           let best = src[i], bestCount = 0;
@@ -2059,6 +2248,7 @@
               if (!protectedCenter && lab && tol2 && j !== i && labDistSq(lab, i, j) > tol2) continue;
               const f = src[j];
               if (f < 0) continue;
+              if (constrainedCenter && famNeutral && !famNeutral[f]) continue;
               if (protectedCenter && lab && families && families[f] && families[f].predictedLab.L > lab[i * 3] + 10) continue;
               const wgt = (yy === y && xx === x) ? 2 : 1;
               const c = counts[f];
@@ -2344,9 +2534,13 @@
     let vectorInfo = null;
     let mergeResult = { groups: 0, sharedPixels: 0 };
     let structureCleanup = { mergedPixels: 0, mergedComponents: 0, passes: 0, converged: true, minAreaPx: 0, featureMm: 0, edgeOnly: false };
+    let cleanupMinAreaPx = 0, cleanupEdgeOnly = false;
     let familyId = new Int16Array(n).fill(-1);
     let predicted = new Array(n);
     let familyPixels = new Uint32Array(0);
+    // R3 member-level neutral constraint state (TD gradient branch only).
+    let neutralNeed = null, neutralCaches = null;
+    const neutralReconcile = { moved: 0, created: 0 };
 
     if (gradCount > 0) {
       const K = clamp(Math.round(Number(options.families) || 96), 2, 256);
@@ -2402,12 +2596,28 @@
       } else {
         families = built.fams;
       }
+      // R3: constrain real source members before any spatial pass can migrate
+      // them. Family centers alone miss grey-ramp members that individually
+      // satisfy the neutral lock.
+      let neutralGuard = null;
+      if (engine === 'td' && gamut) {
+        neutralCaches = { cellCache: new Map(), exactCache: new Map(), nbCache: new Map() };
+        neutralNeed = new Uint8Array(n);
+        markNeutralMembers(lab, flatMask, printMask, lineProtectMask, familyId, families, palette, gamut, w, h, neutralNeed, neutralCaches);
+        const early = reconcileNeutralMembers(lab, neutralNeed, familyId, families, palette, gamut, gradStartLayer, layerHeight, w, h, neutralCaches.nbCache);
+        neutralReconcile.moved += early.moved; neutralReconcile.created += early.created;
+        if (early.moved || early.created) {
+          familyPixels = new Uint32Array(families.length);
+          for (let i = 0; i < n; i++) if (!flatMask[i] && familyId[i] >= 0) familyPixels[familyId[i]]++;
+        }
+        neutralGuard = { need: neutralNeed, famNeutral: Uint8Array.from(families, f => recipeIsNeutral(f.recipe, palette) ? 1 : 0) };
+      }
       const familySmooth = smoothMm != null
         ? (physSmooth.familyR > 0 ? { r: physSmooth.familyR, passes: physSmooth.passes } : null)
         : familySmoothLevel;
       if (familySmooth) {
         familyId = smoothFamilyMap(flatMask, familyId, families.length, families, w, h, familySmooth.r, familySmooth.passes,
-          lineActive ? lab : null, lineActive ? 11 : 0, lineActive ? lineProtectMask : null);
+          lineActive ? lab : null, lineActive ? 11 : 0, lineActive ? lineProtectMask : null, neutralGuard);
         familyPixels = new Uint32Array(families.length);
         for (let i = 0; i < n; i++) if (!flatMask[i] && familyId[i] >= 0) familyPixels[familyId[i]]++;
       }
@@ -2416,7 +2626,7 @@
       }
       const lineDirectFilament = lineDirect ? new Uint16Array(nearest) : null;
       if (snapMask) {
-        familyId = snapEdgeFamilies(lab, flatMask, familyId, snapMask, lineProtectMask, families, w, h, Math.max(1, edgeCleanLevel));
+        familyId = snapEdgeFamilies(lab, flatMask, familyId, snapMask, lineProtectMask, families, w, h, Math.max(1, edgeCleanLevel), neutralGuard);
         familyPixels = new Uint32Array(families.length);
         for (let i = 0; i < n; i++) if (!flatMask[i] && familyId[i] >= 0) familyPixels[familyId[i]]++;
       }
@@ -2556,8 +2766,9 @@
       // the first smoothing pass. Finish with the same physical-radius vote;
       // protected strokes still vote only within the stroke, never with paper.
       if (familySmooth && (edgeMask || options.vectorFlat)) {
+        if (neutralGuard) neutralGuard.famNeutral = Uint8Array.from(families, f => recipeIsNeutral(f.recipe, palette) ? 1 : 0);
         familyId = smoothFamilyMap(flatMask, familyId, families.length, families, w, h, familySmooth.r, familySmooth.passes,
-          lineActive ? lab : null, lineActive ? 11 : 0, lineActive ? lineProtectMask : null);
+          lineActive ? lab : null, lineActive ? 11 : 0, lineActive ? lineProtectMask : null, neutralGuard);
         familyPixels = new Uint32Array(families.length);
         for (let i = 0; i < n; i++) if (!flatMask[i] && familyId[i] >= 0) familyPixels[familyId[i]]++;
         for (let f = 0; f < families.length; f++) families[f].pixelCount = familyPixels[f] || 0;
@@ -2591,6 +2802,7 @@
         // guarantee a minimum connected component, especially at mask edges.
         const minAreaPx = Math.max(2, Math.round(Math.PI * (cleanupFeatureMm / 2) ** 2 / (pixelSize * pixelSize)));
         const edgeOnly = !physicalCleanup && !options.vectorFlat && edgeCleanLevel > 0 && edgeCleanLevel < 3;
+        cleanupMinAreaPx = minAreaPx; cleanupEdgeOnly = edgeOnly;
         structureCleanup = mergeSmallRegions(flatMask, nearest, familyId, lab, families, palette, w, h, minAreaPx, edgeOnly ? edgeMask : null, lineProtectMask, options.manualMask);
         structureCleanup.minAreaPx = minAreaPx;
         structureCleanup.featureMm = cleanupFeatureMm;
@@ -2633,6 +2845,40 @@
           let shared = 0;
           for (const f of families) if (f.pixelCount > 0 && f.sharedBaseLayers >= 2) shared += f.pixelCount;
           mergeResult.sharedPixels = shared;
+        }
+      }
+      // R3 safety net: shared bases, small-region merging, vector conversion and
+      // height dedup can still migrate a constrained member onto another recipe.
+      // Re-mark against the final families and snap every demanded source pixel
+      // back to its exact best neutral candidate before the preview is assembled.
+      if (engine === 'td' && gamut && neutralNeed) {
+        markNeutralMembers(lab, flatMask, printMask, lineProtectMask, familyId, families, palette, gamut, w, h, neutralNeed, neutralCaches);
+        const late = reconcileNeutralMembers(lab, neutralNeed, familyId, families, palette, gamut, gradStartLayer, layerHeight, w, h, neutralCaches.nbCache);
+        neutralReconcile.moved += late.moved; neutralReconcile.created += late.created;
+        if (late.moved || late.created) {
+          // The member reassignment can recreate sub-nozzle islands after the main
+          // cleanup already ran; re-converge with the same physical minimum area so
+          // an isolated neutral speckle is absorbed instead of surviving as a 1-px
+          // region. Large coherent neutral regions are above the minimum and stay.
+          if (cleanupMinAreaPx > 1) {
+            const again = mergeSmallRegions(flatMask, nearest, familyId, lab, families, palette, w, h, cleanupMinAreaPx, cleanupEdgeOnly ? edgeMask : null, lineProtectMask, options.manualMask);
+            structureCleanup.mergedPixels += again.mergedPixels;
+            structureCleanup.mergedComponents += again.mergedComponents;
+            structureCleanup.passes += again.passes;
+            structureCleanup.converged = structureCleanup.converged && again.converged;
+            if (again.mergedPixels && lineDirect) for (let i = 0; i < n; i++) {
+              if (!flatMask[i] || nearest[i] !== lineDirectFilament[i]) lineDirect[i] = 0;
+            }
+          }
+          familyPixels = new Uint32Array(families.length);
+          flatCount = 0;
+          for (let i = 0; i < n; i++) {
+            if (!printMask[i]) continue;
+            if (flatMask[i]) flatCount++;
+            else if (familyId[i] >= 0) familyPixels[familyId[i]]++;
+          }
+          gradCount = n - flatCount;
+          for (let f = 0; f < families.length; f++) families[f].pixelCount = familyPixels[f] || 0;
         }
       }
       for (const f of families) {
@@ -2896,11 +3142,18 @@
         maxDE: +gs.max.toFixed(2)
       };
     };
+    let neutralAudit = null;
+    if (engine === 'td' && gamut && neutralCaches) {
+      neutralAudit = auditNeutralMembers(lab, flatMask, printMask, lineProtectMask, familyId, families, palette, gamut, w, h, neutralCaches);
+      neutralAudit.reconciledPixels = neutralReconcile.moved;
+      neutralAudit.memberFamilies = neutralReconcile.created;
+    }
     const diagnostics = {
       sensitivity: { frac: 0.1, worstDE: +sensWorst.toFixed(2), worstHex: sensHex, familiesOver5: sensOver5 },
       fill: { filledPixels: flatFillStats.filled, rejectedPixels: flatFillStats.rejected },
       manualPixels: manualPaintPixels,
       regions: { count: regionCount },
+      neutralAudit,
       printAudit: auditPrintLayers(lab, w, h, {
         pixelSize, lineWidthMm: Number(options.lineWidthMm) || 0.42,
         printMask, flatMask, flatFilament, familyId, families,
@@ -2936,6 +3189,9 @@
     if (engine === 'td' && flatBadPixels > Math.max(2, flatCount * 0.05)) {
       const pct = (flatBadPixels / Math.max(1, flatCount) * 100).toFixed(0);
       warnings.push(`纯色区顶色只有 ${flatTopLayers} 层（基底 ${flatBaseLayers} 层）：约 ${pct}% 纯色像素实际遮盖后与所选耗材偏差 >3 ΔE（最大 ${flatMaxDE.toFixed(1)}）。提高纯色区顶高或换更不透明的基底可改善。`);
+    }
+    if (neutralAudit && neutralAudit.budgetUnmet > 0) {
+      warnings.push(`中性色风险：${neutralAudit.budgetUnmet} 个源中性渐变像素没有落在 +5 ΔE 预算内的黑白叠层，仍用彩色配方叠色，灰阶可能偏色；可加入更中性或更不透明的耗材、或提高渐变层数改善。`);
     }
     if (palette.length > 4) warnings.push(`当前使用 ${palette.length} 个耗材槽位；单 AMS 只有 4 槽，需要多 AMS 或中途换料。`);
     if (outOfGamutPercent > 5 && gamutGaps.length) {
