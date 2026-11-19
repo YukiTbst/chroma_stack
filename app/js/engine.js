@@ -2081,6 +2081,16 @@
     // flatLayers. Keep at least one colour layer so the top surface always
     // matches the chosen filament.
     const flatBaseLayers = Math.max(0, Math.min(gradStartLayer, flatLayers - 1));
+    // Flat regions are a real finite stack: foundation below, flat colour
+    // above. Predict their top surface with the same optical model as
+    // gradients instead of assuming an infinitely thick filament. The
+    // foundation is the same infinite backing both paths already use.
+    const flatTopLayers = Math.max(1, flatLayers - flatBaseLayers);
+    const flatPred = palette.map((p, fi) => {
+      if (engine !== 'td') return { lab: p.lab, hex: p.hex, deltaE: 0 };
+      const c = compositeLab(foundation.lin, new Array(flatTopLayers).fill(fi), palette, layerHeight);
+      return { lab: c.lab, hex: C.linearToHex(c.lin), deltaE: C.deltaE2000(p.lab, c.lab) };
+    });
 
     let flatCount = flatMask.reduce((a, b) => a + b, 0);
     let gradCount = n - flatCount;
@@ -2406,7 +2416,10 @@
         f.topMm = (gradStartLayer + f.recipe.length) * layerHeight;
       }
       for (let i = 0; i < n; i++) {
-        if (flatMask[i]) predicted[i] = { lab: palette[nearest[i]].lab, hex: palette[nearest[i]].hex, filamentIndex: nearest[i] };
+        if (flatMask[i]) {
+          const fp = flatPred[nearest[i]] || { lab: palette[nearest[i]].lab, hex: palette[nearest[i]].hex };
+          predicted[i] = { lab: fp.lab, hex: fp.hex, filamentIndex: nearest[i] };
+        }
         else { const f = familyId[i]; const fam = families[f]; predicted[i] = { lab: fam.predictedLab, hex: fam.predictedHex, family: f }; }
       }
     } else {
@@ -2426,7 +2439,10 @@
           if (!flatMask[i] || nearest[i] !== lineDirectFilament[i]) lineDirect[i] = 0;
         }
       }
-      for (let i = 0; i < n; i++) predicted[i] = { lab: palette[nearest[i]].lab, hex: palette[nearest[i]].hex, filamentIndex: nearest[i] };
+      for (let i = 0; i < n; i++) {
+        const fp = flatPred[nearest[i]] || { lab: palette[nearest[i]].lab, hex: palette[nearest[i]].hex };
+        predicted[i] = { lab: fp.lab, hex: fp.hex, filamentIndex: nearest[i] };
+      }
     }
 
     const flatFilament = new Uint16Array(n);
@@ -2470,6 +2486,7 @@
 
     const preview = new Uint8ClampedArray(n * 4);
     let sumDE = 0, sumDE2 = 0, maxDE = 0;
+    let flatBadPixels = 0, flatMaxDE = 0;
     const hist = new Uint32Array(101);
     let under2 = 0, under5 = 0, under10 = 0, validPixels = 0, colorStatPixels = 0;
     for (let i = 0; i < n; i++) {
@@ -2481,6 +2498,11 @@
         continue; // support is real material, but not a colour recipe sample
       }
       colorStatPixels++;
+      if (flatMask[i] && engine === 'td') {
+        const fd = flatPred[nearest[i]] ? flatPred[nearest[i]].deltaE : 0;
+        if (fd > 3) flatBadPixels++;
+        if (fd > flatMaxDE) flatMaxDE = fd;
+      }
       const de = C.deltaE2000(labAt(lab, i), predicted[i].lab);
       sumDE += de; sumDE2 += de * de; if (de > maxDE) maxDE = de;
       hist[Math.min(100, Math.round(de))]++;
@@ -2601,6 +2623,10 @@
     }
     if (flatCount === 0) warnings.push('没有识别出纯色区，整幅画都会使用层叠渐变。可降低“平整阈值”或增加纯色区耗材。');
     if (flatCount === n) warnings.push('整幅画都被识别为纯色区。可提高“平整阈值”或降低残差阈值。');
+    if (engine === 'td' && flatBadPixels > Math.max(2, flatCount * 0.05)) {
+      const pct = (flatBadPixels / Math.max(1, flatCount) * 100).toFixed(0);
+      warnings.push(`纯色区顶色只有 ${flatTopLayers} 层（基底 ${flatBaseLayers} 层）：约 ${pct}% 纯色像素实际遮盖后与所选耗材偏差 >3 ΔE（最大 ${flatMaxDE.toFixed(1)}）。提高纯色区顶高或换更不透明的基底可改善。`);
+    }
     if (palette.length > 4) warnings.push(`当前使用 ${palette.length} 个耗材槽位；单 AMS 只有 4 槽，需要多 AMS 或中途换料。`);
     if (outOfGamutPercent > 5 && gamutGaps.length) {
       const g = gamutGaps[0];

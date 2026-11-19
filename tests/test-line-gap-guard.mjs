@@ -64,10 +64,12 @@ rect(blue, 240, 102, 100, 80, 3, [lineRgb.r, lineRgb.g, lineRgb.b]);
 const bluePlan = E.buildPlan({ width: 240, height: 240, data: blue }, base);
 const gapA = bluePlan.predicted[101 * 240 + 100];
 const gapB = bluePlan.predicted[101 * 240 + 101];
+const stroke = bluePlan.predicted[101 * 240 + 98];
 console.log('pale-blue gap predicted', gapA.hex, gapB.hex,
   'filaments', bluePlan.flatFilament[101 * 240 + 100], bluePlan.flatFilament[101 * 240 + 101]);
-assert.ok(C.deltaE2000(gapA.lab, C.hexToLab(palette[4].hex)) < 8 &&
-  C.deltaE2000(gapB.lab, C.hexToLab(palette[4].hex)) < 8,
-  'a same-hue AA gap still joins the stroke');
+assert.equal(bluePlan.flatFilament[101 * 240 + 100], 4, 'first gap pixel joins the stroke material');
+assert.equal(bluePlan.flatFilament[101 * 240 + 101], 4, 'second gap pixel joins the stroke material');
+assert.ok(C.deltaE2000(gapA.lab, stroke.lab) < 2 && C.deltaE2000(gapB.lab, stroke.lab) < 2,
+  'a same-hue AA gap keeps the same predicted colour as the stroke');
 
 console.log('all line-gap guard checks passed');
