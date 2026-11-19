@@ -69,6 +69,7 @@
     brushMode: 'flat',
     brushSize: 18,
     overrideMask: null,
+    overrideBase: null,
     undo: [],
     analyzing: false,
     pending: false,
@@ -295,7 +296,7 @@
     restoreSettings(data);
     syncControlsFromState();
     renderProfileBar();
-    markDirty(true);
+    markDirty(false);
   }
 
   async function switchProfile(id) {
@@ -402,7 +403,7 @@
     state.imageName = name || '未命名';
     state.plan = null;
     state.layer = 0;
-    state.overrideMask = null;
+    state.overrideMask = null; state.overrideBase = null;
     state.undo = [];
     state.previewSrc = previewSrc || (canvas.toDataURL ? canvas.toDataURL('image/jpeg', 0.86) : '');
     const thumb = $('previewThumb');
@@ -481,6 +482,13 @@
   /* ---------------- analysis ---------------- */
   function buildOptions() {
     const mask = state.overrideMask;
+    // Sparse manual lock: only pixels the user actually changed relative to the
+    // automatic mask. Everything else keeps line protection and cleaning.
+    let manualMask = null;
+    if (mask && state.overrideBase && state.overrideBase.length === mask.length) {
+      manualMask = new Uint8Array(mask.length);
+      for (let i = 0; i < mask.length; i++) if (mask[i] !== state.overrideBase[i]) manualMask[i] = 1;
+    }
     if (state.engine === 'lut') {
       return {
         engine: 'lut', lutKey: state.lutKey, widthMm: state.widthMm,
@@ -489,6 +497,8 @@
         residualThreshold: state.residualThreshold, minFlatPercent: state.minFlatPercent, smoothLevel: state.smoothLevel, smoothMm: state.smoothMm, lineWidthMm: state.lineWidthMm, mergeDeltaE: state.mergeDeltaE,
         lineProtect: state.lineProtect, edgeClean: state.edgeClean, vectorFlat: state.vectorFlat,
         maskOverride: mask || undefined,
+      manualMask: manualMask || undefined,
+        manualMask: manualMask || undefined,
         backgroundMode: state.backgroundMode, backgroundColor: state.backgroundColor, backgroundTolerance: state.backgroundTolerance,
         backgroundEnvelope: state.backgroundEnvelope, backgroundEnvelopeMm: state.backgroundEnvelopeMm,
         backgroundDeletedHoles: Array.from(state.backgroundHoleIds),
@@ -554,7 +564,7 @@
 
   function markDirty(clearMask) {
     if (clearMask) {
-      state.overrideMask = null;
+      state.overrideMask = null; state.overrideBase = null;
       state.undo = [];
     }
     state.editVersion++;
@@ -591,7 +601,7 @@
         state.layer = clamp(state.layer, 0, Math.max(0, plan.maxLayers - 1));
         updateAfterPlan();
         updateDirtyUI();
-        if (state.brushOn) state.overrideMask = state.overrideMask || new Uint8Array(plan.flatMask);
+        if (state.brushOn && !state.overrideMask) { state.overrideMask = new Uint8Array(plan.flatMask); state.overrideBase = new Uint8Array(plan.flatMask); }
       } catch (err) {
         if (request !== state.analysisRequest) return;
         console.error(err);
@@ -704,7 +714,7 @@
     const ok = addFilamentToTd(entry);
     if (!ok) return;
     if (state.engine === 'lut') setEngine('td', false);
-    state.overrideMask = null;
+    state.overrideMask = null; state.overrideBase = null;
     state.undo = [];
     renderPalette();
     markDirty(false);
@@ -721,7 +731,7 @@
     const ok = addFilamentToTd(entry);
     if (!ok) return;
     if (state.engine === 'lut') setEngine('td', false);
-    state.overrideMask = null;
+    state.overrideMask = null; state.overrideBase = null;
     state.undo = [];
     renderPalette();
     markDirty(false);
@@ -735,7 +745,7 @@
     state.tdPalette = list;
     state.foundationIndex = Math.max(0, list.findIndex(p => /white|jade/i.test(p.name)));
     if (state.engine === 'lut') setEngine('td', false);
-    state.overrideMask = null;
+    state.overrideMask = null; state.overrideBase = null;
     state.undo = [];
     renderPalette();
     markDirty(false);
@@ -746,7 +756,7 @@
   function setEngine(engine, doAnalyze = true) {
     if (state.engine === engine) return;
     state.engine = engine;
-    state.overrideMask = null;
+    state.overrideMask = null; state.overrideBase = null;
     state.undo = [];
     updateEngineUI();
     renderPalette();
@@ -1399,7 +1409,7 @@
     const pt = canvasPoint(evt);
     if (!pt) return;
     const p = pt.p;
-    if (!state.overrideMask) state.overrideMask = new Uint8Array(p.flatMask);
+    if (!state.overrideMask) { state.overrideMask = new Uint8Array(p.flatMask); state.overrideBase = new Uint8Array(p.flatMask); }
     const radiusWork = Math.max(1, (state.brushSize / 2) * (p.w / pt.rect.width));
     const val = state.brushMode === 'flat' ? 1 : 0;
     const x0 = Math.max(0, Math.floor(pt.x - radiusWork)), x1 = Math.min(p.w - 1, Math.ceil(pt.x + radiusWork));
@@ -1419,7 +1429,7 @@
     if (state.backgroundPick) { evt.preventDefault(); pickBackgroundAt(evt); return; }
     if (!state.brushOn || !state.plan) return;
     evt.preventDefault();
-    if (!state.overrideMask) state.overrideMask = new Uint8Array(state.plan.flatMask);
+    if (!state.overrideMask) { state.overrideMask = new Uint8Array(state.plan.flatMask); state.overrideBase = new Uint8Array(state.plan.flatMask); }
     state.undo.push(new Uint8Array(state.overrideMask));
     if (state.undo.length > 14) state.undo.shift();
     markDirty(false);
@@ -1452,7 +1462,7 @@
   }
 
   function clearBrush() {
-    state.overrideMask = null;
+    state.overrideMask = null; state.overrideBase = null;
     state.undo = [];
     markDirty(false);
     toast('已清除手绘修整，回到自动分区');
@@ -1485,7 +1495,7 @@
     $('btnSyntheticSample').addEventListener('click', (e) => { e.stopPropagation(); makeSyntheticSample(); });
 
     document.querySelectorAll('#engineSwitch button').forEach(b => b.addEventListener('click', () => setEngine(b.dataset.engine)));
-    $('lutSelect').addEventListener('change', (e) => { state.lutKey = e.target.value; state.overrideMask = null; state.undo = []; renderPalette(); markDirty(false); });
+    $('lutSelect').addEventListener('change', (e) => { state.lutKey = e.target.value; state.overrideMask = null; state.overrideBase = null; state.undo = []; renderPalette(); markDirty(false); });
     $('widthMm').addEventListener('input', (e) => {
       state.widthMm = clamp(Number(e.target.value) || 150, 40, 400);
       state.backgroundHoleIds.clear(); state.backgroundHolePick = false;
@@ -1547,17 +1557,17 @@
     $('stdThreshold').addEventListener('input', (e) => {
       state.stdThreshold = Number(e.target.value);
       $('stdValue').textContent = state.stdThreshold > 0 ? state.stdThreshold.toFixed(1) : '自动';
-      markDirty(true);
+      markDirty(false);
     });
     $('residualThreshold').addEventListener('input', (e) => {
       state.residualThreshold = Number(e.target.value);
       $('resValue').textContent = state.residualThreshold.toFixed(1) + ' ΔE';
-      markDirty(true);
+      markDirty(false);
     });
     $('minFlatPercent').addEventListener('input', (e) => {
       state.minFlatPercent = Number(e.target.value);
       $('areaValue').textContent = state.minFlatPercent.toFixed(1) + '%';
-      markDirty(true);
+      markDirty(false);
     });
     $('smoothMm').addEventListener('input', (e) => {
       state.smoothMm = clamp(Number(e.target.value) || 0, 0, 3);

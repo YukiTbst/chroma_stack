@@ -446,7 +446,14 @@
   // dark strokes continuous, optionally print them as one direct colour.
   // Photos, mosaics and impressionist work normally fail the pure-paper gate,
   // so the automatic mode leaves them alone.
-  function buildStrokeInfo(lab, alpha, w, h) {
+  function buildStrokeInfo(lab, alpha, w, h, opts) {
+    const lineWidthMm = opts && Number(opts.lineWidthMm) > 0 ? Number(opts.lineWidthMm) : 0.42;
+    const pixelSizeMm = opts && Number(opts.pixelSize) > 0 ? Number(opts.pixelSize) : (150 / w);
+    const lineWidthPx = Math.max(0.5, lineWidthMm / pixelSizeMm);
+    const strokeR = clamp(Math.round(1.7 * lineWidthPx), 1, 12);
+    const fringeR = clamp(Math.round(1.7 * lineWidthPx), 1, 12);
+    const repairR = clamp(Math.round(2.2 * lineWidthPx), 1, 12);
+    const growPx = clamp(Math.round(0.8 * lineWidthPx), 1, 4);
     const n = w * h;
     const dark = new Uint8Array(n);
     const chromatic = new Uint8Array(n);
@@ -504,7 +511,7 @@
     }
     let thinDark = 0;
     for (let i = 0; i < n; i++) {
-      if ((dark[i] && dist[i] > 0 && dist[i] <= 3) || (chromatic[i] && chromaDist[i] > 0 && chromaDist[i] <= 3)) {
+      if ((dark[i] && dist[i] > 0 && dist[i] <= strokeR) || (chromatic[i] && chromaDist[i] > 0 && chromaDist[i] <= strokeR)) {
         stroke[i] = 1; thinDark++;
       }
     }
@@ -521,17 +528,19 @@
     const active = whiteFraction > 0.08 && edgeFraction > 0.015 && strokeFraction > 0.004 && score >= 0.45;
     return {
       stroke, dark, darkCore, ink, dist, score, active,
-      edgeFraction, whiteFraction, darkFraction, veryDarkFraction, strokeFraction
+      edgeFraction, whiteFraction, darkFraction, veryDarkFraction, strokeFraction,
+      radii: { strokeR, fringeR, repairR, growPx, lineWidthPx }
     };
   }
 
-  function repairLineGaps(lab, lineInfo, flatMask, nearest, familyId, lineDirect, lineProtectMask, w, h, printMask, families, palette) {
+  function repairLineGaps(lab, lineInfo, flatMask, nearest, familyId, lineDirect, lineProtectMask, w, h, printMask, families, palette, manualLock) {
     if (!lineProtectMask) return;
     const addFlat = new Uint8Array(flatMask), addNearest = new Uint16Array(nearest), addFamily = new Int16Array(familyId);
     const addDirect = lineDirect ? new Uint8Array(lineDirect) : null, addProtect = new Uint8Array(lineProtectMask);
     const directions = [[1, 0], [0, 1], [1, 1], [1, -1], [-1, 1], [-1, -1], [-1, 0], [0, -1]];
+    const repairR = lineInfo.radii ? lineInfo.radii.repairR : 4;
     const find = (x, y, dx, dy) => {
-      for (let step = 1; step <= 4; step++) {
+      for (let step = 1; step <= repairR; step++) {
         const xx = x + dx * step, yy = y + dy * step;
         if (xx < 0 || xx >= w || yy < 0 || yy >= h) return -1;
         const j = yy * w + xx;
@@ -560,7 +569,7 @@
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         const i = y * w + x;
-        if (lineProtectMask[i] || (!lineInfo.ink[i] && lab[i * 3] >= 90) || (printMask && !printMask[i])) continue;
+        if ((manualLock && manualLock[i]) || lineProtectMask[i] || (!lineInfo.ink[i] && lab[i * 3] >= 90) || (printMask && !printMask[i])) continue;
         for (const [dx, dy] of directions) {
           const a = find(x, y, dx, dy), b = find(x, y, -dx, -dy);
           if (a < 0 || b < 0) continue;
@@ -1727,7 +1736,7 @@
   // Here a region means one actual printable assignment: flat filament or
   // gradient family. Small regions are absorbed by the closest-colour neighbour,
   // using shared border as a tie-break and stable/large targets to avoid cycles.
-  function mergeSmallRegions(flatMask, nearest, familyId, lab, families, palette, w, h, minAreaPx, eligibleMask, protectedMask) {
+  function mergeSmallRegions(flatMask, nearest, familyId, lab, families, palette, w, h, minAreaPx, eligibleMask, protectedMask, manualLock) {
     const n = w * h;
     const result = { mergedPixels: 0, mergedComponents: 0, passes: 0, converged: true };
     if (!(minAreaPx > 1)) return result;
@@ -1752,6 +1761,7 @@
           sumL += lab[i * 3]; sumA += lab[i * 3 + 1]; sumB += lab[i * 3 + 2];
           if (eligibleMask && !eligibleMask[i]) eligible = 0;
           if (protectedMask && protectedMask[i]) protectedComp = 1;
+          if (manualLock && manualLock[i]) eligible = 0;
           const x = i % w, y = (i / w) | 0;
           minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y);
           for (let dy = -1; dy <= 1; dy++) {
@@ -2019,7 +2029,7 @@
     const lineMode = (options.lineProtect === 'strong' || options.lineProtect === 'off') ? options.lineProtect : 'auto';
     // Detection is cheap and runs every time: the UI can explain why a
     // sticker got line protection and a photo did not.
-    const lineInfo = buildStrokeInfo(lab, alpha, w, h);
+    const lineInfo = buildStrokeInfo(lab, alpha, w, h, { pixelSize, lineWidthMm: Number(options.lineWidthMm) || 0.42 });
     const lineActive = lineMode !== 'off' && (lineMode === 'strong' || lineInfo.active);
     lineInfo.applied = lineActive;
     lineInfo.mode = lineMode;
@@ -2030,15 +2040,15 @@
     let lineProtectMask = lineActive ? new Uint8Array(lineInfo.stroke) : null;
     if (lineActive) for (let i = 0; i < n; i++) if (lineInfo.darkCore[i]) lineProtectMask[i] = 1;
     let lineDirect = null;
-    if (lineActive && lineMode === 'strong' && !options.maskOverride) {
+    if (lineActive && lineMode === 'strong') {
       lineDirect = new Uint8Array(n);
       for (let i = 0; i < n; i++) {
         if ((lineInfo.stroke[i] && (lab[i * 3] < 55 || Math.hypot(lab[i * 3 + 1], lab[i * 3 + 2]) >= 12)) || lineInfo.darkCore[i]) lineDirect[i] = 1;
       }
-      // One pixel of growth into the surrounding dark ink reaches a stripe
-      // width that a 0.4 mm nozzle can actually lay down. Without it a 1 px
-      // source outline becomes a dashed line no matter how good the recipes.
-      const grown = dilate(lineDirect, w, h, 1);
+      // Grow by a physical fraction of one line width so a 1 px source outline
+      // reaches a stripe the nozzle can actually lay down. The radius is
+      // derived from lineWidthMm / pixelSize, not a fixed pixel count.
+      const grown = dilate(lineDirect, w, h, lineInfo.radii.growPx);
       for (let i = 0; i < n; i++) {
         if (!lineDirect[i] && grown[i] && lineInfo.ink[i]) lineDirect[i] = 1;
       }
@@ -2056,8 +2066,9 @@
         if (lineDirect[i] || !lineInfo.stroke[i] || !lineInfo.ink[i] || lab[i * 3] >= 90) continue;
         const x = i % w, y = (i / w) | 0;
         const votes = new Map();
-        for (let yy = Math.max(0, y - 3); yy <= Math.min(h - 1, y + 3); yy++) {
-          for (let xx = Math.max(0, x - 3); xx <= Math.min(w - 1, x + 3); xx++) {
+        const fr = lineInfo.radii.fringeR;
+        for (let yy = Math.max(0, y - fr); yy <= Math.min(h - 1, y + fr); yy++) {
+          for (let xx = Math.max(0, x - fr); xx <= Math.min(w - 1, x + fr); xx++) {
             const j = yy * w + xx;
             if (!accepted[j]) continue;
             const fi = nearest[j];
@@ -2083,6 +2094,24 @@
         lineActive ? lab : null, lineActive ? 11 : 0);
     }
     if (lineDirect) for (let i = 0; i < n; i++) if (lineDirect[i]) flatMask[i] = 1;
+    // Manual brush edits win only where the user actually painted; the rest of
+    // the image keeps automatic strong-line direct printing.
+    let manualPaintPixels = 0;
+    if (options.manualMask && options.manualMask.length === n) {
+      const src = options.maskOverride && options.maskOverride.length === n ? options.maskOverride : null;
+      for (let i = 0; i < n; i++) {
+        if (!options.manualMask[i]) continue;
+        const wantFlat = src ? !!src[i] : true;
+        flatMask[i] = wantFlat ? 1 : 0;
+        if (!wantFlat) {
+          if (lineDirect) lineDirect[i] = 0;
+          if (lineProtectMask) lineProtectMask[i] = 0;
+        } else {
+          nearest[i] = nearestPalette(labAt(lab, i), palette);
+        }
+        manualPaintPixels++;
+      }
+    }
 
     const flatLayers = Math.max(2, Math.round(flatTopMm / layerHeight));
     const reliefLayers = Math.round(reliefMm / layerHeight);
@@ -2225,7 +2254,7 @@
         familyPixels = new Uint32Array(families.length);
         for (let i = 0; i < n; i++) if (!flatMask[i] && familyId[i] >= 0) familyPixels[familyId[i]]++;
       }
-      repairLineGaps(lab, lineInfo, flatMask, nearest, familyId, lineDirect, lineProtectMask, w, h, printMask, families, palette);
+      repairLineGaps(lab, lineInfo, flatMask, nearest, familyId, lineDirect, lineProtectMask, w, h, printMask, families, palette, options.manualMask);
       const lineDirectFilament = lineDirect ? new Uint16Array(nearest) : null;
       if (snapMask) {
         familyId = snapEdgeFamilies(lab, flatMask, familyId, snapMask, lineProtectMask, families, w, h, Math.max(1, edgeCleanLevel));
@@ -2400,7 +2429,7 @@
         // guarantee a minimum connected component, especially at mask edges.
         const minAreaPx = Math.max(2, Math.round(Math.PI * (cleanupFeatureMm / 2) ** 2 / (pixelSize * pixelSize)));
         const edgeOnly = !physicalCleanup && !options.vectorFlat && edgeCleanLevel > 0 && edgeCleanLevel < 3;
-        structureCleanup = mergeSmallRegions(flatMask, nearest, familyId, lab, families, palette, w, h, minAreaPx, edgeOnly ? edgeMask : null, lineProtectMask);
+        structureCleanup = mergeSmallRegions(flatMask, nearest, familyId, lab, families, palette, w, h, minAreaPx, edgeOnly ? edgeMask : null, lineProtectMask, options.manualMask);
         structureCleanup.minAreaPx = minAreaPx;
         structureCleanup.featureMm = cleanupFeatureMm;
         structureCleanup.edgeOnly = edgeOnly;
@@ -2462,7 +2491,7 @@
       if (smoothMm > 0 && physSmooth.familyR > 0) {
         const featureMm = lineWidthMm * 2;
         const minAreaPx = Math.max(2, Math.round(Math.PI * (featureMm / 2) ** 2 / (pixelSize * pixelSize)));
-        structureCleanup = mergeSmallRegions(flatMask, nearest, familyId, lab, families, palette, w, h, minAreaPx, null, lineProtectMask);
+        structureCleanup = mergeSmallRegions(flatMask, nearest, familyId, lab, families, palette, w, h, minAreaPx, null, lineProtectMask, options.manualMask);
         structureCleanup.minAreaPx = minAreaPx;
         structureCleanup.featureMm = featureMm;
         flatCount = 0;
@@ -2657,6 +2686,7 @@
     const outOfGamutPercent = gradCount > 0 ? outGamutPixels / gradCount * 100 : 0;
     const diagnostics = {
       fill: { filledPixels: flatFillStats.filled, rejectedPixels: flatFillStats.rejected },
+      manualPixels: manualPaintPixels,
       coverage: {
         topLayers: flatTopLayers,
         baseLayers: flatBaseLayers,
