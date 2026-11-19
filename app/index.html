@@ -151,6 +151,8 @@
 
     <section class="card">
       <div class="card-head"><h2>区域策略</h2><span class="tiny">纯色 vs 渐变</span></div>
+      <details class="advanced-params">
+      <summary>高级参数 · 区域策略（通常保持默认）</summary>
       <label class="slider-field"><span>平整阈值 <b id="stdValue">自动</b></span><input type="range" id="stdThreshold" min="0" max="8" step="0.1" value="0"><em>低 → 更多区域走层叠渐变；高 → 更多区域直接纯色</em></label>
       <label class="slider-field"><span>配色残差 <b id="resValue">5.0 ΔE</b></span><input type="range" id="residualThreshold" min="1" max="12" step="0.5" value="5"><em>纯色区颜色与最近耗材的最大允许差</em></label>
       <label class="slider-field"><span>纯色区最小面积 <b id="areaValue">0.6%</b></span><input type="range" id="minFlatPercent" min="0.1" max="5" step="0.1" value="0.6"><em>过滤零碎的同色块，避免满图纯色补丁</em></label>
@@ -161,6 +163,7 @@
         <span><b>矢量化色块直印</b><small>把面积大、颜色均匀的色族改成整块纯色；适合贴纸/扁平插画，能去掉分层首层的红蓝噪点。开启后还用圆形加权投票收敛区域轮廓；直印区统一到纯色区顶高；照片/渐变画勿用。</small></span>
         <input type="checkbox" id="vectorFlat">
       </label>
+      </details>
       <label class="field" id="lineProtectField">
         <span>线稿保护 <em id="lineStatus">自动检测</em></span>
         <select id="lineProtect">

@@ -1083,6 +1083,6 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
 
   CS.exporter = {
     build3MFBytes, build3MFBytesAsync, build3MFBlob, build3MFBlobAsync, planSummary, buildPlanMarkdown, samplePlane, buildPrisms,
-    traceLoops, simplifyLoop, loopArea, pointInLoop, meshPrism, exportGridFor, exportReport
+    traceLoops, simplifyLoop, loopArea, pointInLoop, meshPrism, exportGridFor, exportReport, buildLayerMasks
   };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

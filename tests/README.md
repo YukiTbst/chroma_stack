@@ -37,6 +37,7 @@ node tests/test-region-audit.mjs # 空间regionId；共底只连相邻色族；�
 node tests/test-sensitivity.mjs # HD ±10% 情景敏感度：对比基底薄层最敏感；诊断取最差配方
 node tests/test-presets.mjs # 用途预设字段、贴纸等高、像素模式关闭吸附/补线、UI 接线
 node tests/test-worker.mjs # 经典 Worker 契约：importScripts、返回可克隆 plan、错误回传
+node tests/test-contracts.mjs # T07 派生高度/颜色、T08 原生预览=导出材料、T12 AA 中性、T14 分辨率不变性、T15 确定性
 node tests/test-line-gap-guard.mjs # 强保护不得把横穿黑线的肤色带涂黑；同色相浅色缺口仍可桥接
 node tests/test-line-mask.mjs # 手绘只锁定涂改像素；掩膜快照不再全局关闭强线稿；线宽半径按 mm 换算
 ```

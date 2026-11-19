@@ -2703,9 +2703,9 @@
     let sumDE = 0, sumDE2 = 0, maxDE = 0;
     let flatBadPixels = 0, flatMaxDE = 0;
     const groupStats = {
-      line: { pixels: 0, sum: 0, max: 0 },
-      flat: { pixels: 0, sum: 0, max: 0 },
-      gradient: { pixels: 0, sum: 0, max: 0 }
+      line: { pixels: 0, sum: 0, max: 0, hist: new Uint32Array(101) },
+      flat: { pixels: 0, sum: 0, max: 0, hist: new Uint32Array(101) },
+      gradient: { pixels: 0, sum: 0, max: 0, hist: new Uint32Array(101) }
     };
     const hist = new Uint32Array(101);
     let under2 = 0, under5 = 0, under10 = 0, validPixels = 0, colorStatPixels = 0;
@@ -2726,7 +2726,7 @@
       const de = C.deltaE2000(labAt(lab, i), predicted[i].lab);
       const groupName = (lineDirect && lineDirect[i]) ? 'line' : flatMask[i] ? 'flat' : 'gradient';
       const gs = groupStats[groupName];
-      gs.pixels++; gs.sum += de; if (de > gs.max) gs.max = de;
+      gs.pixels++; gs.sum += de; if (de > gs.max) gs.max = de; gs.hist[Math.min(100, Math.round(de))]++;
       sumDE += de; sumDE2 += de * de; if (de > maxDE) maxDE = de;
       hist[Math.min(100, Math.round(de))]++;
       if (de <= 2) under2++; if (de <= 5) under5++; if (de <= 10) under10++;
@@ -2846,6 +2846,16 @@
       if (se > sensWorst) { sensWorst = se; sensHex = f.targetHex; }
       if (se > 5) sensOver5++;
     }
+    const groupSummary = (gs) => {
+      let cum = 0, p90 = 0;
+      for (let d = 0; d <= 100; d++) { cum += gs.hist[d]; if (cum >= gs.pixels * 0.9) { p90 = d; break; } }
+      return {
+        pixels: gs.pixels,
+        meanDE: gs.pixels ? +(gs.sum / gs.pixels).toFixed(2) : 0,
+        p90,
+        maxDE: +gs.max.toFixed(2)
+      };
+    };
     const diagnostics = {
       sensitivity: { frac: 0.1, worstDE: +sensWorst.toFixed(2), worstHex: sensHex, familiesOver5: sensOver5 },
       fill: { filledPixels: flatFillStats.filled, rejectedPixels: flatFillStats.rejected },
@@ -2863,9 +2873,9 @@
         maxDE: +flatMaxDE.toFixed(2)
       },
       groups: {
-        line: { pixels: groupStats.line.pixels, meanDE: groupStats.line.pixels ? +(groupStats.line.sum / groupStats.line.pixels).toFixed(2) : 0, maxDE: +groupStats.line.max.toFixed(2) },
-        flat: { pixels: groupStats.flat.pixels, meanDE: groupStats.flat.pixels ? +(groupStats.flat.sum / groupStats.flat.pixels).toFixed(2) : 0, maxDE: +groupStats.flat.max.toFixed(2) },
-        gradient: { pixels: groupStats.gradient.pixels, meanDE: groupStats.gradient.pixels ? +(groupStats.gradient.sum / groupStats.gradient.pixels).toFixed(2) : 0, maxDE: +groupStats.gradient.max.toFixed(2) }
+        line: groupSummary(groupStats.line),
+        flat: groupSummary(groupStats.flat),
+        gradient: groupSummary(groupStats.gradient)
       }
     };
     const warnings = [];
