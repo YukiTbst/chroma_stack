@@ -69,7 +69,11 @@
     brushMode: 'flat',
     brushSize: 18,
     overrideMask: null,
-    overrideBase: null,
+    // Sparse persistent manual locks: positions and painted values are stored
+    // independently of any automatic segmentation, so parameter changes never
+    // freeze unpainted pixels and never forget a painted lock.
+    lockMask: null,
+    lockValue: null,
     useMode: 'custom',
     edgeSnap: true,
     lineRepair: true,
@@ -421,8 +425,7 @@
     state.imageName = name || '未命名';
     state.plan = null;
     state.layer = 0;
-    state.overrideMask = null; state.overrideBase = null;
-    state.undo = [];
+    clearManualEdits();
     state.previewSrc = previewSrc || (canvas.toDataURL ? canvas.toDataURL('image/jpeg', 0.86) : '');
     const thumb = $('previewThumb');
     thumb.src = state.previewSrc;
@@ -499,14 +502,15 @@
 
   /* ---------------- analysis ---------------- */
   function buildOptions() {
-    const mask = state.overrideMask;
-    // Sparse manual lock: only pixels the user actually changed relative to the
-    // automatic mask. Everything else keeps line protection and cleaning.
-    let manualMask = null;
-    if (mask && state.overrideBase && state.overrideBase.length === mask.length) {
-      manualMask = new Uint8Array(mask.length);
-      for (let i = 0; i < mask.length; i++) if (mask[i] !== state.overrideBase[i]) manualMask[i] = 1;
-    }
+    // Sparse manual locks: only pixels the user actually painted override the
+    // fresh automatic mask. Positions (lockMask) and values (lockValue) are
+    // stored independently, so a paint that matches the current automatic
+    // value still locks the pixel, and unpainted pixels always follow the
+    // current parameters instead of a stale full-image snapshot.
+    const n = state.imageData ? state.imageData.width * state.imageData.height : 0;
+    const locks = n > 0 && state.lockMask && state.lockMask.length === n ? state.lockMask : null;
+    const manualMask = locks || undefined;
+    const mask = locks ? state.lockValue : undefined;
     if (state.engine === 'lut') {
       return {
         engine: 'lut', lutKey: state.lutKey, widthMm: state.widthMm,
@@ -584,8 +588,7 @@
 
   function markDirty(clearMask) {
     if (clearMask) {
-      state.overrideMask = null; state.overrideBase = null;
-      state.undo = [];
+      clearManualEdits();
     }
     state.editVersion++;
     state.dirty = true;
@@ -664,7 +667,7 @@
         state.layer = clamp(state.layer, 0, Math.max(0, plan.maxLayers - 1));
         updateAfterPlan();
         updateDirtyUI();
-        if (state.brushOn && !state.overrideMask) { state.overrideMask = new Uint8Array(plan.flatMask); state.overrideBase = new Uint8Array(plan.flatMask); }
+        rebaseBrushCanvas(plan);
       } catch (err) {
         if (request !== state.analysisRequest) return;
         console.error(err);
@@ -777,8 +780,7 @@
     const ok = addFilamentToTd(entry);
     if (!ok) return;
     if (state.engine === 'lut') setEngine('td', false);
-    state.overrideMask = null; state.overrideBase = null;
-    state.undo = [];
+    clearManualEdits();
     renderPalette();
     markDirty(false);
     toast(`已加入 ${entry.name}（TD ${entry.td}）`);
@@ -794,8 +796,7 @@
     const ok = addFilamentToTd(entry);
     if (!ok) return;
     if (state.engine === 'lut') setEngine('td', false);
-    state.overrideMask = null; state.overrideBase = null;
-    state.undo = [];
+    clearManualEdits();
     renderPalette();
     markDirty(false);
     toast(`已加入 ${entry.name}；点击计算后统一应用`);
@@ -808,8 +809,7 @@
     state.tdPalette = list;
     state.foundationIndex = Math.max(0, list.findIndex(p => /white|jade/i.test(p.name)));
     if (state.engine === 'lut') setEngine('td', false);
-    state.overrideMask = null; state.overrideBase = null;
-    state.undo = [];
+    clearManualEdits();
     renderPalette();
     markDirty(false);
     toast(`已按画面推荐 ${list.length} 个拓竹 PLA Basic 配色`);
@@ -819,8 +819,7 @@
   function setEngine(engine, doAnalyze = true) {
     if (state.engine === engine) return;
     state.engine = engine;
-    state.overrideMask = null; state.overrideBase = null;
-    state.undo = [];
+    clearManualEdits();
     updateEngineUI();
     renderPalette();
     if (doAnalyze) markDirty(false);
@@ -1468,22 +1467,67 @@
     return { x, y, rect, p };
   }
 
+  /* Manual edits are sparse persistent locks. overrideMask is only the brush
+     display canvas (rebased to the final plan after every computation);
+     lockMask/lockValue carry the painted positions and values across
+     recomputes, image-independent of any automatic result. */
+  function clearManualEdits() {
+    state.overrideMask = null;
+    state.lockMask = null;
+    state.lockValue = null;
+    state.undo = [];
+  }
+
+  function ensureBrushCanvas() {
+    if (state.plan && !state.overrideMask) state.overrideMask = new Uint8Array(state.plan.flatMask);
+  }
+
+  function ensureLockArrays(p) {
+    const n = p.w * p.h;
+    if (!state.lockMask || state.lockMask.length !== n) { state.lockMask = new Uint8Array(n); state.lockValue = new Uint8Array(n); }
+  }
+
+  function rebaseBrushCanvas(plan) {
+    // The final plan already contains every lock; the 2D mask readout must
+    // show exactly that, not a stale pre-computation snapshot.
+    if (state.overrideMask || state.brushOn) state.overrideMask = new Uint8Array(plan.flatMask);
+  }
+
+  function snapshotUndo() {
+    ensureBrushCanvas();
+    state.undo.push({
+      mask: state.overrideMask ? new Uint8Array(state.overrideMask) : null,
+      locks: state.lockMask ? new Uint8Array(state.lockMask) : null,
+      values: state.lockValue ? new Uint8Array(state.lockValue) : null
+    });
+    if (state.undo.length > 14) state.undo.shift();
+  }
+
+  function applyPaint(p, cx, cy, radiusWork, val) {
+    ensureBrushCanvas();
+    ensureLockArrays(p);
+    const x0 = Math.max(0, Math.floor(cx - radiusWork)), x1 = Math.min(p.w - 1, Math.ceil(cx + radiusWork));
+    const y0 = Math.max(0, Math.floor(cy - radiusWork)), y1 = Math.min(p.h - 1, Math.ceil(cy + radiusWork));
+    const r2 = radiusWork * radiusWork;
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const dx = x + 0.5 - cx, dy = y + 0.5 - cy;
+        if (dx * dx + dy * dy <= r2) {
+          const i = y * p.w + x;
+          state.overrideMask[i] = val;
+          state.lockMask[i] = 1;
+          state.lockValue[i] = val;
+        }
+      }
+    }
+  }
+
   function paintAt(evt) {
     const pt = canvasPoint(evt);
     if (!pt) return;
     const p = pt.p;
-    if (!state.overrideMask) { state.overrideMask = new Uint8Array(p.flatMask); state.overrideBase = new Uint8Array(p.flatMask); }
     const radiusWork = Math.max(1, (state.brushSize / 2) * (p.w / pt.rect.width));
-    const val = state.brushMode === 'flat' ? 1 : 0;
-    const x0 = Math.max(0, Math.floor(pt.x - radiusWork)), x1 = Math.min(p.w - 1, Math.ceil(pt.x + radiusWork));
-    const y0 = Math.max(0, Math.floor(pt.y - radiusWork)), y1 = Math.min(p.h - 1, Math.ceil(pt.y + radiusWork));
-    const r2 = radiusWork * radiusWork;
-    for (let y = y0; y <= y1; y++) {
-      for (let x = x0; x <= x1; x++) {
-        const dx = x + 0.5 - pt.x, dy = y + 0.5 - pt.y;
-        if (dx * dx + dy * dy <= r2) state.overrideMask[y * p.w + x] = val;
-      }
-    }
+    applyPaint(p, pt.x, pt.y, radiusWork, state.brushMode === 'flat' ? 1 : 0);
     renderStage();
   }
 
@@ -1492,9 +1536,8 @@
     if (state.backgroundPick) { evt.preventDefault(); pickBackgroundAt(evt); return; }
     if (!state.brushOn || !state.plan) return;
     evt.preventDefault();
-    if (!state.overrideMask) { state.overrideMask = new Uint8Array(state.plan.flatMask); state.overrideBase = new Uint8Array(state.plan.flatMask); }
-    state.undo.push(new Uint8Array(state.overrideMask));
-    if (state.undo.length > 14) state.undo.shift();
+    ensureBrushCanvas();
+    snapshotUndo();
     markDirty(false);
     painting = true;
     $('stageCanvas').setPointerCapture && $('stageCanvas').setPointerCapture(evt.pointerId);
@@ -1519,14 +1562,16 @@
 
   function undoBrush() {
     if (!state.undo.length) { toast('没有可撤销的修整'); return; }
-    state.overrideMask = state.undo.pop();
+    const u = state.undo.pop();
+    state.overrideMask = u.mask;
+    state.lockMask = u.locks;
+    state.lockValue = u.values;
     markDirty(false);
     toast('已撤销一笔区域修整');
   }
 
   function clearBrush() {
-    state.overrideMask = null; state.overrideBase = null;
-    state.undo = [];
+    clearManualEdits();
     markDirty(false);
     toast('已清除手绘修整，回到自动分区');
   }
@@ -1558,7 +1603,7 @@
     $('btnSyntheticSample').addEventListener('click', (e) => { e.stopPropagation(); makeSyntheticSample(); });
 
     document.querySelectorAll('#engineSwitch button').forEach(b => b.addEventListener('click', () => setEngine(b.dataset.engine)));
-    $('lutSelect').addEventListener('change', (e) => { state.lutKey = e.target.value; state.overrideMask = null; state.overrideBase = null; state.undo = []; renderPalette(); markDirty(false); });
+    $('lutSelect').addEventListener('change', (e) => { state.lutKey = e.target.value; clearManualEdits(); renderPalette(); markDirty(false); });
     $('widthMm').addEventListener('input', (e) => {
       state.widthMm = clamp(Number(e.target.value) || 150, 40, 400);
       state.backgroundHoleIds.clear(); state.backgroundHolePick = false;
@@ -2268,6 +2313,11 @@
   $('mergeValue').textContent = '4.0';
 
   window.__chromastack = { state, CS };
+
+  // Automated-acceptance handle: the real state, option builder and brush
+  // primitives so tests can run state -> buildOptions -> buildPlan end to end
+  // without a browser. Internal diagnostics only, not a user-facing feature.
+  CS.appDebug = { state, buildOptions, ensureBrushCanvas, applyPaint, snapshotUndo, undoBrush, clearBrush, clearManualEdits, rebaseBrushCanvas };
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

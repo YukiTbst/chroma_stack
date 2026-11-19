@@ -1658,14 +1658,14 @@
     return { label, compArea };
   }
 
-  function forceVectorBoundaries(lab, flatMask, nearest, familyId, families, palette, w, h, minAnchorPx, protect, band) {
+  function forceVectorBoundaries(lab, flatMask, nearest, familyId, families, palette, w, h, minAnchorPx, protect, band, manualLock) {
     const labeled = labelFamilyComponents(familyId, flatMask, w, h);
     const label = labeled.label, compArea = labeled.compArea;
     let changed = 0;
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         const i = y * w + x;
-        if (!band[i] || flatMask[i] || (protect && protect[i])) continue;
+        if (!band[i] || flatMask[i] || (protect && protect[i]) || (manualLock && manualLock[i])) continue;
         const l = labAt(lab, i);
         let bestKind = 0, bestIdx = -1, bestD = Infinity, bestCount = 0;
         for (let r = 1; r <= 4 && !bestKind; r++) {
@@ -1710,7 +1710,7 @@
     return changed;
   }
 
-  function mergeSmallFamilyComponents(familyId, flatMask, nearest, families, w, h, minAreaPx, edgeMask, protect) {
+  function mergeSmallFamilyComponents(familyId, flatMask, nearest, families, w, h, minAreaPx, edgeMask, protect, manualLock) {
     const n = w * h;
     const label = new Int32Array(n).fill(-1);
     const compArea = [];
@@ -1749,6 +1749,7 @@
     for (let i = 0; i < n; i++) {
       const cid = label[i];
       if (cid < 0 || compArea[cid] >= minAreaPx) continue;
+      if (manualLock && manualLock[i]) continue;
       // Only edge-only islands (no core pixel outside the anti-alias band)
       // are removed. A small but genuine fill (red ribbon, eye highlight)
       // always has a core and is preserved.
@@ -1901,7 +1902,7 @@
     return result;
   }
 
-  function smoothUnifiedRegions(flatMask, nearest, familyId, printMask, w, h, radius, protect, lab, families, palette) {
+  function smoothUnifiedRegions(flatMask, nearest, familyId, printMask, w, h, radius, protect, lab, families, palette, manualLock) {
     const n = w * h;
     let srcFlat = new Uint8Array(flatMask), srcNearest = new Uint16Array(nearest), srcFamily = new Int16Array(familyId);
     const passes = radius > 1 ? 2 : 1;
@@ -1913,6 +1914,7 @@
         for (let x = 0; x < w; x++) {
           const i = y * w + x;
           if (printMask && !printMask[i]) continue;
+          if (manualLock && manualLock[i]) continue;
           const protectedCenter = !!(protect && protect[i]);
           const votes = new Map();
           for (let yy = Math.max(0, y - radius); yy <= Math.min(h - 1, y + radius); yy++) {
@@ -2147,7 +2149,13 @@
     const auto = buildFlatMask(lab, w, h, palette, options);
     stds = auto.stds; residual = auto.residual; nearest = auto.nearest; stdT = auto.stdT; resT = auto.resT;
     const flatFillStats = auto.fillStats || { filled: 0, rejected: 0 };
-    if (options.maskOverride && options.maskOverride.length === n) flatMask = new Uint8Array(options.maskOverride);
+    // With sparse manual locks, always start from this run's automatic
+    // segmentation: the override only supplies values at painted pixels, so
+    // unpainted pixels follow the current parameters instead of freezing an
+    // old full-image snapshot. A full-mask override without locks remains an
+    // explicit whole-image mode (used by direct API callers and tests).
+    if (options.manualMask && options.manualMask.length === n) flatMask = auto.mask;
+    else if (options.maskOverride && options.maskOverride.length === n) flatMask = new Uint8Array(options.maskOverride);
     else flatMask = auto.mask;
     const smoothLevel = clamp(Math.round(Number(options.smoothLevel) || 0), 0, 4);
     const lineMode = (options.lineProtect === 'strong' || options.lineProtect === 'off') ? options.lineProtect : 'auto';
@@ -2450,6 +2458,9 @@
           const pi = directPi[f0];
           for (let k = 0; k < cnt; k++) {
             const idx = cells[k];
+            // A painted gradient lock keeps its recipe even inside a large
+            // colour-uniform region that is otherwise vector-converted.
+            if (options.manualMask && options.manualMask[idx]) continue;
             flatMask[idx] = 1;
             nearest[idx] = pi;
             familyId[idx] = -1;
@@ -2476,7 +2487,7 @@
         // recipe layer does not get a fringe of red/blue speckles.
         const minAreaMm2 = (lineWidthMm * 2) ** 2 * 0.9;
         const minAreaPx = Math.max(6, Math.round(minAreaMm2 / (pixelSize * pixelSize)));
-        const islands = mergeSmallFamilyComponents(familyId, flatMask, nearest, families, w, h, minAreaPx, edgeMask, lineProtectMask);
+        const islands = mergeSmallFamilyComponents(familyId, flatMask, nearest, families, w, h, minAreaPx, edgeMask, lineProtectMask, options.manualMask);
         if (islands.mergedPixels) {
           if (vectorInfo) { vectorInfo.islandsMerged = (vectorInfo.islandsMerged || 0) + 1; vectorInfo.islandPixels = (vectorInfo.islandPixels || 0) + islands.mergedPixels; }
           flatCount = 0;
@@ -2493,7 +2504,7 @@
         const band = buildEdgeMask(lab, w, h, 3);
         if (band) {
           const anchorPx = Math.max(8, Math.round(((lineWidthMm * 2) ** 2) / (pixelSize * pixelSize)));
-          const forced = forceVectorBoundaries(lab, flatMask, nearest, familyId, families, palette, w, h, anchorPx, lineProtectMask, band);
+          const forced = forceVectorBoundaries(lab, flatMask, nearest, familyId, families, palette, w, h, anchorPx, lineProtectMask, band, options.manualMask);
           if (forced) {
             if (vectorInfo) vectorInfo.boundaryPixels = (vectorInfo.boundaryPixels || 0) + forced;
             flatCount = 0;
@@ -2503,7 +2514,7 @@
             for (let i = 0; i < n; i++) if (!flatMask[i] && familyId[i] >= 0) familyPixels[familyId[i]]++;
             for (let f = 0; f < families.length; f++) families[f].pixelCount = familyPixels[f] || 0;
             // One more conservative island pass for leftovers.
-            const leftovers = mergeSmallFamilyComponents(familyId, flatMask, nearest, families, w, h, anchorPx, band, lineProtectMask);
+            const leftovers = mergeSmallFamilyComponents(familyId, flatMask, nearest, families, w, h, anchorPx, band, lineProtectMask, options.manualMask);
             if (vectorInfo && leftovers.mergedPixels) {
               vectorInfo.islandsMerged = (vectorInfo.islandsMerged || 0) + 1;
               vectorInfo.islandPixels = (vectorInfo.islandPixels || 0) + leftovers.mergedPixels;
@@ -2533,7 +2544,7 @@
         // contours after edge/vector reassignment, without touching background
         // or allowing paper neighbours to cut into a protected stroke.
         const contourRadius = clamp((smoothMm > 0 ? physSmooth.flatR : 0) || Math.max(1, Math.round(lineWidthMm / pixelSize)), 1, 4);
-        const changed = smoothUnifiedRegions(flatMask, nearest, familyId, printMask, w, h, contourRadius, lineActive ? lineProtectMask : null, lab, families, palette);
+        const changed = smoothUnifiedRegions(flatMask, nearest, familyId, printMask, w, h, contourRadius, lineActive ? lineProtectMask : null, lab, families, palette, options.manualMask);
         if (vectorInfo) vectorInfo.contourPixels = (vectorInfo.contourPixels || 0) + changed;
         flatCount = 0;
         familyPixels = new Uint32Array(families.length);
@@ -2968,6 +2979,7 @@
       structureCleanup,
       mergeDeltaE: Number(options.mergeDeltaE) || 0,
       lineMode, lineApplied: lineActive, lineProtectMask, lineDirectMask: lineDirect,
+      manualMask: options.manualMask && options.manualMask.length === n ? options.manualMask : null,
       edgeClean: edgeCleanLevel, edgeCleanRequested, edgePixelPercent: n ? edgePixelCount / n * 100 : 0,
       supportAddedPixels, supportAddedLayers,
       heightMergeDeltaE: options.heightMergeDeltaE == null ? 1.5 : Number(options.heightMergeDeltaE),

@@ -45,6 +45,9 @@
     const familyId = new Int16Array(ew * eh);
     const printMask = plan.printMask ? new Uint8Array(ew * eh) : null;
     const lab = new Float32Array(ew * eh * 3);
+    // A coarse cell inherits the manual lock when any source pixel in its
+    // footprint is painted: export cleanup must not absorb a user lock.
+    const coarseLock = plan.manualMask ? new Uint8Array(ew * eh) : null;
     const hasSilhouette = !!(plan.background && plan.background.enabled);
     let sourcePixels = 0, changedPixels = 0;
     const canCleanup = !!(!hasSilhouette && plan.structureCleanup && plan.structureCleanup.minAreaPx > 1 && !plan.structureCleanup.edgeOnly &&
@@ -99,6 +102,7 @@
           for (let xx = x0[x]; xx < x1[x]; xx++) {
             const si = yy * plan.w + xx;
             if (plan.printMask && !plan.printMask[si]) continue;
+            if (coarseLock && plan.manualMask[si]) coarseLock[di] = 1;
             sourcePixels++;
             const key = plan.flatMask[si] ? plan.flatFilament[si] + 1 : -(plan.familyId[si] + 2);
             if (key !== best.key) changedPixels++;
@@ -114,7 +118,7 @@
       const pixelSize = plan.widthMm / ew;
       const featureMm = (Number(plan.lineWidthMm) || 0.42) * 2;
       const minAreaPx = Math.max(2, Math.round(Math.PI * (featureMm / 2) ** 2 / (pixelSize * pixelSize)));
-      structureCleanup = CS.engine.mergeSmallRegions(flatMask, flatFilament, familyId, lab, plan.families, plan.palette, ew, eh, minAreaPx, null);
+      structureCleanup = CS.engine.mergeSmallRegions(flatMask, flatFilament, familyId, lab, plan.families, plan.palette, ew, eh, minAreaPx, null, null, coarseLock);
       for (let i = 0; i < flatMask.length; i++) if (!flatMask[i]) flatFilament[i] = 0xffff;
     }
     return {
