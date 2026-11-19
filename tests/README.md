@@ -34,6 +34,7 @@ node tests/test-height-limit.mjs # 渐变最高高度只作上限：自然短配
 node tests/test-vector-components.mjs # 矢量化直印按连通分量判定：同色小岛不被大区域连带压平
 node tests/test-export-diagnostics.mjs # 导出网格单一真值；fill/coverage/线条·纯色·渐变分组诊断
 node tests/test-region-audit.mjs # 空间regionId；共底只连相邻色族；逐层小岛审计
+node tests/test-sensitivity.mjs # HD ±10% 情景敏感度：对比基底薄层最敏感；诊断取最差配方
 node tests/test-line-gap-guard.mjs # 强保护不得把横穿黑线的肤色带涂黑；同色相浅色缺口仍可桥接
 node tests/test-line-mask.mjs # 手绘只锁定涂改像素；掩膜快照不再全局关闭强线稿；线宽半径按 mm 换算
 ```

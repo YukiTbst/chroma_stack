@@ -947,6 +947,36 @@
     };
   }
 
+  function compositeLabScaled(bg, seq, palette, layerHeight, scaleOf) {
+    let cur = { r: bg.r, g: bg.g, b: bg.b };
+    for (const i of seq) {
+      const p = palette[i], fg = p.lin, s = scaleOf(i);
+      const Tr = stackTransmission(layerHeight, (p.hdR != null ? p.hdR : p.hd) * s);
+      const Tg = stackTransmission(layerHeight, (p.hdG != null ? p.hdG : p.hd) * s);
+      const Tb = stackTransmission(layerHeight, (p.hdB != null ? p.hdB : p.hd) * s);
+      cur = { r: fg.r * (1 - Tr) + cur.r * Tr, g: fg.g * (1 - Tg) + cur.g * Tg, b: fg.b * (1 - Tb) + cur.b * Tb };
+    }
+    return C.rgb01ToLab({ r: C.linearToSrgb(cur.r), g: C.linearToSrgb(cur.g), b: C.linearToSrgb(cur.b) });
+  }
+
+  /* Model sensitivity, not a measured confidence interval: perturb one
+     filament's HD by ±frac and report the largest resulting ΔE00. Used as a
+     diagnostic and as a tie-break only when callers opt in. */
+  function recipeSensitivity(seq, palette, bg, layerHeight, frac) {
+    const f = frac == null ? 0.1 : frac;
+    const nominal = compositeLab(bg, seq, palette, layerHeight).lab;
+    let worst = 0;
+    const distinct = new Set(seq);
+    for (const fi of distinct) {
+      for (const s of [1 - f, 1 + f]) {
+        const lab = compositeLabScaled(bg, seq, palette, layerHeight, i => i === fi ? s : 1);
+        const de = C.deltaE2000(nominal, lab);
+        if (de > worst) worst = de;
+      }
+    }
+    return worst;
+  }
+
   function paletteKey(p) {
     if (!p) return '';
     if (p.id) return 'id:' + p.id;
@@ -2803,7 +2833,17 @@
         deltaE: +f.deltaE.toFixed(2), suggested: suggestFilamentForLab(f.targetLab, palette)
       }));
     const outOfGamutPercent = gradCount > 0 ? outGamutPixels / gradCount * 100 : 0;
+    const sensBg = foundation ? foundation.lin : { r: 1, g: 1, b: 1 };
+    let sensWorst = 0, sensHex = null, sensOver5 = 0;
+    for (const f of families) {
+      if (!f.pixelCount || !f.recipe || !f.recipe.length) continue;
+      const se = recipeSensitivity(f.recipe, palette, sensBg, layerHeight, 0.1);
+      f.sensitivity = +se.toFixed(2);
+      if (se > sensWorst) { sensWorst = se; sensHex = f.targetHex; }
+      if (se > 5) sensOver5++;
+    }
     const diagnostics = {
+      sensitivity: { frac: 0.1, worstDE: +sensWorst.toFixed(2), worstHex: sensHex, familiesOver5: sensOver5 },
       fill: { filledPixels: flatFillStats.filled, rejectedPixels: flatFillStats.rejected },
       manualPixels: manualPaintPixels,
       regions: { count: regionCount },
@@ -2825,6 +2865,9 @@
       }
     };
     const warnings = [];
+    if (diagnostics.sensitivity.familiesOver5 > 0) {
+      warnings.push(`模型敏感度：${diagnostics.sensitivity.familiesOver5} 个渐变配方在 ±10% HD 情景下色差 >5 ΔE（最大 ${diagnostics.sensitivity.worstDE}，目标 ${diagnostics.sensitivity.worstHex}）。这是仿真情景，不是实测区间；可在这些区域降低透明料层数或补充标定。`);
+    }
     if (diagnostics.printAudit.belowMinIslands > 0) {
       warnings.push(`逐层小岛审计：${diagnostics.printAudit.belowMinIslands} 个小于 ${diagnostics.printAudit.minAreaMm2} mm² 的孤立材料块（第 ${diagnostics.printAudit.worstLayer} 层最多 ${diagnostics.printAudit.worstIslands} 个，${diagnostics.printAudit.stride > 1 ? '按 1/' + diagnostics.printAudit.stride + ' 采样' : '全分辨率'}）；可能打不出来或依赖支撑，切片预览请核对。`);
     }
@@ -3032,6 +3075,6 @@
     buildPlan, recommendPalette, buildLutPalette, buildUserPalette,
     imageToLab, filamentAt, compositeLinear, stackTransmission, localStd,
     autoStdThreshold, nearestLut, kmeansLab, mergeIneffectiveHeights, physicalSmoothParams,
-    mergeSmallRegions, buildPrintMask, buildStrokeInfo, buildTdGamut, gamutPenalty, gamutScore, matchGamut, mergeCommonBases, buildFamilyAdjacency
+    mergeSmallRegions, buildPrintMask, buildStrokeInfo, buildTdGamut, gamutPenalty, gamutScore, matchGamut, mergeCommonBases, buildFamilyAdjacency, recipeSensitivity
   };
 })(typeof globalThis !== 'undefined' ? globalThis : this);
