@@ -534,6 +534,24 @@
       }
       return -1;
     };
+    // Colour a protected endpoint would print. Direct strokes keep their
+    // assigned filament even before the flat mask is finalised.
+    const colorOf = (j) => {
+      if ((lineDirect && lineDirect[j]) || (lineProtectMask[j] && flatMask[j])) return palette[nearest[j]].lab;
+      if (familyId[j] >= 0) return families[familyId[j]].predictedLab;
+      return palette[nearest[j]].lab;
+    };
+    // A gap pixel may only join the stroke when it belongs to the same colour
+    // family: neutral strokes absorb neutral mid-tones, colour strokes absorb
+    // hue-compatible pixels. Real skin/fill crossing a black line stays skin.
+    const gapCompatible = (own, stroke) => {
+      if (own.L > stroke.L + 60) return false;
+      const sc = Math.hypot(stroke.a, stroke.b), oc = Math.hypot(own.a, own.b);
+      if (sc < 8) return oc < 8;
+      if (oc < 8) return false;
+      const dot = (own.a * stroke.a + own.b * stroke.b) / (sc * oc);
+      return dot >= 0.90 && oc <= sc * 1.6 + 4;
+    };
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         const i = y * w + x;
@@ -541,11 +559,17 @@
         for (const [dx, dy] of directions) {
           const a = find(x, y, dx, dy), b = find(x, y, -dx, -dy);
           if (a < 0 || b < 0) continue;
+          const ca = colorOf(a), cb = colorOf(b);
+          // Two different strokes must not be joined through unrelated pixels.
+          if (C.deltaE2000(ca, cb) > 12) continue;
+          const own = labAt(lab, i);
+          if (!gapCompatible(own, ca)) continue;
+          // Never overwrite a confident fill pixel with the stroke material.
+          if (flatMask[i] && nearest[i] !== nearest[a] && nearest[i] !== nearest[b] && C.deltaE2000(own, ca) > 15) continue;
           const stepA = Math.max(Math.abs(a % w - x), Math.abs(((a / w) | 0) - y));
           const stepB = Math.max(Math.abs(b % w - x), Math.abs(((b / w) | 0) - y));
           let source = stepA <= stepB ? a : b;
-          const la = lineProtectMask[a] && flatMask[a] ? palette[nearest[a]].lab.L : (familyId[a] >= 0 ? families[familyId[a]].predictedLab.L : Infinity);
-          const lb = lineProtectMask[b] && flatMask[b] ? palette[nearest[b]].lab.L : (familyId[b] >= 0 ? families[familyId[b]].predictedLab.L : Infinity);
+          const la = ca.L, lb = cb.L;
           if (la < lb) source = a; else if (lb < la) source = b;
           addFlat[i] = flatMask[source]; addNearest[i] = nearest[source]; addFamily[i] = familyId[source]; addProtect[i] = 1;
           if (addDirect && (lineDirect[a] || lineDirect[b])) addDirect[i] = 1;
