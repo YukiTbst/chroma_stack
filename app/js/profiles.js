@@ -7,6 +7,7 @@
   const CS = root.CS = root.CS || {};
   const ACTIVE_KEY = 'chromastack.active-profile.v1';
   const MIRROR_KEY = 'chromastack.offline-mirror.v1';
+  const DRAFT_KEY = 'chromastack.pending-drafts.v1';
   const LEGACY_KEY = 'chromastack.filament-calibrations.v1';
   const BACKUP_KEY = 'chromastack.calibration-backup.v1';
   const BASE_KEY = 'chromastack.api-base';
@@ -84,6 +85,36 @@
       const m = JSON.parse(raw);
       return m && m.data && typeof m.data === 'object' ? m : null;
     } catch (e) { return null; }
+  }
+
+  /* Persistent per-profile drafts. An offline edit (or clear) is recorded here
+     with the base revision it was made against, a monotonic edit version and
+     an operation type, so a restart can protect it before adopting server
+     data. Empty data with op='clear' is a pending clear, NOT "no draft". */
+  function readDrafts() {
+    try { const raw = lsGet(DRAFT_KEY); if (!raw) return {}; const m = JSON.parse(raw); return m && typeof m === 'object' ? m : {}; }
+    catch (e) { return {}; }
+  }
+  function readDraft(id) {
+    if (!id) return null;
+    const d = readDrafts()[id];
+    return d && d.data && typeof d.data === 'object' && d.op ? d : null;
+  }
+  function writeDraft(id, rec) {
+    if (!id) return;
+    const all = readDrafts();
+    all[id] = { baseRevision: rec.baseRevision == null ? null : rec.baseRevision, editVersion: rec.editVersion, data: clone(rec.data), op: rec.op, updatedAt: Date.now() };
+    lsSet(DRAFT_KEY, JSON.stringify(all));
+  }
+  function removeDraft(id, editVersion) {
+    if (!id) return;
+    const all = readDrafts();
+    const d = all[id];
+    if (!d) return;
+    // An older commit must not delete a newer draft that superseded it.
+    if (editVersion != null && d.editVersion !== editVersion) return;
+    delete all[id];
+    lsSet(DRAFT_KEY, JSON.stringify(all));
   }
 
   function backupActive(reason) {
@@ -188,9 +219,43 @@
       setActive(active.id);
       state.online = true;
       state.initialized = true;
-      state.revision = full.revision || 1;
+      const serverRev = full.revision || 1;
+      const serverData = full.data || emptyData();
+      const draft = readDraft(active.id);
+      if (draft) {
+        // Protect the persisted offline draft BEFORE adopting server data.
+        const sameContent = JSON.stringify(serverData) === JSON.stringify(draft.data);
+        const serverUnchanged = draft.baseRevision != null && draft.baseRevision === serverRev;
+        if (sameContent) {
+          removeDraft(active.id, draft.editVersion);
+          state.revision = serverRev; state.conflict = null;
+          state.lastData = clone(serverData); state.pending = null;
+          writeMirror(state.lastData); emit('synced', full.name);
+          return clone(state.lastData);
+        }
+        state.lastData = clone(draft.data);
+        state.pending = clone(draft.data);
+        state.pendingVersion = draft.editVersion;
+        state.editVersion = Math.max(state.editVersion, draft.editVersion);
+        writeMirror(state.lastData);
+        if (serverUnchanged) {
+          // Server unchanged since the draft: conditional commit on its base.
+          // A 409/offline outcome keeps the draft and is reported by runPush.
+          state.revision = serverRev;
+          state.conflict = null;
+          await pushPending(false);
+          return clone(state.lastData);
+        }
+        // Server changed (or base unknown) and content differs: keep both
+        // sides and enter conflict. Reading a new revision is not consent to
+        // overwrite the other device's calibration.
+        state.revision = serverRev;
+        enterConflict(draft.data, { revision: serverRev, name: full.name, updatedAt: full.updatedAt });
+        return clone(state.lastData);
+      }
+      state.revision = serverRev;
       state.conflict = null;
-      state.lastData = full.data || emptyData();
+      state.lastData = clone(serverData);
       writeMirror(state.lastData);
       emit('synced', full.name);
       return clone(state.lastData);
@@ -198,6 +263,19 @@
       state.online = false;
       state.initialized = true;
       state.activeId = pointer;
+      // A persisted draft is the freshest local intent: restore it as pending
+      // so a later reconnect commits it, and never let the mirror hide it.
+      const draft = readDraft(pointer);
+      if (draft) {
+        state.pending = clone(draft.data);
+        state.pendingVersion = draft.editVersion;
+        state.editVersion = Math.max(state.editVersion, draft.editVersion);
+        state.lastData = clone(draft.data);
+        state.revision = draft.baseRevision != null ? draft.baseRevision : null;
+        writeMirror(state.lastData);
+        emit('offline', '离线；本机草稿待联网提交');
+        return clone(state.lastData);
+      }
       const mirror = readMirror();
       let data = null, revision = null, mismatch = false;
       if (legacy) data = legacy;                       // still awaiting migration
@@ -309,6 +387,7 @@
         state.lastData = clone(ctx.data);
         state.pending = null;
         writeMirror(ctx.data);
+        removeDraft(ctx.profileId, ctx.draftVersion); // only this draft's commit clears it
         emit('synced', payload.name);
       } else {
         // A newer draft was edited while this one was in flight: keep it as
@@ -344,6 +423,7 @@
     if (state.conflict) state.conflict.data = clone(data);
     state.lastData = clone(data); // cached reads must reflect offline saves too
     writeMirror(state.pending);
+    if (state.activeId) writeDraft(state.activeId, { baseRevision: state.revision, editVersion: state.editVersion, data, op: 'write' });
     if (!state.conflict) schedulePush();
     return true;
   }
@@ -415,6 +495,7 @@
     const data = emptyData();
     state.editVersion++;
     state.pendingVersion = state.editVersion;
+    if (state.activeId) writeDraft(state.activeId, { baseRevision: state.revision, editVersion: state.editVersion, data, op: 'clear' });
     if (state.conflict) {
       state.pending = clone(data);
       state.conflict.data = clone(data);
@@ -453,6 +534,7 @@
       state.pending = null;
       state.conflict = null;
       writeMirror(state.lastData);
+      removeDraft(state.activeId); // user chose the server copy; the draft is resolved
       emit('synced', full.name);
       return clone(state.lastData);
     }
@@ -465,6 +547,7 @@
         state.pending = null;
         state.conflict = null;
         writeMirror(local);
+        removeDraft(state.activeId); // local draft committed by the user's choice
         emit('synced', p.name);
         return clone(local);
       } catch (e) {
@@ -481,7 +564,7 @@
   }
 
   CS.profiles = {
-    ACTIVE_KEY, MIRROR_KEY, LEGACY_KEY, BACKUP_KEY, BASE_KEY,
+    ACTIVE_KEY, MIRROR_KEY, LEGACY_KEY, BACKUP_KEY, BASE_KEY, DRAFT_KEY,
     init, save, flush, switchTo, create, rename, remove, clearActive, resolveConflict, backupActive, lastBackup, restoreBackup,
     list: () => state.profiles.slice(),
     activeId: () => state.activeId,
