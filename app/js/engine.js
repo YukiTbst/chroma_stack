@@ -2618,6 +2618,12 @@
       // visibly after a manual mask override). Apply the same nozzle-scale
       // island cleanup here instead of skipping it with the gradient branch.
       if (smoothMm > 0 && physSmooth.familyR > 0) {
+        // Same stage as the gradient branch: snapshot the line material right
+        // before cleanup so the consistency check below can revoke direct bits
+        // whose filament cleanup changed. The gradient branch keeps its own
+        // snapshot after gap repair; this branch never repairs, so the current
+        // nearest array is the correct pre-cleanup state.
+        const lineDirectFilament = lineDirect ? new Uint16Array(nearest) : null;
         const featureMm = lineWidthMm * 2;
         const minAreaPx = Math.max(2, Math.round(Math.PI * (featureMm / 2) ** 2 / (pixelSize * pixelSize)));
         structureCleanup = mergeSmallRegions(flatMask, nearest, familyId, lab, families, palette, w, h, minAreaPx, null, lineProtectMask, options.manualMask);
