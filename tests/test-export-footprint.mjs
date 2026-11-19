@@ -62,3 +62,24 @@ for (const n of edges.values()) if (n !== 2) badEdges++;
 assert.equal(badEdges, 0, 'prism is watertight');
 
 console.log(`all export-footprint checks passed (mode ${mode}, ${indices.length / 3} triangles, gap preserved)`);
+
+/* Fallback tiling must stay manifold even where cells touch only diagonally:
+   four walls used to weld into a 4-face vertical edge there. */
+const w2 = 10, h2 = 10;
+const mask2 = new Uint8Array(w2 * h2);
+for (let y = 1; y < 5; y++) for (let x = 1; x < 5; x++) mask2[y * w2 + x] = 1;   // block A
+for (let y = 5; y < 9; y++) for (let x = 5; x < 9; x++) mask2[y * w2 + x] = 1;   // block B (diagonal touch at 4,4)
+mask2[1 * w2 + 8] = 1; mask2[2 * w2 + 8] = 0;                                     // isolated-ish pixel
+const p2 = [], i2 = [];
+const mode2 = X.meshPrism(mask2, w2, h2, 1, 0, 1, p2, i2, true);
+assert.equal(mode2, 'fallback', 'forced tiling path is exercised');
+const edges2 = new Map();
+for (let i = 0; i < i2.length; i += 3) for (let k = 0; k < 3; k++) {
+  const a = i2[i + k], b = i2[i + (k + 1) % 3];
+  const key = a < b ? a + ',' + b : b + ',' + a;
+  edges2.set(key, (edges2.get(key) || 0) + 1);
+}
+let bad2 = 0;
+for (const n of edges2.values()) if (n !== 2) bad2++;
+assert.equal(bad2, 0, 'diagonal contact never creates >2-face edges in the tiling fallback');
+console.log(`fallback tiling stays 2-manifold across diagonal contacts (${i2.length / 3} triangles)`);

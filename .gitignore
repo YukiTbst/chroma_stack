@@ -3,6 +3,7 @@ research/
 
 # Generated calibration models, previews and test reports.
 tests/*.3mf
+/*.3mf
 tests/sample-plan.json
 tests/sample-plan.md
 app/previews/
