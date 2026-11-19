@@ -23,6 +23,10 @@ node tests/test-settings.mjs   # 标定快照纯度、profile 层委托、工程
 node tests/test-profile-api.mjs # 起真实 API 进程：CRUD/校验/原子写；浏览器层迁移、跨设备共享、离线镜像、删除回退
 node tests/test-batch-calibration.mjs # 单色/Z金字塔、四点透视、非不透明参考下的白平衡与实色/HD/TD联合拟合
 node tests/test-matrix-calibration.mjs # 100mm六色矩阵板：与已打印3MF元数据逐格对齐、透视+噪声+90°旋转/镜像下HD/实色/增益恢复、跨色格ΔE交叉验证
+node tests/test-detail-preserve.mjs # 默认面积门槛下 7.5mm 灰/肤色块不被填洞翻成纯色；近白噪声孔仍被吸收
+node tests/test-neutral-refine.mjs  # 完整UI默认值下中性锁定贯穿 refine/共底/高度合并；超5ΔE预算的暗灰才允许彩灰
+node tests/test-gamut-distinct.mjs  # 色域每条候选都有 distinct；多一种耗材确实多算0.25 ΔE
+node tests/test-calibration-channels.mjs # 标量TD覆盖旧通道（楔形/手改/重置/profile应用）；预测色随之改变
 ```
 
 3MF 用 trimesh 验证：

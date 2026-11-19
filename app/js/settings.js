@@ -13,6 +13,32 @@
     return ['model', p && p.brand || '', p && p.name || '', p && p.material || '', String(p && p.hex || '').toLowerCase()].join('|');
   }
 
+  const clampTd = value => Math.min(20, Math.max(0.1, Number(value) || 5));
+
+  /* A scalar TD edit means "uniform coverage on all three channels". Returns
+     the whole quadruple so no stale per-channel calibration can keep
+     overriding the new value. */
+  function uniformTd(value) {
+    const td = clampTd(value);
+    return { td, tdR: td, tdG: td, tdB: td };
+  }
+
+  /* Applies a stored calibration record onto a palette entry. Records without
+     per-channel data are scalar calibration, so any channels carried over from
+     another profile must be replaced rather than left to win at build time. */
+  function applyRecord(p, saved) {
+    if (!saved) return Object.assign({}, p, uniformTd(p.td));
+    const out = Object.assign({}, p, { hex: saved.hex || p.hex, td: clampTd(saved.td || p.td || 5) });
+    if (saved.tdR != null || saved.tdG != null || saved.tdB != null) {
+      out.tdR = clampTd(saved.tdR != null ? saved.tdR : out.td);
+      out.tdG = clampTd(saved.tdG != null ? saved.tdG : out.td);
+      out.tdB = clampTd(saved.tdB != null ? saved.tdB : out.td);
+    } else {
+      Object.assign(out, uniformTd(out.td));
+    }
+    return out;
+  }
+
   function snapshot(state) {
     const calibrations = clone(state.filamentCalibrations || {});
     for (const p of state.tdPalette || []) {
@@ -58,5 +84,5 @@
     if (CS.profiles) CS.profiles.clearActive().catch(e => { CS.settingsLastError = String(e && e.message || e); });
   }
 
-  CS.settings = { KEY, filamentKey, snapshot, save, load, clear };
+  CS.settings = { KEY, filamentKey, snapshot, save, load, clear, uniformTd, applyRecord };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

@@ -113,7 +113,7 @@
     return out;
   }
 
-  function removeSmallComponents(mask, w, h, minArea, fillValue) {
+  function removeSmallComponents(mask, w, h, minArea, fillValue, gate) {
     const out = new Uint8Array(mask);
     const seen = new Uint8Array(mask.length);
     const stack = new Int32Array(mask.length);
@@ -131,7 +131,14 @@
         if (y + 1 < h) { const j = idx + w; if (!seen[j] && out[j] === target) { seen[j] = 1; stack[top++] = j; } }
       }
       if (cells.length < minArea) {
-        for (const idx of cells) out[idx] = fillValue ? 1 : 0;
+        // Hole filling may only absorb pixels whose original colour is already
+        // within tolerance of the flat colour they will receive. A small but
+        // genuinely different patch must stay gradient, not be recoloured.
+        let allowed = true;
+        if (fillValue && gate) {
+          for (const idx of cells) if (!gate[idx]) { allowed = false; break; }
+        }
+        if (allowed) for (const idx of cells) out[idx] = fillValue ? 1 : 0;
       }
     }
     return out;
@@ -595,7 +602,13 @@
     mask = erode(mask, w, h, r);
     const minArea = Math.max(12, Math.round((opts.minFlatPercent || 0.6) / 100 * n));
     mask = removeSmallComponents(mask, w, h, minArea, 0);
-    mask = removeSmallComponents(mask, w, h, Math.max(12, Math.round(minArea * 0.6)), 1);
+    // Filling a hole turns it flat. That is only a segmentation-noise repair,
+    // so every absorbed pixel must already be explainable by its nearest
+    // filament; otherwise a real detail patch (grey shadow, skin, eye white)
+    // would be silently repainted before colour matching ever sees it.
+    const colorOK = new Uint8Array(n);
+    for (let i = 0; i < n; i++) colorOK[i] = residual[i] <= resT ? 1 : 0;
+    mask = removeSmallComponents(mask, w, h, Math.max(12, Math.round(minArea * 0.6)), 1, colorOK);
     return { mask, stds, residual, nearest, stdT, resT };
   }
 
@@ -919,7 +932,7 @@
         return;
       }
       seen.set(key, entries.length);
-      entries.push({ seq: seq.slice(), lab, lin, length: seq.length, runs, hex: C.linearToHex(lin), chromaFrac: chromaFracOf(seq) });
+      entries.push({ seq: seq.slice(), lab, lin, length: seq.length, runs, hex: C.linearToHex(lin), chromaFrac: chromaFracOf(seq), distinct: distinctOf(seq) });
     };
     const permutations = (r) => {
       const out = [];
@@ -1015,21 +1028,20 @@
 
   function matchGamutAtLength(targetLab, gamut, length) {
     let best = null, bestScore = Infinity, bestDE = Infinity;
-    let bestNeutral = null, bestNeutralDE = Infinity;
     for (const g of gamut) {
       if (g.length !== length) continue;
       const de = C.deltaE2000(targetLab, g.lab);
-      if (!g.chromaFrac && de < bestNeutralDE) { bestNeutralDE = de; bestNeutral = g; }
-      const score = de + 0.12 * Math.max(0, (g.runs || 1) - 1) + 0.25 * Math.max(0, (g.distinct || 1) - 1) + neutralBias(targetLab, g.chromaFrac || 0);
+      const score = de + gamutPenalty(targetLab, g);
       if (score < bestScore) { bestScore = score; bestDE = de; best = g; }
     }
-    // Hard preference: an all-neutral (K/W) stack within 3 ΔE wins for greys.
-    if (Math.hypot(targetLab.a, targetLab.b) < 8 && bestNeutral && bestNeutralDE <= (best ? bestDE : Infinity) + 5) {
-      best = bestNeutral; bestDE = bestNeutralDE;
-    }
+    let neutralLocked = false;
+    // Hard preference: an all-neutral (K/W) stack within 5 ΔE wins for greys.
+    const nb = bestNeutralFor(targetLab, gamut, length);
+    if (nb && nb.de <= bestDE + 5) { best = nb.entry; bestDE = nb.de; neutralLocked = true; }
     return best ? {
       seq: best.seq.slice(), lab: best.lab, lin: best.lin, hex: best.hex,
-      deltaE: bestDE, length: best.length, runs: best.runs
+      deltaE: bestDE, length: best.length, runs: best.runs,
+      neutral: isNeutralEntry(best), neutralLocked
     } : null;
   }
 
@@ -1044,10 +1056,55 @@
     return 3.5 * chromaFrac * (1 - chroma / 16);
   }
 
+  function isNeutralEntry(g) { return !(g.chromaFrac > 0); }
+
+  /* Single structural score term so every matcher reads the same fields and
+     the complexity penalty cannot silently become dead code again. */
+  function gamutPenalty(targetLab, g) {
+    return 0.12 * Math.max(0, (g.runs || 1) - 1)
+      + 0.25 * Math.max(0, (g.distinct || 1) - 1)
+      + neutralBias(targetLab, g.chromaFrac || 0);
+  }
+
+  function recipeIsNeutral(seq, palette) {
+    for (const i of seq) {
+      const p = palette[i];
+      if (!p || Math.hypot(p.lab.a, p.lab.b) >= 8) return false;
+    }
+    return true;
+  }
+
+  /* Near-neutral targets lock onto the all-neutral (K/W) subset once it is
+     within budget. The lock is a hard constraint for every later rewrite:
+     refine, shared bases and height merging may not leave this set. */
+  function bestNeutralFor(targetLab, gamut, length) {
+    if (Math.hypot(targetLab.a, targetLab.b) >= 8) return null;
+    if (!gamut || !gamut.neutral || !gamut.neutral.length) return null;
+    let best = null, de = Infinity;
+    for (const e of gamut.neutral) {
+      if (length != null && e.length !== length) continue;
+      const d = C.deltaE2000(targetLab, e.lab);
+      if (d < de) { de = d; best = e; }
+    }
+    return best ? { entry: best, de } : null;
+  }
+
 
   /* Top-K alternative recipes within a ΔE budget (used by the neighbour-
-     coherence pass). */
-  function matchGamutCandidates(targetLab, gamut, k, maxDE) {
+     coherence pass). neutralOnly restricts the pool to the locked K/W subset
+     and scans it directly, so a neutral candidate can never be missed just
+     because it was not among the Lab-nearest neighbours. */
+  function matchGamutCandidates(targetLab, gamut, k, maxDE, neutralOnly) {
+    const out = [];
+    if (neutralOnly) {
+      for (const g of (gamut.neutral || [])) {
+        const de = C.deltaE2000(targetLab, g.lab);
+        if (de > maxDE) continue;
+        out.push({ g, de, score: de + gamutPenalty(targetLab, g) });
+      }
+      out.sort((a, b) => a.score - b.score || a.de - b.de);
+      return out.slice(0, k);
+    }
     const keep = Math.max(28, k * 8);
     const shortlist = [];
     for (let i = 0; i < gamut.length; i++) {
@@ -1062,15 +1119,13 @@
         shortlist.sort((a, b) => a.d - b.d);
       }
     }
-    const out = [];
     for (const c of shortlist) {
       const g = gamut[c.i];
       const de = C.deltaE2000(targetLab, g.lab);
       if (de > maxDE) continue;
-      const score = de + 0.12 * Math.max(0, (g.runs || 1) - 1) + 0.25 * Math.max(0, (g.distinct || 1) - 1) + neutralBias(targetLab, g.chromaFrac || 0);
-      out.push({ g, de, score });
+      out.push({ g, de, score: de + gamutPenalty(targetLab, g) });
     }
-    out.sort((a, b) => a.score - b.score);
+    out.sort((a, b) => a.score - b.score || a.de - b.de);
     return out.slice(0, k);
   }
 
@@ -1099,7 +1154,7 @@
     };
     const opts = families.map(f => {
       const list = [{ seq: f.recipe, de: f.deltaE, lab: f.predictedLab, hex: f.predictedHex }];
-      for (const c of matchGamutCandidates(f.targetLab, gamut, 5, f.deltaE + 2)) {
+      for (const c of matchGamutCandidates(f.targetLab, gamut, 5, f.deltaE + 2, !!f.neutralLocked)) {
         list.push({ seq: c.g.seq, de: c.de, lab: c.g.lab, hex: c.g.hex });
       }
       return list;
@@ -1126,6 +1181,7 @@
           f.layers = f.recipe.length;
           f.topLayer = gradStartLayer + f.recipe.length;
           f.topMm = f.topLayer * layerHeight;
+          if (f.neutralLocked) f.neutral = true;
           changed++;
         }
       }
@@ -1158,25 +1214,20 @@
     for (const c of shortlist) {
       const g = gamut[c.i];
       const de = C.deltaE2000(targetLab, g.lab);
-      const score = de + 0.12 * Math.max(0, (g.runs || 1) - 1) + 0.25 * Math.max(0, (g.distinct || 1) - 1) + neutralBias(targetLab, g.chromaFrac || 0);
+      const score = de + gamutPenalty(targetLab, g);
       if (score < bestScore) { bestScore = score; bestDE = de; chosen = c.i; }
     }
     if (chosen == null) return null;
-    let g = gamut[chosen];
+    let g = gamut[chosen], neutralLocked = false;
     // Hard preference: for near-neutral targets an all-neutral K/W stack within
-    // 3 ΔE of the best chromatic recipe wins, so grey scenes never dither into
-    // colour speckle.
-    if (Math.hypot(targetLab.a, targetLab.b) < 8 && gamut.neutral && gamut.neutral.length) {
-      let nBest = null, nDe = Infinity;
-      for (const e of gamut.neutral) {
-        const de = C.deltaE2000(targetLab, e.lab);
-        if (de < nDe) { nDe = de; nBest = e; }
-      }
-      if (nBest && nDe <= bestDE + 5) { g = nBest; bestDE = nDe; }
-    }
+    // 5 ΔE of the best chromatic recipe wins, so grey scenes never dither into
+    // colour speckle. The lock is sticky for every later rewrite.
+    const nb = bestNeutralFor(targetLab, gamut);
+    if (nb && nb.de <= bestDE + 5) { g = nb.entry; bestDE = nb.de; neutralLocked = true; }
     return {
       seq: g.seq.slice(), lab: g.lab, lin: g.lin, hex: g.hex,
-      deltaE: bestDE, length: g.length, runs: g.runs
+      deltaE: bestDE, length: g.length, runs: g.runs,
+      neutral: isNeutralEntry(g), neutralLocked
     };
   }
 
@@ -1248,10 +1299,11 @@
       for (let i = 0; i < b; i++) if (g.seq[i] !== prefix[i]) { ok = false; break; }
       if (!ok) continue;
       const de = C.deltaE2000(targetLab, g.lab);
-      const score = de + 0.12 * Math.max(0, (g.runs || 1) - 1) + 0.25 * Math.max(0, (g.distinct || 1) - 1) + neutralBias(targetLab, g.chromaFrac || 0);
+      const score = de + gamutPenalty(targetLab, g);
       if (score < bestScore) { bestScore = score; bestDE = de; best = g; }
     }
     if (!best) return null;
+    let neutralLocked = false;
     if (Math.hypot(targetLab.a, targetLab.b) < 8 && gamut.neutral && gamut.neutral.length) {
       let nBest = null, nDe = Infinity;
       for (const e of gamut.neutral) {
@@ -1261,11 +1313,12 @@
         const de = C.deltaE2000(targetLab, e.lab);
         if (de < nDe) { nDe = de; nBest = e; }
       }
-      if (nBest && nDe <= bestDE + 5) { best = nBest; bestDE = nDe; }
+      if (nBest && nDe <= bestDE + 5) { best = nBest; bestDE = nDe; neutralLocked = true; }
     }
     return {
       seq: best.seq.slice(), lab: best.lab, lin: best.lin, hex: best.hex,
-      deltaE: bestDE, length: best.length, runs: best.runs
+      deltaE: bestDE, length: best.length, runs: best.runs,
+      neutral: isNeutralEntry(best), neutralLocked
     };
   }
 
@@ -1320,6 +1373,9 @@
           for (const f of group) {
             const m = matchGamutPrefix(f.targetLab, gamut, base);
             if (!m || m.deltaE > f.deltaE + threshold) { ok = false; break; }
+            // A neutral-locked family may not acquire a chromatic base just to
+            // share layers with its neighbours.
+            if (f.neutralLocked && !m.neutral) { ok = false; break; }
             picks.push({ f, m });
             totalDE += m.deltaE * f.pixelCount;
           }
@@ -1338,6 +1394,7 @@
         f.recipe = m.seq;
         f.layers = m.seq.length;
         f.deltaE = m.deltaE;
+        f.neutral = m.neutral;
         f.topLayer = (f.topLayer || 0); // recalculated below by caller
         f.sharedBaseLayers = bestCandidate.b;
         sharedPixels += f.pixelCount;
@@ -1371,6 +1428,7 @@
           if (!cand.recipe || cand.pixelCount <= 0) continue;
           if (f.recipe.length - cand.recipe.length < minGap) continue;
           if (cand.pixelCount < f.pixelCount * minSupport) continue;
+          if (f.neutralLocked && !cand.neutral) continue;
           const predDE = C.deltaE2000(f.predictedLab, cand.predictedLab);
           if (predDE > threshold) continue;
           const targetDE = C.deltaE2000(f.targetLab, cand.predictedLab);
@@ -1387,6 +1445,7 @@
         f.predictedLab = { L: best.predictedLab.L, a: best.predictedLab.a, b: best.predictedLab.b };
         f.predictedHex = best.predictedHex;
         f.deltaE = C.deltaE2000(f.targetLab, f.predictedLab);
+        f.neutral = best.neutral;
         f.sharedBaseLayers = 0;
         result.savedLayerPixels += (oldLen - f.recipe.length) * f.pixelCount;
         result.savedLayers += oldLen - f.recipe.length;
@@ -2056,6 +2115,8 @@
             fams.push({
               targetLab: center, targetHex: C.labToHex(center), predictedLab: opt.lab, predictedHex: opt.hex,
               recipe: opt.seq, deltaE: opt.deltaE, pixelCount: 0,
+              neutralLocked: !!opt.neutralLocked,
+              neutral: opt.neutral != null ? opt.neutral : recipeIsNeutral(opt.seq, palette),
               layers: opt.seq.length, topLayer: gradStartLayer + opt.seq.length,
               topMm: (gradStartLayer + opt.seq.length) * layerHeight
             });
@@ -2287,12 +2348,14 @@
           }
           if (targetF >= 0) {
             const lifted = gamut ? matchGamutAtLength(families[targetF].targetLab, gamut, colorLayers) : null;
-            if (lifted) {
+            // Raising the height may not break a neutral lock either.
+            if (lifted && (!families[targetF].neutralLocked || lifted.neutral)) {
               families[targetF].predictedLab = lifted.lab;
               families[targetF].predictedHex = lifted.hex;
               families[targetF].recipe = lifted.seq;
               families[targetF].layers = lifted.seq.length;
               families[targetF].deltaE = lifted.deltaE;
+              families[targetF].neutral = lifted.neutral;
               families[targetF].topLayer = gradStartLayer + lifted.seq.length;
               families[targetF].topMm = (gradStartLayer + lifted.seq.length) * layerHeight;
             }
@@ -2705,6 +2768,6 @@
     buildPlan, recommendPalette, buildLutPalette, buildUserPalette,
     imageToLab, filamentAt, compositeLinear, stackTransmission, localStd,
     autoStdThreshold, nearestLut, kmeansLab, mergeIneffectiveHeights, physicalSmoothParams,
-    mergeSmallRegions, buildPrintMask, buildStrokeInfo
+    mergeSmallRegions, buildPrintMask, buildStrokeInfo, buildTdGamut, gamutPenalty
   };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

@@ -179,14 +179,7 @@
 
   function applyCalibrationRecord(p) {
     const saved = state.filamentCalibrations[CS.settings.filamentKey(p)];
-    if (!saved) return p;
-    const out = { ...p, hex: saved.hex || p.hex, td: clamp(Number(saved.td) || p.td || 5, 0.1, 20) };
-    if (saved.tdR != null || saved.tdG != null || saved.tdB != null) {
-      out.tdR = clamp(Number(saved.tdR) || out.td, 0.1, 20);
-      out.tdG = clamp(Number(saved.tdG) || out.td, 0.1, 20);
-      out.tdB = clamp(Number(saved.tdB) || out.td, 0.1, 20);
-    }
-    return out;
+    return CS.settings.applyRecord(p, saved);
   }
 
   function restoreSettings(saved) {
@@ -237,7 +230,8 @@
     const db = (CS.FILAMENT_DB && CS.FILAMENT_DB.filaments) || [];
     for (const p of state.tdPalette) {
       const base = db.find(f => (p.id && f.id === p.id) || (f.name === p.name && f.brand === p.brand && f.material === p.material));
-      if (base) { p.hex = base.hex; p.td = base.td; }
+      if (base) p.hex = base.hex;
+      Object.assign(p, CS.settings.uniformTd(base ? base.td : p.td));
     }
     state.lutTdOverrides = {}; state.lutHexOverrides = {}; state.filamentCalibrations = {};
     CS.settings.clear();
@@ -1670,9 +1664,8 @@
         const i = Number(tdIdx);
         if (state.tdPalette[i]) {
           const v = clamp(Number(e.target.value) || 5, 0.1, 20);
-          state.tdPalette[i].td = v;
           // Manual single-value edit overrides the per-channel calibration.
-          state.tdPalette[i].tdR = v; state.tdPalette[i].tdG = v; state.tdPalette[i].tdB = v;
+          Object.assign(state.tdPalette[i], CS.settings.uniformTd(v));
           markDirty(false);
         }
       }
@@ -2106,7 +2099,7 @@
     const HD = -d / Math.log10(T);
     const TD = clamp(HD * 10, 0.1, 20);
     if (state.engine === 'td') {
-      state.tdPalette[i].td = Number(TD.toFixed(2));
+      Object.assign(state.tdPalette[i], CS.settings.uniformTd(Number(TD.toFixed(2))));
       renderPalette();
       markDirty(false);
     } else {
