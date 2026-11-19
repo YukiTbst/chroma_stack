@@ -320,6 +320,12 @@
             continue;
           }
           const T = clamp(dy / db, 0.002, 0.998);
+          // Near-opaque pairs (T below the trustworthy band) carry only a
+          // noise-floor dy; log10(T) there is noise-amplified, and the d^2 weight
+          // would let those thick pairs dominate the slope and inflate HD (the
+          // pink-cast bug on selective absorbers). Use them solely as a lower
+          // bound on the slope; the clean thin anchors drive the regression.
+          if (T < 0.05) { slopeMin = Math.max(slopeMin, -Math.log10(0.05) / d); continue; }
           sdd += d * d; sdt += d * -Math.log10(T);
         }
         const slope = Math.max(sdd > 1e-9 ? sdt / sdd : 0, slopeMin, 1e-3);
