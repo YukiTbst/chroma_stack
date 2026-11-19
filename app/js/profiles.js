@@ -153,8 +153,12 @@
       p = await api('PUT', 'profiles/' + state.activeId, { data: backup.data, expectedRevision: revision });
     } catch (e) {
       if (e.status !== 409) throw e;
-      const full = await api('GET', 'profiles/' + state.activeId);
-      p = await api('PUT', 'profiles/' + state.activeId, { data: backup.data, expectedRevision: full.revision || 1 });
+      // R6: another device advanced the profile. Keep the backup AND the remote
+      // version and surface the existing conflict UI. Never GET the latest
+      // revision and re-PUT the same backup — the user must re-check and confirm
+      // before overwriting the other device's newer calibration.
+      enterConflict(backup.data, e.payload || { revision });
+      return null;
     }
     state.revision = p.revision || revision + 1;
     state.lastData = clone(backup.data);
@@ -539,28 +543,34 @@
       return clone(state.lastData);
     }
     const local = state.conflict.data;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const p = await api('PUT', 'profiles/' + state.activeId, { data: local, expectedRevision: rev });
-        state.revision = p.revision || rev + 1;
-        state.lastData = clone(local);
-        state.pending = null;
-        state.conflict = null;
-        writeMirror(local);
-        removeDraft(state.activeId); // local draft committed by the user's choice
-        emit('synced', p.name);
-        return clone(local);
-      } catch (e) {
-        if (e.status === 409 && attempt === 0) {
-          const again = await api('GET', 'profiles/' + state.activeId);
-          rev = again.revision || 1;
-          continue;
-        }
-        emit(e.status === 409 ? 'conflict' : 'offline', String(e && e.message || e));
-        throw e;
-      }
+    const baseRev = state.conflict.serverRevision;
+    // R6: the user confirmed against the snapshot shown in the conflict UI. If the
+    // remote has advanced since then, re-enter conflict with the fresh server state
+    // rather than silently overwriting the other device's newer calibration.
+    if ((full.revision || 1) !== baseRev) {
+      enterConflict(local, full);
+      return null;
     }
-    return null;
+    try {
+      const p = await api('PUT', 'profiles/' + state.activeId, { data: local, expectedRevision: rev });
+      state.revision = p.revision || rev + 1;
+      state.lastData = clone(local);
+      state.pending = null;
+      state.conflict = null;
+      writeMirror(local);
+      removeDraft(state.activeId); // local draft committed by the user's choice
+      emit('synced', p.name);
+      return clone(local);
+    } catch (e) {
+      if (e.status === 409) {
+        // Remote moved again during confirmation: re-conflict, never auto-overwrite.
+        const again = await api('GET', 'profiles/' + state.activeId).catch(() => null);
+        enterConflict(local, again || e.payload || { revision: rev });
+        return null;
+      }
+      emit('offline', String(e && e.message || e));
+      throw e;
+    }
   }
 
   CS.profiles = {

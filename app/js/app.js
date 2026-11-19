@@ -307,6 +307,7 @@
     if (!window.confirm(`恢复 ${new Date(b.at).toLocaleString()} 的标定备份？会覆盖当前 profile 的标定。`)) return;
     try {
       const data = await CS.profiles.restoreBackup();
+      if (!data) { toast('备份恢复遇到冲突：另一台设备已更新标定，请点击同步状态选择保留本机或服务器版本'); return; }
       adoptProfileData(data);
       toast('已恢复上次标定备份');
     } catch (e) {
