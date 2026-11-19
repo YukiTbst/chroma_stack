@@ -59,6 +59,10 @@
     pending: null,       // latest snapshot waiting to be pushed
     timer: null,
     saving: false,
+    inflight: null,      // Promise of the push currently in flight (flush awaits it)
+    session: 0,          // bumped whenever the active profile changes; binds responses
+    editVersion: 0,      // monotonic draft version, bumped on every local edit
+    pendingVersion: 0,   // draft version of state.pending
     conflict: null,      // { data, serverRevision, name, updatedAt }
     onStatus: null       // (status, detail) => void ; status: synced|syncing|offline|conflict
   };
@@ -140,6 +144,9 @@
   }
 
   function setActive(id) {
+    // A different active profile starts a new session: any response still in
+    // flight for the old profile is now stale and must not write here.
+    if (id !== state.activeId) state.session++;
     state.activeId = id;
     if (id) lsSet(ACTIVE_KEY, id); else lsRemove(ACTIVE_KEY);
   }
@@ -160,6 +167,9 @@
      migration of the old browser-only calibration store. Falls back to the
      offline mirror (or legacy data) when the server is unreachable. */
   async function init() {
+    // Re-initialization is a new session: invalidate any keepalive push still
+    // in flight from a previous instance so its response cannot land here.
+    state.session++;
     const pointer = lsGet(ACTIVE_KEY);
     const legacy = readLegacy();
     try {
@@ -219,69 +229,104 @@
     emit('conflict', state.conflict.name || '');
   }
 
-  async function pushPending(keepalive) {
-    if (state.pending == null || state.saving || state.conflict) return;
-    if (!state.activeId) {
-      // Offline at init: try to (re)establish a profile before pushing.
-      try {
-        await refreshList();
-        if (!state.profiles.length) await ensureProfile('默认标定', emptyData());
-        const pointer = lsGet(ACTIVE_KEY);
-        const active = state.profiles.find(p => p.id === pointer) || state.profiles[0];
-        setActive(active.id);
-      } catch (e) { emit('offline', String(e && e.message || e)); return; }
-    }
-    // Without a known base revision a conditional write is impossible. Fetch
-    // it once; if the server already holds different data, surface a conflict
-    // instead of silently replacing the other device's calibration.
-    if (state.revision == null) {
-      try {
-        const full = await api('GET', 'profiles/' + state.activeId);
-        state.revision = full.revision || 1;
-        if (JSON.stringify(full.data || emptyData()) !== JSON.stringify(state.pending)) {
-          enterConflict(state.pending, full);
+  /* Returns the real in-flight Promise so callers (flush / switchTo) actually
+     wait for an ongoing push instead of running ahead while saving=true. */
+  function pushPending(keepalive) {
+    if (state.pending == null || state.conflict) return state.inflight || Promise.resolve();
+    if (state.saving) return state.inflight || Promise.resolve();
+    const p = runPush(keepalive);
+    state.inflight = p;
+    const clear = () => { if (state.inflight === p) state.inflight = null; };
+    p.then(clear, clear);
+    return p;
+  }
+
+  async function runPush(keepalive) {
+    state.saving = true;
+    let ctx = null;
+    let stale = () => false;
+    try {
+      if (!state.activeId) {
+        // Offline at init: try to (re)establish a profile before pushing.
+        try {
+          await refreshList();
+          if (!state.profiles.length) await ensureProfile('默认标定', emptyData());
+          const pointer = lsGet(ACTIVE_KEY);
+          const active = state.profiles.find(p => p.id === pointer) || state.profiles[0];
+          setActive(active.id);
+        } catch (e) { emit('offline', String(e && e.message || e)); return; }
+      }
+      // Bind this push to the profile/session it was started for. Every later
+      // completion path checks this binding before touching shared state.
+      const bindProfile = state.activeId, bindSession = state.session;
+      stale = () => bindSession !== state.session || bindProfile !== state.activeId;
+      // Without a known base revision a conditional write is impossible. Fetch
+      // it once; if the server already holds different data, surface a conflict
+      // instead of silently replacing the other device's calibration.
+      if (state.revision == null) {
+        try {
+          const full = await api('GET', 'profiles/' + bindProfile);
+          if (stale()) return;
+          state.revision = full.revision || 1;
+          if (JSON.stringify(full.data || emptyData()) !== JSON.stringify(state.pending)) {
+            enterConflict(state.pending, full);
+            return;
+          }
+        } catch (e) {
+          if (stale()) return;
+          state.online = false;
+          emit('offline', String(e && e.message || e));
           return;
         }
-      } catch (e) {
-        state.online = false;
-        emit('offline', String(e && e.message || e));
-        return;
       }
-    }
-    const data = state.pending;
-    const expectedRevision = state.revision;
-    state.pending = null;
-    state.saving = true;
-    emit('syncing');
-    try {
-      const res = await fetch(apiBase() + 'profiles/' + state.activeId, {
+      if (stale() || state.pending == null) return;
+      const data = state.pending;
+      const expectedRevision = state.revision;
+      ctx = { profileId: bindProfile, session: bindSession, baseRevision: expectedRevision, draftVersion: state.pendingVersion, data };
+      state.pending = null;
+      emit('syncing');
+      const res = await fetch(apiBase() + 'profiles/' + ctx.profileId, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ data, expectedRevision }),
         keepalive: !!keepalive
       });
       const payload = await res.json().catch(() => ({}));
+      const superseded = state.pending != null && state.pendingVersion !== ctx.draftVersion;
       if (res.status === 409 || res.status === 428) {
-        enterConflict(data, payload);
+        // A stale-profile response must not import a conflict into the new
+        // session; a newer local draft is the one to reconcile, not ctx.data.
+        if (!stale()) enterConflict(superseded ? state.pending : ctx.data, payload);
         return;
       }
       if (!res.ok) throw new Error(payload.error || ('HTTP ' + res.status));
+      if (stale()) return;
       state.online = true;
       state.revision = payload.revision || state.revision;
-      state.lastData = clone(data);
-      writeMirror(data);
-      const meta = state.profiles.find(x => x.id === state.activeId);
+      const meta = state.profiles.find(x => x.id === ctx.profileId);
       if (meta) { meta.name = payload.name; meta.updatedAt = payload.updatedAt; meta.revision = payload.revision; }
-      emit('synced', payload.name);
+      if (!superseded) {
+        state.lastData = clone(ctx.data);
+        state.pending = null;
+        writeMirror(ctx.data);
+        emit('synced', payload.name);
+      } else {
+        // A newer draft was edited while this one was in flight: keep it as
+        // the cached/mirror data (save already wrote it) and push it next on
+        // the freshly acknowledged revision. Never revert to the older draft.
+        emit('syncing');
+      }
     } catch (e) {
-      state.online = false;
-      if (state.pending == null) state.pending = data; // retry on next save/flush
-      emit('offline', String(e && e.message || e));
+      if (ctx && !stale()) {
+        state.online = false;
+        if (state.pending == null) { state.pending = ctx.data; state.pendingVersion = ctx.draftVersion; } // retry on next save/flush
+        emit('offline', String(e && e.message || e));
+      }
     } finally {
       state.saving = false;
-      // Only auto-retry while online; offline edits wait for the next user
-      // save or an explicit flush (profile switch / page hide).
-      if (state.pending != null && state.online && !state.conflict && !keepalive) schedulePush();
+      // Only auto-retry while online and still in the same session; offline
+      // edits wait for the next user save or an explicit flush.
+      if (ctx && !stale() && state.pending != null && state.online && !state.conflict && !keepalive) schedulePush();
     }
   }
 
@@ -293,6 +338,8 @@
   /* Called by CS.settings.save on every calibration change. Debounced PUT;
      the mirror is written synchronously so nothing is lost on crash/offline. */
   function save(data) {
+    state.editVersion++;
+    state.pendingVersion = state.editVersion;
     state.pending = clone(data);
     if (state.conflict) state.conflict.data = clone(data);
     state.lastData = clone(data); // cached reads must reflect offline saves too
@@ -366,6 +413,8 @@
      after the server acknowledges it. */
   async function clearActive() {
     const data = emptyData();
+    state.editVersion++;
+    state.pendingVersion = state.editVersion;
     if (state.conflict) {
       state.pending = clone(data);
       state.conflict.data = clone(data);
@@ -384,6 +433,9 @@
       return;
     }
     await pushPending(false);
+    // If a previous push was still in flight, the clear draft is now pending
+    // on the acknowledged revision; send it too.
+    if (state.pending != null && !state.conflict && state.online) await pushPending(false);
   }
 
   /* Resolve a revision conflict. mode 'local' overwrites the server with the
