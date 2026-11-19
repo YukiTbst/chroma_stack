@@ -1071,6 +1071,74 @@
       + neutralBias(targetLab, g.chromaFrac || 0);
   }
 
+  function gamutScore(targetLab, g) {
+    return C.deltaE2000(targetLab, g.lab) + gamutPenalty(targetLab, g);
+  }
+
+  /* Small gamuts are scanned exactly; large gamuts keep a wide Lab-nearest
+     shortlist (192) so a ΔE2000 optimum is not lost to the Euclidean ranking
+     the way the old 28-entry list could. */
+  const EXACT_SCAN_LIMIT = 6000;
+
+  /* Max-heap top-K so recall can be widened without O(N·K) insertion sorts. */
+  function topGamutEntries(gamut, keep, distOf) {
+    if (gamut.length <= keep) return gamut;
+    const heap = [];
+    const push = (node) => {
+      heap.push(node);
+      let i = heap.length - 1;
+      while (i > 0) {
+        const p = (i - 1) >> 1;
+        if (heap[p].d >= heap[i].d) break;
+        const t = heap[p]; heap[p] = heap[i]; heap[i] = t; i = p;
+      }
+    };
+    const pop = () => {
+      const last = heap.pop();
+      if (heap.length) {
+        heap[0] = last;
+        let i = 0;
+        for (;;) {
+          let l = 2 * i + 1, r = l + 1, m = i;
+          if (l < heap.length && heap[l].d > heap[m].d) m = l;
+          if (r < heap.length && heap[r].d > heap[m].d) m = r;
+          if (m === i) break;
+          const t = heap[m]; heap[m] = heap[i]; heap[i] = t; i = m;
+        }
+      }
+    };
+    for (const g of gamut) {
+      const d = distOf(g.lab);
+      if (heap.length < keep) push({ g, d });
+      else if (d < heap[0].d) { pop(); push({ g, d }); }
+    }
+    return heap.map(n => n.g);
+  }
+
+  const labDistOf = targetLab => lab => {
+    const dl = targetLab.L - lab.L, da = targetLab.a - lab.a, db = targetLab.b - lab.b;
+    return dl * dl + da * da + db * db;
+  };
+  /* ΔE94 is a cheap surrogate that ranks ΔE2000 optima far better than raw
+     Lab distance, especially for saturated/out-of-gamut targets. */
+  const de94Of = targetLab => lab => {
+    const c1 = Math.sqrt(targetLab.a * targetLab.a + targetLab.b * targetLab.b);
+    const c2 = Math.sqrt(lab.a * lab.a + lab.b * lab.b);
+    const dl = targetLab.L - lab.L, dc = c1 - c2;
+    const da = targetLab.a - lab.a, db = targetLab.b - lab.b;
+    const dh2 = Math.max(0, da * da + db * db - dc * dc);
+    const sc = 1 + 0.045 * c1, sh = 1 + 0.015 * c1;
+    const a2 = dc / sc, b2 = Math.sqrt(dh2) / sh;
+    return dl * dl + a2 * a2 + b2 * b2;
+  };
+
+  function nearestGamutEntries(targetLab, gamut, keep) {
+    return topGamutEntries(gamut, keep, labDistOf(targetLab));
+  }
+  function nearestGamutEntries94(targetLab, gamut, keep) {
+    return topGamutEntries(gamut, keep, de94Of(targetLab));
+  }
+
   function recipeIsNeutral(seq, palette) {
     for (const i of seq) {
       const p = palette[i];
@@ -1110,22 +1178,15 @@
       out.sort((a, b) => a.score - b.score || a.de - b.de);
       return out.slice(0, k);
     }
-    const keep = Math.max(28, k * 8);
-    const shortlist = [];
-    for (let i = 0; i < gamut.length; i++) {
-      const e = gamut[i].lab;
-      const dl = targetLab.L - e.L, da = targetLab.a - e.a, db = targetLab.b - e.b;
-      const d = dl * dl + da * da + db * db;
-      if (shortlist.length < keep) {
-        shortlist.push({ i, d });
-        if (shortlist.length === keep) shortlist.sort((a, b) => a.d - b.d);
-      } else if (d < shortlist[keep - 1].d) {
-        shortlist[keep - 1] = { i, d };
-        shortlist.sort((a, b) => a.d - b.d);
-      }
+    const keep = Math.max(96, k * 16);
+    let pool;
+    if (gamut.length <= 3000) pool = gamut;
+    else {
+      const set = new Set(nearestGamutEntries(targetLab, gamut, keep));
+      for (const e of nearestGamutEntries94(targetLab, gamut, 1024)) set.add(e);
+      pool = set;
     }
-    for (const c of shortlist) {
-      const g = gamut[c.i];
+    for (const g of pool) {
       const de = C.deltaE2000(targetLab, g.lab);
       if (de > maxDE) continue;
       out.push({ g, de, score: de + gamutPenalty(targetLab, g) });
@@ -1198,35 +1259,27 @@
 
   function matchGamut(targetLab, gamut) {
     if (!gamut || !gamut.length) return null;
-    // Color first, with a short-stack tie-break: a color that is within 0.5 ΔE
-    // of the best match uses the shortest recipe. This keeps relief lower
-    // without sacrificing visible color, and makes limited-palette gaps honest.
-    const shortlist = [];
-    const keep = 28;
-    for (let i = 0; i < gamut.length; i++) {
-      const e = gamut[i].lab;
-      const dl = targetLab.L - e.L, da = targetLab.a - e.a, db = targetLab.b - e.b;
-      const d = dl * dl + da * da + db * db;
-      if (shortlist.length < keep) {
-        shortlist.push({ i, d });
-        if (shortlist.length === keep) shortlist.sort((a, b) => a.d - b.d);
-      } else if (d < shortlist[keep - 1].d) {
-        shortlist[keep - 1] = { i, d };
-        shortlist.sort((a, b) => a.d - b.d);
-      }
+    // Small gamuts are scanned exactly; larger ones use a union of Lab-nearest
+    // and ΔE94-nearest pools so saturated/out-of-gamut targets are not lost to
+    // the Euclidean ranking alone. The final choice still uses ΔE2000.
+    let pool;
+    if (gamut.length <= EXACT_SCAN_LIMIT) pool = gamut;
+    else {
+      const set = new Set(nearestGamutEntries(targetLab, gamut, 512));
+      for (const e of nearestGamutEntries94(targetLab, gamut, 4096)) set.add(e);
+      pool = set;
     }
-    let chosen = null, bestScore = Infinity, bestDE = Infinity;
-    for (const c of shortlist) {
-      const g = gamut[c.i];
-      const de = C.deltaE2000(targetLab, g.lab);
-      const score = de + gamutPenalty(targetLab, g);
-      if (score < bestScore) { bestScore = score; bestDE = de; chosen = c.i; }
+    let g = null, bestScore = Infinity, bestDE = Infinity;
+    for (const e of pool) {
+      const de = C.deltaE2000(targetLab, e.lab);
+      const score = de + gamutPenalty(targetLab, e);
+      if (score < bestScore) { bestScore = score; bestDE = de; g = e; }
     }
-    if (chosen == null) return null;
-    let g = gamut[chosen], neutralLocked = false;
+    if (!g) return null;
+    let neutralLocked = false;
     // Hard preference: for near-neutral targets an all-neutral K/W stack within
-    // 5 ΔE of the best chromatic recipe wins, so grey scenes never dither into
-    // colour speckle. The lock is sticky for every later rewrite.
+    // 5 ΔE of the best recipe wins, so grey scenes never dither into colour
+    // speckle. The lock is sticky for every later rewrite.
     const nb = bestNeutralFor(targetLab, gamut);
     if (nb && nb.de <= bestDE + 5) { g = nb.entry; bestDE = nb.de; neutralLocked = true; }
     return {
@@ -2777,6 +2830,6 @@
     buildPlan, recommendPalette, buildLutPalette, buildUserPalette,
     imageToLab, filamentAt, compositeLinear, stackTransmission, localStd,
     autoStdThreshold, nearestLut, kmeansLab, mergeIneffectiveHeights, physicalSmoothParams,
-    mergeSmallRegions, buildPrintMask, buildStrokeInfo, buildTdGamut, gamutPenalty
+    mergeSmallRegions, buildPrintMask, buildStrokeInfo, buildTdGamut, gamutPenalty, gamutScore, matchGamut
   };
 })(typeof globalThis !== 'undefined' ? globalThis : this);
