@@ -1050,25 +1050,6 @@
     return entries;
   }
 
-  function matchGamutAtLength(targetLab, gamut, length) {
-    let best = null, bestScore = Infinity, bestDE = Infinity;
-    for (const g of gamut) {
-      if (g.length !== length) continue;
-      const de = C.deltaE2000(targetLab, g.lab);
-      const score = de + gamutPenalty(targetLab, g);
-      if (score < bestScore) { bestScore = score; bestDE = de; best = g; }
-    }
-    let neutralLocked = false;
-    // Hard preference: an all-neutral (K/W) stack within 5 ΔE wins for greys.
-    const nb = bestNeutralFor(targetLab, gamut, length);
-    if (nb && nb.de <= bestDE + 5) { best = nb.entry; bestDE = nb.de; neutralLocked = true; }
-    return best ? {
-      seq: best.seq.slice(), lab: best.lab, lin: best.lin, hex: best.hex,
-      deltaE: bestDE, length: best.length, runs: best.runs,
-      neutral: isNeutralEntry(best), neutralLocked
-    } : null;
-  }
-
   /* Scene grays are reachable with neutral black/white stacks along the L axis;
      chromatic recipes often win by a fraction of a ΔE but leave visible red/
      yellow/blue speckle around dark lines. Penalise chromatic usage in recipes
@@ -2371,31 +2352,9 @@
           f.topMm = (gradStartLayer + f.recipe.length) * layerHeight;
         }
       }
-      if (engine === 'td' && variableHeight && colorLayers > 0) {
-        // Honor the user's maximum-height setting: if all recipes came out
-        // shorter, lift the largest color family to the configured top layer.
-        const currentMax = families.reduce((m, f) => Math.max(m, f.pixelCount > 0 ? f.recipe.length : 0), 0);
-        if (currentMax < colorLayers) {
-          let targetF = -1, bestCount = -1;
-          for (let f = 0; f < families.length; f++) {
-            if (families[f].pixelCount > bestCount) { bestCount = families[f].pixelCount; targetF = f; }
-          }
-          if (targetF >= 0) {
-            const lifted = gamut ? matchGamutAtLength(families[targetF].targetLab, gamut, colorLayers) : null;
-            // Raising the height may not break a neutral lock either.
-            if (lifted && (!families[targetF].neutralLocked || lifted.neutral)) {
-              families[targetF].predictedLab = lifted.lab;
-              families[targetF].predictedHex = lifted.hex;
-              families[targetF].recipe = lifted.seq;
-              families[targetF].layers = lifted.seq.length;
-              families[targetF].deltaE = lifted.deltaE;
-              families[targetF].neutral = lifted.neutral;
-              families[targetF].topLayer = gradStartLayer + lifted.seq.length;
-              families[targetF].topMm = (gradStartLayer + lifted.seq.length) * layerHeight;
-            }
-          }
-        }
-      }
+      // User height is an upper bound. A family is never lifted just to touch
+      // the requested top: colour, coverage and layer structure stay as chosen
+      // by the constrained matcher.
       let heightMergeLocal = null;
       if (engine === 'td' && variableHeight) {
         const hmDE = options.heightMergeDeltaE == null ? 1.5 : Number(options.heightMergeDeltaE);
