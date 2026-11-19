@@ -59,4 +59,16 @@ assert.ok(md.includes('导出网格') && md.includes('分组色差'), 'markdown 
 
 const out3mf = X.build3MFBytes(plan);
 assert.deepEqual([out3mf.ew, out3mf.eh], [native.width, native.height], '3MF uses the shared export grid');
+assert.equal(out3mf.exportDownscaled, false);
+assert.equal(out3mf.exportChange.changedPercent, 0, 'native export reclassifies nothing');
+
+const down = X.build3MFBytes(plan, { exportMax: 80 });
+console.log('downsampled export', down.ew, down.eh, down.exportChange);
+assert.equal(down.exportDownscaled, true);
+assert.equal(down.ew, 80);
+assert.ok(down.exportChange.sourcePixels > 0, 'downsample counts source pixels');
+assert.ok(down.exportChange.changedPercent >= 0 && down.exportChange.changedPercent <= 100, 'reclassification is a percentage');
+const report = X.exportReport(plan);
+assert.deepEqual(report.grid.width, native.width);
+assert.equal(report.change.changedPercent, 0);
 console.log('all export/diagnostics checks passed');

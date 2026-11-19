@@ -22,7 +22,8 @@
         flatFilament: new Uint16Array(plan.flatFilament),
         familyId: new Int16Array(plan.familyId),
         printMask: plan.printMask ? new Uint8Array(plan.printMask) : null,
-        structureCleanup: null
+        structureCleanup: null,
+        changeStats: { sourcePixels: 0, changedPixels: 0, changedPercent: 0 }
       };
     }
     // Nearest-centre downsampling can turn one source pixel into a new island,
@@ -45,6 +46,7 @@
     const printMask = plan.printMask ? new Uint8Array(ew * eh) : null;
     const lab = new Float32Array(ew * eh * 3);
     const hasSilhouette = !!(plan.background && plan.background.enabled);
+    let sourcePixels = 0, changedPixels = 0;
     const canCleanup = !!(!hasSilhouette && plan.structureCleanup && plan.structureCleanup.minAreaPx > 1 && !plan.structureCleanup.edgeOnly &&
       plan.predicted && plan.families && plan.palette && CS.engine && CS.engine.mergeSmallRegions);
     for (let y = 0; y < eh; y++) {
@@ -91,6 +93,17 @@
         lab[di * 3] = best.sumL / best.count;
         lab[di * 3 + 1] = best.sumA / best.count;
         lab[di * 3 + 2] = best.sumB / best.count;
+        // How many real source pixels this coarse cell re-assigns to a
+        // different category: an explicit downsample-difference measure.
+        for (let yy = y0[y]; yy < y1[y]; yy++) {
+          for (let xx = x0[x]; xx < x1[x]; xx++) {
+            const si = yy * plan.w + xx;
+            if (plan.printMask && !plan.printMask[si]) continue;
+            sourcePixels++;
+            const key = plan.flatMask[si] ? plan.flatFilament[si] + 1 : -(plan.familyId[si] + 2);
+            if (key !== best.key) changedPixels++;
+          }
+        }
       }
     }
     let structureCleanup = null;
@@ -104,7 +117,13 @@
       structureCleanup = CS.engine.mergeSmallRegions(flatMask, flatFilament, familyId, lab, plan.families, plan.palette, ew, eh, minAreaPx, null);
       for (let i = 0; i < flatMask.length; i++) if (!flatMask[i]) flatFilament[i] = 0xffff;
     }
-    return { ew, eh, flatMask, flatFilament, familyId, printMask, structureCleanup };
+    return {
+      ew, eh, flatMask, flatFilament, familyId, printMask, structureCleanup,
+      changeStats: {
+        sourcePixels, changedPixels,
+        changedPercent: sourcePixels ? +(changedPixels / sourcePixels * 100).toFixed(2) : 0
+      }
+    };
   }
 
   function buildLayerMasks(plan, plane, z) {
@@ -719,6 +738,13 @@
 
   /* The one place that decides the physical export grid. Preview, plan summary
      and the 3MF must all report the same numbers. */
+  function exportReport(plan) {
+    const grid = exportGridFor(plan);
+    if (!grid.downscaled) return { grid, change: { sourcePixels: 0, changedPixels: 0, changedPercent: 0 } };
+    const plane = samplePlane(plan, grid.width, grid.height);
+    return { grid, change: plane.changeStats };
+  }
+
   function exportGridFor(plan, exportMax) {
     const max = exportMax != null
       ? Math.max(80, Math.min(1024, Number(exportMax) || 300))
@@ -913,7 +939,8 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
         lineMode: plan.lineMode || 'auto', lineApplied: !!plan.lineApplied,
         lineStrokePercent: +((plan.lineInfo && plan.lineInfo.strokePercent) || 0).toFixed(2),
         lineDirectPercent: +((plan.lineInfo && plan.lineInfo.directPercent) || 0).toFixed(2) },
-      exportGrid: [ew, eh], triangles: componentMeta.reduce((s, c) => s + c.triangles, 0)
+      exportGrid: [ew, eh], exportDownscaled: grid.downscaled, exportChange: plane.changeStats,
+      triangles: componentMeta.reduce((s, c) => s + c.triangles, 0)
     };
     const files = [
       { name: '[Content_Types].xml', data: contentTypes },
@@ -923,23 +950,23 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
       { name: 'Metadata/project_settings.config', data: JSON.stringify(projectSettings, null, 2) },
       { name: 'Metadata/chromastack.json', data: JSON.stringify(meta, null, 2) }
     ];
-    return { files, meta, objects: componentMeta, ew, eh, pixelSize };
+    return { files, meta, objects: componentMeta, ew, eh, pixelSize, exportDownscaled: grid.downscaled, exportChange: plane.changeStats };
   }
 
   function build3MFBytes(plan, options) {
     const out = build3MFParts(plan, options);
-    return { bytes: CS.zip.createZip(out.files), meta: out.meta, objects: out.objects, ew: out.ew, eh: out.eh, pixelSize: out.pixelSize };
+    return { bytes: CS.zip.createZip(out.files), meta: out.meta, objects: out.objects, ew: out.ew, eh: out.eh, pixelSize: out.pixelSize, exportDownscaled: out.exportDownscaled, exportChange: out.exportChange };
   }
 
   async function build3MFBytesAsync(plan, options) {
     const out = build3MFParts(plan, options);
     const bytes = CS.zip.createZipAsync ? await CS.zip.createZipAsync(out.files) : CS.zip.createZip(out.files);
-    return { bytes, meta: out.meta, objects: out.objects, ew: out.ew, eh: out.eh, pixelSize: out.pixelSize };
+    return { bytes, meta: out.meta, objects: out.objects, ew: out.ew, eh: out.eh, pixelSize: out.pixelSize, exportDownscaled: out.exportDownscaled, exportChange: out.exportChange };
   }
 
   function build3MFBlob(plan, options) {
     const out = build3MFBytes(plan, options);
-    return { blob: new Blob([out.bytes], { type: 'model/3mf' }), meta: out.meta };
+    return { blob: new Blob([out.bytes], { type: 'model/3mf' }), meta: out.meta, ew: out.ew, eh: out.eh, exportDownscaled: out.exportDownscaled, exportChange: out.exportChange };
   }
 
   async function build3MFBlobAsync(plan, options) {
@@ -1056,6 +1083,6 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
 
   CS.exporter = {
     build3MFBytes, build3MFBytesAsync, build3MFBlob, build3MFBlobAsync, planSummary, buildPlanMarkdown, samplePlane, buildPrisms,
-    traceLoops, simplifyLoop, loopArea, pointInLoop, meshPrism, exportGridFor
+    traceLoops, simplifyLoop, loopArea, pointInLoop, meshPrism, exportGridFor, exportReport
   };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

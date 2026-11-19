@@ -596,6 +596,49 @@
     }
   }
 
+  let activeWorker = null;
+  function runPlanInWorker(image, options, request) {
+    return new Promise((resolve, reject) => {
+      let worker;
+      try { worker = new Worker('js/compute-worker.js'); } catch (e) { reject(e); return; }
+      activeWorker = worker;
+      let settled = false;
+      let timer = null;
+      const finish = (fn, arg) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        try { worker.terminate(); } catch (e) { /* ignore */ }
+        if (activeWorker === worker) activeWorker = null;
+        fn(arg);
+      };
+      timer = setTimeout(() => finish(reject, new Error('后台计算超时')), 180000);
+      worker.onmessage = (e) => {
+        const d = e.data || {};
+        if (d.id !== request) { finish(resolve, null); return; }
+        if (d.ok) finish(resolve, d.plan);
+        else finish(reject, new Error(d.error || '后台计算失败'));
+      };
+      worker.onerror = (e) => finish(reject, new Error((e && e.message) || '后台计算失败'));
+      const copy = new Uint8ClampedArray(image.data);
+      worker.postMessage({ id: request, width: image.width, height: image.height, data: copy.buffer, options }, [copy.buffer]);
+    });
+  }
+
+  async function buildPlanSmart(image, options, request) {
+    if (typeof Worker !== 'undefined' && location.protocol !== 'file:') {
+      try {
+        const plan = await runPlanInWorker(image, options, request);
+        if (plan) return plan;
+      } catch (e) {
+        if (request !== state.analysisRequest) return null;
+        console.warn('后台计算失败，回退主线程', e);
+      }
+    }
+    if (request !== state.analysisRequest) return null;
+    return E.buildPlan(image, options);
+  }
+
   function analyze() {
     if (!state.imageData) return;
     const request = ++state.analysisRequest;
@@ -607,12 +650,12 @@
     const options = buildOptions();
     updateDirtyUI();
     showProgress('正在分析画面并匹配耗材…');
-    setTimeout(() => {
+    setTimeout(async () => {
       const t0 = Date.now();
       try {
         if (request !== state.analysisRequest) return;
-        const plan = E.buildPlan(image, options);
-        if (request !== state.analysisRequest) return;
+        const plan = await buildPlanSmart(image, options, request);
+        if (!plan || request !== state.analysisRequest) return;
         state.plan = plan;
         state.appliedVersion = version;
         state.dirty = state.editVersion !== version;
@@ -1865,11 +1908,12 @@
       try {
         // The started export intentionally uses the clicked plan snapshot even
         // if the user keeps editing; later edits never change its content/name.
-        const { blob } = await X.build3MFBlobAsync(p);
-        downloadBlob(blob, filenameBase(p) + '.3mf');
+        const out = await X.build3MFBlobAsync(p);
+        downloadBlob(out.blob, filenameBase(p) + '.3mf');
         const g = X.exportGridFor(p);
+        const changed = out.exportChange ? out.exportChange.changedPercent : null;
         toast(g.downscaled
-          ? `3MF 导出网格 ${g.width}×${g.height}（工作 ${p.w}×${p.h}，已重新离散化）；导入切片器后核对耗材槽位。`
+          ? `3MF 导出网格 ${g.width}×${g.height}（工作 ${p.w}×${p.h}）${changed == null ? '' : `；约 ${changed}% 源像素被重新归类`}，细节以切片预览为准。`
           : `3MF 已按 ${p.w}×${p.h} 原生网格生成；导入切片器后核对耗材槽位。`);
       } catch (e) {
         console.error(e);
@@ -1895,6 +1939,7 @@
       const base = filenameBase(p);
       const files = [];
       files.push({ name: 'print_plan.json', data: JSON.stringify(X.planSummary(p), null, 2) });
+      files.push({ name: 'export_report.json', data: JSON.stringify(X.exportReport(p), null, 2) });
       files.push({ name: 'print_plan.md', data: X.buildPlanMarkdown(p) });
       const prev = document.createElement('canvas');
       prev.width = p.w; prev.height = p.h;
