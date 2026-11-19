@@ -13,8 +13,13 @@
      GET    /profiles            -> { profiles: [meta...] }
      POST   /profiles            { name, data? }        -> 201 profile
      GET    /profiles/:id        -> profile
-     PUT    /profiles/:id        { name?, data? }       -> profile
+     PUT    /profiles/:id        { name?, data?, expectedRevision? } -> profile
      DELETE /profiles/:id        -> { ok: true }
+
+   Optimistic concurrency: every profile carries a monotonic integer revision.
+   A data write must include expectedRevision (428 otherwise); a stale value
+   returns 409 with the current revision instead of overwriting another
+   device's calibration.
 */
 'use strict';
 const http = require('http');
@@ -57,6 +62,7 @@ function readProfile(id) {
     const raw = fs.readFileSync(profilePath(id), 'utf8');
     const p = JSON.parse(raw);
     if (!p || p.id !== id) return null;
+    if (!Number.isInteger(p.revision) || p.revision < 1) p.revision = 1; // legacy file
     return p;
   } catch (e) {
     return null;
@@ -75,7 +81,7 @@ function listProfiles() {
   for (const file of fs.readdirSync(PROFILE_DIR)) {
     if (!file.endsWith('.json')) continue;
     const p = readProfile(file.slice(0, -5));
-    if (p) out.push({ id: p.id, name: p.name, createdAt: p.createdAt, updatedAt: p.updatedAt });
+    if (p) out.push({ id: p.id, name: p.name, createdAt: p.createdAt, updatedAt: p.updatedAt, revision: p.revision });
   }
   out.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0) || a.id.localeCompare(b.id));
   return out;
@@ -134,7 +140,7 @@ const server = http.createServer(async (req, res) => {
         const now = Date.now();
         const p = {
           id: newId(), name: body.name.trim(),
-          createdAt: now, updatedAt: now,
+          createdAt: now, updatedAt: now, revision: 1,
           data: sanitizeData(body.data)
         };
         writeProfile(p);
@@ -152,14 +158,28 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (req.method === 'PUT') {
-        if (!existing) { send(res, 404, { error: 'profile 不存在' }); return; }
         const body = await readBody(req);
+        // Re-read after the body await: another request may have written while
+        // this body was still arriving. The check + write below is synchronous.
+        const current = readProfile(id);
+        if (!current) { send(res, 404, { error: 'profile 不存在' }); return; }
         if (body.name !== undefined && !validName(body.name)) { send(res, 400, { error: 'name 必须是 1–40 个字符' }); return; }
-        if (body.name !== undefined) existing.name = body.name.trim();
-        if (body.data !== undefined) existing.data = sanitizeData(body.data);
-        existing.updatedAt = Date.now();
-        writeProfile(existing);
-        send(res, 200, existing);
+        const expected = body.expectedRevision;
+        const rev = current.revision || 1;
+        if (expected !== undefined && expected !== null && Number(expected) !== rev) {
+          send(res, 409, { error: 'profile 已被其他设备修改', revision: rev, name: current.name, updatedAt: current.updatedAt });
+          return;
+        }
+        if (body.data !== undefined && (expected === undefined || expected === null)) {
+          send(res, 428, { error: '缺少 expectedRevision', revision: rev });
+          return;
+        }
+        if (body.name !== undefined) current.name = body.name.trim();
+        if (body.data !== undefined) current.data = sanitizeData(body.data);
+        current.revision = rev + 1;
+        current.updatedAt = Date.now();
+        writeProfile(current);
+        send(res, 200, current);
         return;
       }
       if (req.method === 'DELETE') {

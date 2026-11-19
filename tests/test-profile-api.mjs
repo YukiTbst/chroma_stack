@@ -69,14 +69,22 @@ try {
   assert.equal((await req('POST', 'profiles', { name: 'x'.repeat(41) })).status, 400, 'overlong name rejected');
   const created = await req('POST', 'profiles', { name: '测试套', data: { calibrations: { 'id:black': { td: 0.5 } }, junk: 1 } });
   assert.equal(created.status, 201);
+  assert.equal(created.body.revision, 1, 'profile starts at revision 1');
   const id = created.body.id;
   assert.ok(!('junk' in created.body.data), 'unknown data fields are dropped');
   assert.equal((await req('GET', 'profiles/' + id)).body.data.calibrations['id:black'].td, 0.5);
   assert.equal((await req('GET', 'profiles/nope')).status, 404);
-  assert.equal((await req('PUT', 'profiles/' + id, { name: '改名', data: { calibrations: { 'id:red': { td: 3 } } } })).status, 200);
+  assert.equal((await req('PUT', 'profiles/' + id, { name: '改名', data: { calibrations: { 'id:red': { td: 3 } } } })).status, 428, 'data write without expectedRevision is refused');
+  const putOk = await req('PUT', 'profiles/' + id, { name: '改名', data: { calibrations: { 'id:red': { td: 3 } } }, expectedRevision: 1 });
+  assert.equal(putOk.status, 200);
+  assert.equal(putOk.body.revision, 2, 'successful write bumps the revision');
+  const stale = await req('PUT', 'profiles/' + id, { data: { calibrations: { 'id:yellow': { td: 7 } } }, expectedRevision: 1 });
+  assert.equal(stale.status, 409, 'stale revision is rejected');
   const afterPut = (await req('GET', 'profiles/' + id)).body;
   assert.equal(afterPut.name, '改名');
   assert.ok(!('id:black' in afterPut.data.calibrations), 'PUT replaces data wholesale');
+  assert.equal(afterPut.data.calibrations['id:red'].td, 3, 'stale write left the data intact');
+  assert.equal((await req('GET', 'profiles')).body.profiles[0].revision, 2, 'profile list exposes the revision');
   assert.equal((await req('PUT', 'profiles/' + id, { name: '' })).status, 400, 'blank rename rejected');
   const files = fs.readdirSync(path.join(DATA_DIR, 'profiles'));
   assert.deepEqual(files, [id + '.json'], 'one JSON file per profile, no tmp leftovers');
@@ -155,6 +163,76 @@ try {
   assert.ok(offlineSeen, 'offline status reported');
   assert.equal(CS.profiles.isOnline(), false);
   console.log('browser profile-layer checks passed');
+
+  /* ---- optimistic concurrency: a stale client gets 409 and keeps its draft ---- */
+  const lsCon = makeLocalStorage();
+  lsCon.setItem('chromastack.api-base', BASE);
+  lsCon.setItem('chromastack.active-profile.v1', removedLast.activeId);
+  CS = loadBrowserModules(lsCon);
+  const conId = removedLast.activeId;
+  await CS.profiles.init();
+  const rev0 = (await req('GET', 'profiles/' + conId)).body.revision;
+  const other = { calibrations: { 'id:blue': { id: 'blue', name: 'Blue', hex: '#00358e', td: 2.2 } }, lutTdOverrides: {}, lutHexOverrides: {} };
+  assert.equal((await req('PUT', 'profiles/' + conId, { data: other, expectedRevision: rev0 })).status, 200, 'other device writes');
+  const statusesC = [];
+  CS.profiles.onStatus = s => statusesC.push(s);
+  const localRed = { tdPalette: [{ id: 'red', name: 'Red', hex: '#c00d1e', td: 4.4, brand: 'Test', material: 'PLA' }], filamentCalibrations: {}, lutTdOverrides: {}, lutHexOverrides: {} };
+  CS.settings.save(localRed);
+  await CS.profiles.flush(false);
+  assert.ok(statusesC.includes('conflict'), 'stale write reports a conflict');
+  assert.ok(CS.profiles.hasConflict());
+  assert.equal((await req('GET', 'profiles/' + conId)).body.data.calibrations['id:blue'].td, 2.2, 'other device data is not overwritten');
+  assert.equal(CS.profiles.cachedData().calibrations['id:red'].td, 4.4, 'local draft is retained');
+  const adopted = await CS.profiles.resolveConflict('server');
+  assert.equal(adopted.calibrations['id:blue'].td, 2.2, 'server resolution adopts server data');
+  assert.equal(CS.profiles.hasConflict(), false);
+
+  /* after resolving, a new edit writes normally */
+  CS.settings.save(localRed);
+  await CS.profiles.flush(false);
+  assert.equal((await req('GET', 'profiles/' + conId)).body.data.calibrations['id:red'].td, 4.4, 'writes resume after resolution');
+
+  /* local resolution overwrites with a fresh precondition */
+  const cur = (await req('GET', 'profiles/' + conId)).body;
+  await req('PUT', 'profiles/' + conId, { data: { calibrations: { 'id:yellow': { td: 7 } }, lutTdOverrides: {}, lutHexOverrides: {} }, expectedRevision: cur.revision });
+  const localBlue = { tdPalette: [{ id: 'blue', name: 'Blue', hex: '#00358e', td: 3.3, brand: 'Test', material: 'PLA' }], filamentCalibrations: {}, lutTdOverrides: {}, lutHexOverrides: {} };
+  CS.settings.save(localBlue);
+  await CS.profiles.flush(false);
+  assert.ok(CS.profiles.hasConflict(), 'second stale write conflicts again');
+  const kept = await CS.profiles.resolveConflict('local');
+  assert.equal(kept.calibrations['id:blue'].td, 3.3, 'local resolution keeps the draft');
+  const srv = (await req('GET', 'profiles/' + conId)).body;
+  assert.equal(srv.data.calibrations['id:blue'].td, 3.3, 'local resolution reached the server');
+  assert.ok(!('id:yellow' in srv.data.calibrations), 'local resolution replaced the server snapshot');
+
+  /* ---- offline clear is queued, not reported as synced ---- */
+  CS.settings.save(localRed);
+  await CS.profiles.flush(false);
+  const statusesClear = [];
+  CS.profiles.onStatus = s => statusesClear.push(s);
+  lsCon.setItem('chromastack.api-base', 'http://127.0.0.1:1/');
+  await CS.profiles.clearActive();
+  assert.ok(statusesClear.includes('offline'), 'offline clear reports pending');
+  assert.ok(!statusesClear.includes('synced'), 'offline clear is not reported as synced');
+  assert.equal((await req('GET', 'profiles/' + conId)).body.data.calibrations['id:red'].td, 4.4, 'server untouched while offline');
+  lsCon.setItem('chromastack.api-base', BASE);
+  await CS.profiles.flush(false);
+  assert.equal((await req('GET', 'profiles/' + conId)).body.data.calibrations['id:red'], undefined, 'pending clear reaches the server after reconnect');
+  assert.ok(statusesClear.includes('synced'), 'clear confirms after the server acknowledges');
+
+  /* ---- a mirror from another profile is never loaded ---- */
+  const lsMix = makeLocalStorage();
+  lsMix.setItem('chromastack.api-base', 'http://127.0.0.1:1/');
+  lsMix.setItem('chromastack.active-profile.v1', 'p-x');
+  lsMix.setItem(CS.profiles.MIRROR_KEY, JSON.stringify({
+    profileId: 'p-y', revision: 2,
+    data: { calibrations: { 'id:blue': { td: 2.2 } }, lutTdOverrides: {}, lutHexOverrides: {} },
+    updatedAt: Date.now()
+  }));
+  CS = loadBrowserModules(lsMix);
+  const mixed = await CS.profiles.init();
+  assert.deepEqual(mixed.calibrations, {}, 'mirror for another profile is ignored');
+  console.log('profile concurrency checks passed');
 } finally {
   server.kill();
   fs.rmSync(DATA_DIR, { recursive: true, force: true });

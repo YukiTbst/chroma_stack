@@ -244,11 +244,17 @@
   function updateProfileStatus(status, detail) {
     const el = $('profileSyncStatus');
     if (el) {
+      el.style.cursor = '';
       if (status === 'syncing') { el.textContent = '同步中…'; el.className = 'tiny sync-syncing'; el.title = ''; }
       else if (status === 'synced') {
         el.textContent = '已同步 ' + new Date().toTimeString().slice(0, 5);
         el.className = 'tiny sync-ok';
         el.title = detail ? 'Profile：' + detail : '标定已保存到服务器';
+      } else if (status === 'conflict') {
+        el.textContent = '冲突 · 本机改动未上传';
+        el.className = 'tiny sync-off';
+        el.title = '另一台设备已保存更新的标定。点击选择保留本机或改用服务器版本';
+        el.style.cursor = 'pointer';
       } else {
         el.textContent = '离线 · 修改暂存本机';
         el.className = 'tiny sync-off';
@@ -258,6 +264,22 @@
     const online = CS.profiles.isOnline();
     for (const id of ['btnNewProfile', 'btnRenameProfile', 'btnDeleteProfile']) if ($(id)) $(id).disabled = !online;
     if ($('profileSelect')) $('profileSelect').disabled = !online;
+  }
+
+  /* A revision conflict needs a user decision: overwrite the server with the
+     local draft, or adopt the server version and discard the local one. */
+  async function resolveProfileConflict() {
+    if (!CS.profiles.hasConflict()) return;
+    const useLocal = window.confirm('标定 profile 已在另一台设备更新。\n\n确定：用本机版本覆盖服务器。\n取消：改用服务器版本（丢弃本机未上传的改动）。');
+    try {
+      const data = await CS.profiles.resolveConflict(useLocal ? 'local' : 'server');
+      if (data) {
+        adoptProfileData(data);
+        toast(useLocal ? '已用本机标定覆盖服务器' : '已采用服务器标定');
+      }
+    } catch (e) {
+      toast('处理冲突失败：' + (e.message || e));
+    }
   }
 
   function renderProfileBar() {
@@ -1593,6 +1615,7 @@
     $('btnAnalyzeStage').addEventListener('click', () => analyze());
     $('btnResetSettings').addEventListener('click', resetSettings);
     $('profileSelect').addEventListener('change', e => switchProfile(e.target.value));
+    if ($('profileSyncStatus')) $('profileSyncStatus').addEventListener('click', resolveProfileConflict);
     $('btnNewProfile').addEventListener('click', createProfile);
     $('btnRenameProfile').addEventListener('click', renameProfile);
     $('btnDeleteProfile').addEventListener('click', deleteProfile);

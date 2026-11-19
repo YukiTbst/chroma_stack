@@ -20,7 +20,7 @@ node tests/test-view3d.mjs      # 3D 正反方向、真实材料侧壁和 X 剖�
 node tests/test-manual-calc.mjs  # 参数/耗材统一手动计算、连续加料不逐次分析、平滑数字输入
 node tests/test-background.mjs  # 边界背景、气泡距离场、四连通、内部空腔切换、低层支撑、异形3D/3MF
 node tests/test-settings.mjs   # 标定快照纯度、profile 层委托、工程参数不落地、UI 接线
-node tests/test-profile-api.mjs # 起真实 API 进程：CRUD/校验/原子写；浏览器层迁移、跨设备共享、离线镜像、删除回退
+node tests/test-profile-api.mjs # 起真实 API 进程：CRUD/校验/原子写/revision+409；浏览器层迁移、跨设备共享、离线镜像、冲突解决、离线清空、删除回退
 node tests/test-batch-calibration.mjs # 单色/Z金字塔、四点透视、非不透明参考下的白平衡与实色/HD/TD联合拟合
 node tests/test-matrix-calibration.mjs # 100mm六色矩阵板：与已打印3MF元数据逐格对齐、透视+噪声+90°旋转/镜像下HD/实色/增益恢复、跨色格ΔE交叉验证
 node tests/test-detail-preserve.mjs # 默认面积门槛下 7.5mm 灰/肤色块不被填洞翻成纯色；近白噪声孔仍被吸收

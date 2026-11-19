@@ -38,7 +38,12 @@
         cache: 'no-store'
       });
       const payload = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(payload.error || ('HTTP ' + res.status));
+      if (!res.ok) {
+        const err = new Error(payload.error || ('HTTP ' + res.status));
+        err.status = res.status;
+        err.payload = payload;
+        throw err;
+      }
       return payload;
     } finally { clearTimeout(timer); }
   }
@@ -49,10 +54,12 @@
     online: false,
     initialized: false,
     lastData: emptyData(),
-    pending: null,        // latest snapshot waiting to be pushed
+    revision: null,      // last known server revision of the active profile
+    pending: null,       // latest snapshot waiting to be pushed
     timer: null,
     saving: false,
-    onStatus: null        // (status, detail) => void ; status: synced|syncing|offline
+    conflict: null,      // { data, serverRevision, name, updatedAt }
+    onStatus: null       // (status, detail) => void ; status: synced|syncing|offline|conflict
   };
 
   function emit(status, detail) {
@@ -62,7 +69,7 @@
   }
 
   function writeMirror(data) {
-    lsSet(MIRROR_KEY, JSON.stringify({ profileId: state.activeId, data, updatedAt: Date.now() }));
+    lsSet(MIRROR_KEY, JSON.stringify({ profileId: state.activeId, revision: state.revision, data, updatedAt: Date.now() }));
   }
 
   function readMirror() {
@@ -96,7 +103,7 @@
 
   async function ensureProfile(name, data) {
     const p = await api('POST', 'profiles', { name, data: data || emptyData() });
-    state.profiles.push({ id: p.id, name: p.name, createdAt: p.createdAt, updatedAt: p.updatedAt });
+    state.profiles.push({ id: p.id, name: p.name, createdAt: p.createdAt, updatedAt: p.updatedAt, revision: p.revision });
     return p;
   }
 
@@ -122,6 +129,8 @@
       setActive(active.id);
       state.online = true;
       state.initialized = true;
+      state.revision = full.revision || 1;
+      state.conflict = null;
       state.lastData = full.data || emptyData();
       writeMirror(state.lastData);
       emit('synced', full.name);
@@ -131,18 +140,38 @@
       state.initialized = true;
       state.activeId = pointer;
       const mirror = readMirror();
-      let data = null;
+      let data = null, revision = null, mismatch = false;
       if (legacy) data = legacy;                       // still awaiting migration
-      else if (mirror && (!pointer || mirror.profileId === pointer)) data = mirror.data;
-      else if (mirror) data = mirror.data;
+      else if (mirror && (!pointer || mirror.profileId === pointer)) {
+        data = mirror.data;
+        revision = mirror.revision == null ? null : mirror.revision;
+      } else if (mirror && pointer) {
+        // Never load a mirror that belongs to a different profile: it would
+        // silently mix two calibration sets.
+        mismatch = true;
+      }
       state.lastData = clone(data || emptyData());
-      emit('offline', String(e && e.message || e));
+      state.revision = revision;
+      emit('offline', mismatch ? '离线；本机镜像属于其他 profile，未载入' : String(e && e.message || e));
       return clone(state.lastData);
     }
   }
 
+  function enterConflict(data, payload) {
+    state.pending = clone(data);
+    if (payload && payload.revision != null) state.revision = payload.revision;
+    state.conflict = {
+      data: clone(data),
+      serverRevision: state.revision,
+      name: payload && payload.name || null,
+      updatedAt: payload && payload.updatedAt || 0
+    };
+    writeMirror(data);
+    emit('conflict', state.conflict.name || '');
+  }
+
   async function pushPending(keepalive) {
-    if (state.pending == null || state.saving) return;
+    if (state.pending == null || state.saving || state.conflict) return;
     if (!state.activeId) {
       // Offline at init: try to (re)establish a profile before pushing.
       try {
@@ -153,7 +182,25 @@
         setActive(active.id);
       } catch (e) { emit('offline', String(e && e.message || e)); return; }
     }
+    // Without a known base revision a conditional write is impossible. Fetch
+    // it once; if the server already holds different data, surface a conflict
+    // instead of silently replacing the other device's calibration.
+    if (state.revision == null) {
+      try {
+        const full = await api('GET', 'profiles/' + state.activeId);
+        state.revision = full.revision || 1;
+        if (JSON.stringify(full.data || emptyData()) !== JSON.stringify(state.pending)) {
+          enterConflict(state.pending, full);
+          return;
+        }
+      } catch (e) {
+        state.online = false;
+        emit('offline', String(e && e.message || e));
+        return;
+      }
+    }
     const data = state.pending;
+    const expectedRevision = state.revision;
     state.pending = null;
     state.saving = true;
     emit('syncing');
@@ -161,17 +208,22 @@
       const res = await fetch(apiBase() + 'profiles/' + state.activeId, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ data }),
+        body: JSON.stringify({ data, expectedRevision }),
         keepalive: !!keepalive
       });
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const p = await res.json().catch(() => null);
+      const payload = await res.json().catch(() => ({}));
+      if (res.status === 409 || res.status === 428) {
+        enterConflict(data, payload);
+        return;
+      }
+      if (!res.ok) throw new Error(payload.error || ('HTTP ' + res.status));
       state.online = true;
+      state.revision = payload.revision || state.revision;
       state.lastData = clone(data);
       writeMirror(data);
       const meta = state.profiles.find(x => x.id === state.activeId);
-      if (meta && p) { meta.name = p.name; meta.updatedAt = p.updatedAt; }
-      emit('synced', p && p.name);
+      if (meta) { meta.name = payload.name; meta.updatedAt = payload.updatedAt; meta.revision = payload.revision; }
+      emit('synced', payload.name);
     } catch (e) {
       state.online = false;
       if (state.pending == null) state.pending = data; // retry on next save/flush
@@ -180,7 +232,7 @@
       state.saving = false;
       // Only auto-retry while online; offline edits wait for the next user
       // save or an explicit flush (profile switch / page hide).
-      if (state.pending != null && state.online && !keepalive) schedulePush();
+      if (state.pending != null && state.online && !state.conflict && !keepalive) schedulePush();
     }
   }
 
@@ -193,9 +245,10 @@
      the mirror is written synchronously so nothing is lost on crash/offline. */
   function save(data) {
     state.pending = clone(data);
+    if (state.conflict) state.conflict.data = clone(data);
     state.lastData = clone(data); // cached reads must reflect offline saves too
     writeMirror(state.pending);
-    schedulePush();
+    if (!state.conflict) schedulePush();
     return true;
   }
 
@@ -206,33 +259,42 @@
   }
 
   async function switchTo(id) {
+    if (state.conflict) throw new Error('存在未同步的 profile 冲突，请先处理');
     await flush(false);
+    if (state.conflict) throw new Error('存在未同步的 profile 冲突，请先处理');
     const full = await api('GET', 'profiles/' + id);
     setActive(id);
     state.online = true;
+    state.revision = full.revision || 1;
     state.lastData = full.data || emptyData();
     state.pending = null;
+    state.conflict = null;
     writeMirror(state.lastData);
     emit('synced', full.name);
     return clone(state.lastData);
   }
 
   async function create(name, data) {
+    if (state.conflict) throw new Error('存在未同步的 profile 冲突，请先处理');
     const p = await ensureProfile(name, data);
     state.online = true;
     return p;
   }
 
   async function rename(id, name) {
-    const p = await api('PUT', 'profiles/' + id, { name });
     const meta = state.profiles.find(x => x.id === id);
-    if (meta) { meta.name = p.name; meta.updatedAt = p.updatedAt; }
+    const body = { name };
+    if (meta && meta.revision != null) body.expectedRevision = meta.revision;
+    const p = await api('PUT', 'profiles/' + id, body);
+    if (meta) { meta.name = p.name; meta.updatedAt = p.updatedAt; meta.revision = p.revision; }
+    if (id === state.activeId) state.revision = p.revision || state.revision;
     return p;
   }
 
   /* Delete a profile; guarantees at least one remains and returns the data of
      the profile that should become active. */
   async function remove(id) {
+    if (state.conflict) throw new Error('存在未同步的 profile 冲突，请先处理');
     await api('DELETE', 'profiles/' + id);
     state.profiles = state.profiles.filter(p => p.id !== id);
     if (!state.profiles.length) await ensureProfile('默认标定', emptyData());
@@ -240,34 +302,97 @@
       const next = state.profiles[0];
       const full = await api('GET', 'profiles/' + next.id);
       setActive(next.id);
+      state.revision = full.revision || 1;
       state.lastData = full.data || emptyData();
       state.pending = null;
+      state.conflict = null;
       writeMirror(state.lastData);
       return { activeId: next.id, data: clone(state.lastData) };
     }
     return { activeId: state.activeId, data: null };
   }
 
-  /* Reset calibration content of the active profile (keeps the profile). */
+  /* Clear calibration content of the active profile (keeps the profile).
+     Offline it is recorded as a pending write and only reported as synced
+     after the server acknowledges it. */
   async function clearActive() {
     const data = emptyData();
-    state.pending = null;
-    clearTimeout(state.timer);
-    if (state.activeId && state.online) {
-      await api('PUT', 'profiles/' + state.activeId, { data });
+    if (state.conflict) {
+      state.pending = clone(data);
+      state.conflict.data = clone(data);
+      state.lastData = clone(data);
+      writeMirror(state.pending);
+      emit('conflict', state.conflict.name || '');
+      return;
     }
-    state.lastData = data;
-    writeMirror(data);
-    emit('synced');
+    state.pending = clone(data);
+    state.lastData = clone(data);
+    writeMirror(state.pending);
+    clearTimeout(state.timer);
+    state.timer = null;
+    if (!state.activeId || !state.online) {
+      emit('offline', '本地标定已清空，等待联网同步');
+      return;
+    }
+    await pushPending(false);
+  }
+
+  /* Resolve a revision conflict. mode 'local' overwrites the server with the
+     local draft (with a fresh precondition, retried once); mode 'server'
+     adopts the server data and discards the local draft. */
+  async function resolveConflict(mode) {
+    if (!state.conflict) return null;
+    let full;
+    try { full = await api('GET', 'profiles/' + state.activeId); }
+    catch (e) { emit('offline', String(e && e.message || e)); throw e; }
+    let rev = full.revision || 1;
+    if (mode !== 'local') {
+      state.revision = rev;
+      state.lastData = clone(full.data || emptyData());
+      state.pending = null;
+      state.conflict = null;
+      writeMirror(state.lastData);
+      emit('synced', full.name);
+      return clone(state.lastData);
+    }
+    const local = state.conflict.data;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const p = await api('PUT', 'profiles/' + state.activeId, { data: local, expectedRevision: rev });
+        state.revision = p.revision || rev + 1;
+        state.lastData = clone(local);
+        state.pending = null;
+        state.conflict = null;
+        writeMirror(local);
+        emit('synced', p.name);
+        return clone(local);
+      } catch (e) {
+        if (e.status === 409 && attempt === 0) {
+          const again = await api('GET', 'profiles/' + state.activeId);
+          rev = again.revision || 1;
+          continue;
+        }
+        emit(e.status === 409 ? 'conflict' : 'offline', String(e && e.message || e));
+        throw e;
+      }
+    }
+    return null;
   }
 
   CS.profiles = {
     ACTIVE_KEY, MIRROR_KEY, LEGACY_KEY, BASE_KEY,
-    init, save, flush, switchTo, create, rename, remove, clearActive,
+    init, save, flush, switchTo, create, rename, remove, clearActive, resolveConflict,
     list: () => state.profiles.slice(),
     activeId: () => state.activeId,
     isOnline: () => state.online,
     cachedData: () => clone(state.lastData),
+    revision: () => state.revision,
+    hasConflict: () => !!state.conflict,
+    conflictInfo: () => state.conflict ? {
+      serverRevision: state.conflict.serverRevision,
+      name: state.conflict.name,
+      updatedAt: state.conflict.updatedAt
+    } : null,
     set onStatus(fn) { state.onStatus = fn; },
     get onStatus() { return state.onStatus; }
   };
