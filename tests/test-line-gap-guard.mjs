@@ -18,7 +18,7 @@ const palette = names.map(name => {
   return { id: p.id, name, hex: p.hex, td: p.td, brand: p.brand, material: p.material };
 });
 const base = {
-  engine: 'td', palette, widthMm: 150, flatTopMm: 1.6, reliefMm: 0.16,
+  engine: 'td', palette, widthMm: 30, flatTopMm: 1.6, reliefMm: 0.16,
   variableHeight: true, layerHeight: 0.08, gradLayers: 6, foundationIndex: 1,
   stdThreshold: 0, residualThreshold: 5, minFlatPercent: 0.02,
   smoothMm: 0, lineWidthMm: 0.42, smoothLevel: 0, mergeDeltaE: 0,
