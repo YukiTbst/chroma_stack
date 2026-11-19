@@ -717,6 +717,18 @@
     return 'fallback';
   }
 
+  /* The one place that decides the physical export grid. Preview, plan summary
+     and the 3MF must all report the same numbers. */
+  function exportGridFor(plan, exportMax) {
+    const max = exportMax != null
+      ? Math.max(80, Math.min(1024, Number(exportMax) || 300))
+      : Math.max(plan.w, plan.h) > 1280 ? 1280 : Math.max(plan.w, plan.h);
+    const scale = Math.min(1, max / Math.max(plan.w, plan.h));
+    const ew = Math.max(1, Math.round(plan.w * scale));
+    const eh = Math.max(1, Math.round(plan.h * scale));
+    return { width: ew, height: eh, scale, downscaled: scale < 0.999 };
+  }
+
   function build3MFParts(plan, options = {}) {
     if (!plan) throw new Error('没有可导出的方案');
     // Native resolution is the correctness default: the web preview and 3MF
@@ -725,12 +737,8 @@
     // which already matches the A1's XY positioning limit): a 2560 analysis
     // grid is for preview/layer inspection, and meshing it would block the
     // page for minutes and multiply the file size with no printable gain.
-    const exportMax = options.exportMax != null
-      ? Math.max(80, Math.min(1024, Number(options.exportMax) || 300))
-      : Math.max(plan.w, plan.h) > 1280 ? 1280 : Math.max(plan.w, plan.h);
-    const scale = Math.min(1, exportMax / Math.max(plan.w, plan.h));
-    const ew = Math.max(1, Math.round(plan.w * scale));
-    const eh = Math.max(1, Math.round(plan.h * scale));
+    const grid = exportGridFor(plan, options.exportMax);
+    const ew = grid.width, eh = grid.height;
     const plane = samplePlane(plan, ew, eh);
     const pixelSize = plan.widthMm / ew;
     const prisms = buildPrisms(plan, plane);
@@ -945,6 +953,11 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
       engine: plan.engine,
       lut: plan.lutKey,
       physical: { widthMm: +plan.widthMm.toFixed(2), heightMm: +plan.heightMm.toFixed(2), pixelSizeMm: +plan.pixelSize.toFixed(4) },
+      exportGrid: (() => {
+        const g = exportGridFor(plan);
+        return { width: g.width, height: g.height, sourceWidth: plan.w, sourceHeight: plan.h, downscaled: g.downscaled };
+      })(),
+      diagnostics: plan.diagnostics || null,
       layers: { layerHeight: plan.layerHeight, flatLayers: plan.flatLayers, flatBaseLayers: plan.flatBaseLayers || 0, gradientStartLayer: plan.gradStartLayer, gradientTopLayer: plan.gradTopLayer, maxLayers: plan.maxLayers, flatTopMm: +plan.flatTopMm.toFixed(3), gradientTopMm: +plan.gradTopMm.toFixed(3), actualGradientTopMm: +(plan.actualGradTopMm || plan.gradTopMm).toFixed(3), reliefMm: +plan.reliefMm.toFixed(3), variableHeight: !!plan.variableHeight },
       palette: plan.palette.map((p, i) => ({ slot: i + 1, name: p.name, hex: p.hex, td: p.td, hdMm: +(p.hd || 0).toFixed(3), brand: p.brand, material: p.material })),
       foundation: plan.foundation.name,
@@ -990,6 +1003,11 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
     lines.push(`- 成品尺寸：${s.physical.widthMm} × ${s.physical.heightMm} mm`);
     lines.push(`- 层高：${s.layers.layerHeight} mm；纯色区 ${s.layers.flatBaseLayers || 0} 层基底 + ${s.layers.flatLayers - (s.layers.flatBaseLayers || 0)} 层纯色（共 ${s.layers.flatLayers} 层，${s.layers.flatTopMm} mm）；渐变区 ${s.layers.gradientStartLayer}–${s.layers.gradientTopLayer} 层；浮雕差 ${s.layers.reliefMm} mm`);
     lines.push(`- 颜色预测：平均 ΔE00 ${s.stats.meanDeltaE00}，P90 ${s.stats.p90DeltaE00}，ΔE00≤5 占 ${s.stats.under5Percent}%`);
+    lines.push(`- 导出网格：${s.exportGrid.width}×${s.exportGrid.height}${s.exportGrid.downscaled ? `（工作网格 ${s.exportGrid.sourceWidth}×${s.exportGrid.sourceHeight}，导出时重新离散化，细节以切片预览为准）` : '（与工作网格一致）'}`);
+    if (s.diagnostics) {
+      const dg = s.diagnostics.groups;
+      lines.push(`- 分组色差：线条 ${dg.line.meanDE}（${dg.line.pixels}px） / 纯色 ${dg.flat.meanDE}（${dg.flat.pixels}px） / 渐变 ${dg.gradient.meanDE}（${dg.gradient.pixels}px）；填洞吸收 ${s.diagnostics.fill.filledPixels}px、拒绝 ${s.diagnostics.fill.rejectedPixels}px；纯色遮盖不足 ${s.diagnostics.coverage.badPixels}px（顶色 ${s.diagnostics.coverage.topLayers} 层）。`);
+    }
     lines.push(`- 纯色区占比 ${s.stats.flatPercent}%，渐变区占比 ${s.stats.gradientPercent}%，渐变配方 ${s.stats.families} 个；平滑 ${s.stats.smoothMm != null ? s.stats.smoothMm.toFixed(2) + ' mm（半径 ' + (s.stats.smoothRadiusPx || 0) + 'px，线宽 ' + (s.stats.lineWidthMm || 0.42).toFixed(2) + 'mm）' : (s.stats.smoothLevel || 0) + '/4'}；层序合并 ${s.stats.mergeDeltaE || 0} ΔE，${s.stats.mergedGroups || 0} 组共享底层（${s.stats.sharedBasePercent || 0}% 渐变像素）`);
     if (s.stats.heightMergeDeltaE) {
       lines.push(`- 边缘光晕清理 ${s.stats.edgeClean || 0}/3，抗锯齿带 ${s.stats.edgePixelPercent || 0}% 像素。`);
@@ -1038,6 +1056,6 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
 
   CS.exporter = {
     build3MFBytes, build3MFBytesAsync, build3MFBlob, build3MFBlobAsync, planSummary, buildPlanMarkdown, samplePlane, buildPrisms,
-    traceLoops, simplifyLoop, loopArea, pointInLoop, meshPrism
+    traceLoops, simplifyLoop, loopArea, pointInLoop, meshPrism, exportGridFor
   };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

@@ -30,6 +30,8 @@ node tests/test-gamut-recall.mjs    # 小色域全扫描最优；大色域并集
 node tests/test-calibration-channels.mjs # 标量TD覆盖旧通道（楔形/手改/重置/profile应用）；预测色随之改变
 node tests/test-flat-coverage.mjs # 纯色区按“基底+有限顶色层”预测；薄顶不再当无限厚；遮盖不足有警告
 node tests/test-height-limit.mjs # 渐变最高高度只作上限：自然短配方不被抬到最高层
+node tests/test-vector-components.mjs # 矢量化直印按连通分量判定：同色小岛不被大区域连带压平
+node tests/test-export-diagnostics.mjs # 导出网格单一真值；fill/coverage/线条·纯色·渐变分组诊断
 node tests/test-line-gap-guard.mjs # 强保护不得把横穿黑线的肤色带涂黑；同色相浅色缺口仍可桥接
 ```
 

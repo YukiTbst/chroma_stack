@@ -1023,7 +1023,9 @@
     } else if (state.view === 'original') {
       el.innerHTML = `<span>原图 · ${p.w}×${p.h}px 工作分辨率</span>`;
     } else {
-      el.innerHTML = `<span>模拟成画 · 正面漫射光近似</span><span>ΔE00 平均 <b>${p.stats.meanDE.toFixed(2)}</b></span><span>P90 <b>${p.stats.p90}</b></span>`;
+      const dg = p.diagnostics && p.diagnostics.groups;
+      const groupText = dg ? `<span>线 <b>${dg.line.meanDE}</b> · 纯 <b>${dg.flat.meanDE}</b> · 渐 <b>${dg.gradient.meanDE}</b></span>` : '';
+      el.innerHTML = `<span>模拟成画 · 正面漫射光近似</span><span>ΔE00 平均 <b>${p.stats.meanDE.toFixed(2)}</b></span><span>P90 <b>${p.stats.p90}</b></span>${groupText}`;
     }
   }
 
@@ -1812,7 +1814,10 @@
         // if the user keeps editing; later edits never change its content/name.
         const { blob } = await X.build3MFBlobAsync(p);
         downloadBlob(blob, filenameBase(p) + '.3mf');
-        toast(`3MF 已按 ${p.w}×${p.h} 原生网格生成；导入切片器后核对耗材槽位。`);
+        const g = X.exportGridFor(p);
+        toast(g.downscaled
+          ? `3MF 导出网格 ${g.width}×${g.height}（工作 ${p.w}×${p.h}，已重新离散化）；导入切片器后核对耗材槽位。`
+          : `3MF 已按 ${p.w}×${p.h} 原生网格生成；导入切片器后核对耗材槽位。`);
       } catch (e) {
         console.error(e);
         toast('3MF 导出失败：' + (e.message || e));
@@ -1879,6 +1884,7 @@
       '============================',
       `尺寸：${p.widthMm.toFixed(2)} × ${p.heightMm.toFixed(2)} mm`,
       `层高：${p.layerHeight} mm；纯色区 ${p.flatBaseLayers || 0} 层基底 + ${p.flatLayers - (p.flatBaseLayers || 0)} 层纯色（共 ${p.flatLayers} 层）；渐变区 ${p.gradStartLayer}–${p.gradTopLayer} 层（最高）；浮雕差 ${p.reliefMm.toFixed(2)} mm${p.variableHeight ? '；各色块顶高 '+(p.gradStartLayer*p.layerHeight).toFixed(2)+'–'+p.actualGradTopMm.toFixed(2)+' mm' : ''}`,
+      (() => { const g = X.exportGridFor(p); return `导出网格：${g.width}×${g.height}${g.downscaled ? `（工作 ${p.w}×${p.h}，导出重新离散化）` : '（与工作网格一致）'}`; })(),
       `引擎：${p.engine === 'lut' ? '物理 LUT（Bambu PLA Basic 5 层）' : 'TD 立体浮雕（自定义耗材）'}；平滑 ${p.smoothMm != null ? p.smoothMm.toFixed(2) + ' mm (≈' + (p.smoothRadiusPx || 0) + 'px, 线宽 ' + (p.lineWidthMm || 0.42).toFixed(2) + 'mm)' : (p.smoothLevel || 0) + '/4'}；层序合并 ${p.mergeDeltaE || 0} ΔE`,
       '',
       '文件说明：',
