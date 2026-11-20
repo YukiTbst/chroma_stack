@@ -170,6 +170,10 @@
           if (f >= 0) {
             const li = z - plan.gradStartLayer;
             if (li >= 0 && li < plan.families[f].recipe.length) fi = plan.families[f].recipe[li];
+          } else if (plan.equalHeight && z < plan.commonTopLayer) {
+            // Equal-height envelope/support columns are solid foundation up to the
+            // common top, not AIR (review F04: pillars must not export lower).
+            fi = plan.foundationIndex;
           }
         }
       }

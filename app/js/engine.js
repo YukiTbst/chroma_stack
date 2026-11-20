@@ -402,7 +402,7 @@
       const tdR = Number(p.tdR) || td, tdG = Number(p.tdG) || td, tdB = Number(p.tdB) || td;
       const rgb = C.hexToRgb(hex);
       return {
-        index: i, key: paletteKey(p), name: p.name || ('耗材 ' + (i + 1)), hex, brand: p.brand || '', material: p.material || 'PLA',
+        index: i, id: p.id || '', key: paletteKey(p), name: p.name || ('耗材 ' + (i + 1)), hex, brand: p.brand || '', material: p.material || 'PLA',
         td, tdR, tdG, tdB, hd: td * 0.1, hdR: tdR * 0.1, hdG: tdG * 0.1, hdB: tdB * 0.1, rgb,
         lin: { r: C.srgbToLinear(rgb.r / 255), g: C.srgbToLinear(rgb.g / 255), b: C.srgbToLinear(rgb.b / 255) },
         lab: C.hexToLab(hex), fromLut: false
@@ -2403,6 +2403,22 @@
       colorLayers = clamp(Math.round(Number(options.gradLayers) || 6), 1, 24);
       baseLayers = 0;
       baseIndex = clamp(Math.round(Number(options.foundationIndex) || 0), 0, palette.length - 1);
+      foundation = palette[baseIndex];
+    }
+    // F02: a published calibrationV2 model overrides palette TD/opaque so production
+    // colour-solving actually uses the saved calibration, not just the shared formula.
+    if (engine === 'td' && options.opticalModel && options.opticalModel.params) {
+      const params = options.opticalModel.params;
+      for (const p of palette) {
+        const t = params[p.id] || params[p.name];
+        if (!t) continue;
+        p.lin = { r: t.opaque[0], g: t.opaque[1], b: t.opaque[2] };
+        p.hdR = Math.exp(t.logHd[0]); p.hdG = Math.exp(t.logHd[1]); p.hdB = Math.exp(t.logHd[2]);
+        p.hd = (p.hdR + p.hdG + p.hdB) / 3;
+        p.tdR = p.hdR * 10; p.tdG = p.hdG * 10; p.tdB = p.hdB * 10; p.td = p.hd * 10;
+        p.lab = C.rgb01ToLab({ r: C.linearToSrgb(p.lin.r), g: C.linearToSrgb(p.lin.g), b: C.linearToSrgb(p.lin.b) });
+        p.fromModel = true;
+      }
       foundation = palette[baseIndex];
     }
 

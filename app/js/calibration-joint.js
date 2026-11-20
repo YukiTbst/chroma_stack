@@ -7,7 +7,8 @@
    Synthetic recovery here is program validity, NOT physical acceptance. */
 (function (root) {
   const CS = root.CS = root.CS || {};
-  const C = CS.color, O = CS.optics, CD = CS.calibrationData, B = CS.batchCalibration, M = CS.matrixCalibration;
+  const C = CS.color, O = CS.optics, B = CS.batchCalibration, M = CS.matrixCalibration;
+  const cd = () => CS.calibrationData; // resolve lazily: never cache a possibly-unloaded dependency
   const HUBER = d => { const a = Math.abs(d); return a <= 1 ? 0.5 * a * a : a - 0.5; };
 
   function buildComboManifest(palette, opts = {}) {
@@ -49,7 +50,7 @@
       { x: manifest.boardW - 2, y: mBot, filament: 'W' }, { x: 2, y: mBot, filament: 'W' }
     ];
     manifest.baseLayers = 2; manifest.baseHeight = manifest.firstLayer + (manifest.baseLayers - 1) * lh;
-    manifest.manifestHash = CD.manifestHash(manifest);
+    manifest.manifestHash = cd().manifestHash(manifest);
     return manifest;
   }
 
@@ -65,7 +66,7 @@
      over a shared foundation; the SAME manifest is embedded for later analysis. */
   function buildComboBoard3MF(palette, manifest) {
     const lh = manifest.layerHeight, baseH = manifest.baseHeight;
-    const matIndex = id => palette.findIndex(p => (p.id || '') === id || p.name === id);
+    const matIndex = id => palette.findIndex(p => (p.id || '') === id || p.name === id || (p.hex || '').toLowerCase() === String(id).toLowerCase());
     const blackIndex = palette.reduce((b, p, i) => C.hexToLab(p.hex).L < C.hexToLab(palette[b].hex).L ? i : b, 0);
     const whiteIndex = palette.reduce((b, p, i) => C.hexToLab(p.hex).L > C.hexToLab(palette[b].hex).L ? i : b, 0);
     const halves = manifest.halves || { W: { y0: 0, y1: manifest.boardD / 2 }, K: { y0: manifest.boardD / 2, y1: manifest.boardD } };
@@ -84,7 +85,9 @@
       for (const seg of cell.stack) {
         const z1 = z + seg.layerCount * lh;
         const pos = [], idx = []; addBox(pos, idx, x0, y0, z, x0 + cell.size, y0 + cell.size, z1);
-        objects.push({ name: cell.cellId + ' ' + seg.materialId, pindex: Math.max(0, matIndex(seg.materialId)), pos, idx });
+        const mi = matIndex(seg.materialId);
+        if (mi < 0) throw new Error('组合板材料未映射: ' + seg.materialId);
+        objects.push({ name: cell.cellId + ' ' + seg.materialId, pindex: mi, pos, idx });
         z = z1;
       }
     }
@@ -152,7 +155,7 @@
       amsSlots: palette.map((p, i) => i + 1),
       filaments: palette.map(p => ({ name: p.name, hex: p.hex }))
     };
-    manifest.manifestHash = CD.manifestHash(manifest);
+    manifest.manifestHash = cd().manifestHash(manifest);
     const out = buildComboBoard3MF(palette, manifest);
     return { blob: new Blob([out.bytes], { type: 'model/3mf' }), meta: out.meta };
   }
@@ -258,7 +261,7 @@
     const devDE = meanDE(model, bySplit.dev, lh), testDE = meanDE(model, bySplit.test, lh);
     const tolerance = Number(opts.tolerance) || 6;
     const publishable = !unresolved && testDE != null && testDE <= tolerance;
-    const modelId = CD.makeModelId(theta, [manifest.manifestHash]);
+    const modelId = cd().makeModelId(theta, [manifest.manifestHash]);
     return {
       model: { modelId, params: theta, status: publishable ? 'published' : 'restricted', compatibilityDomain: { layerHeightMm: lh }, trainLoss: best.loss },
       trainLoss: best.loss, devDE, testDE, identifiability, unresolved, publishable,
@@ -270,7 +273,7 @@
      switched, or null (caller keeps the old active model) when not publishable. */
   function publishModel(v2, fitted) {
     if (!fitted || !fitted.publishable) return null;
-    const base = v2 && v2.schemaVersion === 2 ? v2 : CD.emptyV2();
+    const base = v2 && v2.schemaVersion === 2 ? v2 : cd().emptyV2();
     const entry = { modelId: fitted.model.modelId, params: fitted.model.params, status: 'published', compatibilityDomain: fitted.model.compatibilityDomain, metrics: { devDE: fitted.devDE, testDE: fitted.testDE } };
     return { ...base, models: [...(base.models || []), entry], activeModelId: entry.modelId };
   }

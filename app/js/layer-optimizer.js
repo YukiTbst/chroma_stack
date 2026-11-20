@@ -67,13 +67,17 @@
       improved = true;
     }
     // final exact feasibility re-check; any violation -> revert to baseline
-    const ok = regions.every((r, i) => feasible(r, assign[i]));
-    const finalAssign = ok ? assign : baseline;
+    // Per-region feasibility: revert ONLY offending regions to baseline, not the
+    // whole assignment (review F06: one bad region must not discard good moves).
+    const finalAssign = assign.map((s, i) => feasible(regions[i], s) ? s : baseline[i]);
+    const revertedRegions = finalAssign.reduce((n, s, i) => n + (s === baseline[i] && assign[i] !== baseline[i] ? 1 : 0), 0);
+    const changed = finalAssign.some((s, i) => s.join(',') !== baseline[i].join(','));
+    const ok = revertedRegions === 0;
     return {
-      assignment: finalAssign, improved: improved && ok,
+      assignment: finalAssign, improved: changed,
       baselineJ: baseJ, finalJ: J(finalAssign),
       boundaryBefore: baseB, boundaryAfter: boundaryCost(finalAssign),
-      reverted: !ok
+      reverted: revertedRegions > 0, revertedRegions
     };
   }
 

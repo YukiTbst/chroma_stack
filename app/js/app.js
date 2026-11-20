@@ -539,6 +539,9 @@
       flatTopMm: state.flatTopMm, reliefMm: state.reliefMm, gradStartLayerOverride: state.gradStartOverride, gradTopMmOverride: state.gradTopMmOverride, variableHeight: state.variableHeight, layerHeight: state.layerHeight,
       equalHeight: state.geometryMode === 'flat', qualityPolicy: state.qualityPolicy,
       layerCoordination: state.geometryMode === 'flat' && state.qualityPolicy !== 'color',
+      opticalModel: (state.calibrationV2 && state.calibrationV2.activeModelId)
+        ? (state.calibrationV2.models || []).find(m => m.modelId === state.calibrationV2.activeModelId) || null
+        : null,
       gradLayers: state.gradLayers, foundationIndex: state.foundationIndex,
       families: state.families, stdThreshold: state.stdThreshold,
       residualThreshold: state.residualThreshold, minFlatPercent: state.minFlatPercent, smoothLevel: state.smoothLevel, smoothMm: state.smoothMm, lineWidthMm: state.lineWidthMm, mergeDeltaE: state.mergeDeltaE,
@@ -2247,6 +2250,13 @@
     if (!CS.matrixCalibration.canPublish(result.results)) {
       const bad = result.results.filter(r => (r.channelState || []).some(s => s === 'unresolved')).map(r => r.name).join('、');
       toast(`已阻止应用：${bad || '部分耗材'} 存在未解决通道（观测缺信息），不能写成标定值；请补拍该通道或保留原标定`);
+      return;
+    }
+    // F05: pyramid/batch path — bound-only / unidentifiable fits must not be saved as
+    // photo calibration (nominal TD would otherwise masquerade as a measurement).
+    const nominal = (result.results || []).filter(r => r.opaqueFit === false);
+    if (nominal.length) {
+      toast(`已阻止应用：${nominal.map(r => r.name).join('、')} 信息不足（仅界限/名义值），不能保存为照片标定；请补拍或保留原标定`);
       return;
     }
     if (result.matrixChecks && result.matrixChecks.meanDE > 10 && matrixPhotoBad(result)) {
