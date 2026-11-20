@@ -28,14 +28,14 @@
       push('heldout', [{ materialId: a, layerCount: 5 }], 'K', 'test');
       push('repeat', [{ materialId: a, layerCount: 2 }], 'W', 'dev');
     }
-    const manifest = { schemaVersion: 1, boardId: 'combo-' + ids.length, layerHeight: lh, cells, references: [{ kind: 'independent-white', linear: [1, 1, 1] }] };
+    const manifest = { schemaVersion: 1, boardId: 'combo-' + ids.length, layerHeight: lh, firstLayer: Number(opts.firstLayer) || lh, cells, references: [{ kind: 'independent-white', linear: [1, 1, 1] }] };
     // Grid layout so generation / labels / sampling / fitting all read ONE manifest.
     const cols = 10, pitch = 10, size = 8, margin = 6;
     cells.forEach((c, i) => { c.cx = margin + (i % cols) * pitch + size / 2; c.cy = margin + Math.floor(i / cols) * pitch + size / 2; c.size = size; });
     manifest.boardW = margin * 2 + cols * pitch;
     manifest.boardD = margin * 2 + Math.ceil(cells.length / cols) * pitch;
     manifest.markers = [{ x: 2, y: 2 }, { x: manifest.boardW - 2, y: 2 }, { x: manifest.boardW - 2, y: manifest.boardD - 2 }, { x: 2, y: manifest.boardD - 2 }];
-    manifest.baseLayers = 2; manifest.baseHeight = 2 * lh;
+    manifest.baseLayers = 2; manifest.baseHeight = manifest.firstLayer + (manifest.baseLayers - 1) * lh;
     manifest.manifestHash = CD.manifestHash(manifest);
     return manifest;
   }
@@ -87,16 +87,28 @@
     const config = `<?xml version="1.0" encoding="UTF-8"?>\n<config>\n <object id="${aid}">\n  <metadata key="name" value="ChromaStack Combo Calibration"/>\n  <metadata key="extruder" value="1"/>\n${objects.map((o, i) => `  <part id="${i + 2}" subtype="normal_part"><metadata key="name" value="${escapeXml(o.name)}"/><metadata key="extruder" value="${o.pindex + 1}"/></part>`).join('\n')}\n </object>\n</config>`;
     const ct = `<?xml version="1.0" encoding="UTF-8"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\n <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>\n <Default Extension="config" ContentType="text/xml"/>\n <Default Extension="json" ContentType="application/json"/>\n</Types>`;
     const rels = `<?xml version="1.0" encoding="UTF-8"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n <Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>\n</Relationships>`;
+    const ps = manifest.printSettings || { nozzleDiameter: 0.4, lineWidth: 0.42, layerHeight: manifest.layerHeight, initialLayerHeight: manifest.firstLayer, amsSlots: palette.map((p, i) => i + 1), filaments: palette };
+    const projectSettings = `<?xml version="1.0" encoding="UTF-8"?>\n<config>\n <process>\n  <metadata key="layer_height" value="${ps.layerHeight}"/>\n  <metadata key="initial_layer_height" value="${ps.initialLayerHeight}"/>\n  <metadata key="nozzle_diameter" value="${ps.nozzleDiameter}"/>\n  <metadata key="wall_line_width" value="${ps.lineWidth}"/>\n  <metadata key="line_width" value="${ps.lineWidth}"/>\n  <metadata key="wall_loops" value="2"/>\n  <metadata key="top_shell_layers" value="3"/>\n  <metadata key="bottom_shell_layers" value="2"/>\n  <metadata key="sparse_infill_density" value="15%"/>\n  <metadata key="brim_type" value="outer_only"/>\n  <metadata key="brim_width" value="3"/>\n </process>\n <plate>\n  <metadata key="plater_id" value="1"/>\n  <metadata key="filament_map" value="${(ps.amsSlots || palette.map((p, i) => i + 1)).join(',')}"/>\n  <metadata key="filament_colour" value="${palette.map(p => '#' + p.hex.replace('#', '').toUpperCase()).join(';')}"/>\n </plate>\n</config>`;
     const files = [
       { name: '[Content_Types].xml', data: ct }, { name: '_rels/.rels', data: rels },
       { name: '3D/3dmodel.model', data: parts.join('\n') },
       { name: 'Metadata/model_settings.config', data: config },
+      { name: 'Metadata/project_settings.config', data: projectSettings },
       { name: 'Metadata/chromastack-combo-calibration.json', data: JSON.stringify({ app: 'ChromaStack Combo Calibration', manifest, palette }, null, 2) }
     ];
     return { bytes: CS.zip.createZip(files), meta: { manifest, palette } };
   }
-  function buildComboBoardBlob(palette, opts) {
+  function buildComboBoardBlob(palette, opts = {}) {
     const manifest = buildComboManifest(palette, opts);
+    manifest.printSettings = {
+      nozzleDiameter: Number(opts.nozzleDiameter) || 0.4,
+      lineWidth: Number(opts.lineWidth) || 0.42,
+      layerHeight: manifest.layerHeight,
+      initialLayerHeight: manifest.firstLayer,
+      amsSlots: palette.map((p, i) => i + 1),
+      filaments: palette.map(p => ({ name: p.name, hex: p.hex }))
+    };
+    manifest.manifestHash = CD.manifestHash(manifest);
     const out = buildComboBoard3MF(palette, manifest);
     return { blob: new Blob([out.bytes], { type: 'model/3mf' }), meta: out.meta };
   }
