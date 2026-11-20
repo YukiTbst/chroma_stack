@@ -275,5 +275,63 @@
     return { ...base, models: [...(base.models || []), entry], activeModelId: entry.modelId };
   }
 
-  CS.calibrationJoint = { buildComboManifest, fitJointModel, publishModel, modelFromTheta, buildComboBoard3MF, buildComboBoardBlob };
+  /* Analyse a printed combo board photo: locate the 4 corner markers (dark on the
+     white half, bright on the black half), build the manifest->pixel homography,
+     sample each cell's top colour and its half's substrate, then joint-fit. */
+  function components(mask, w, h, minArea, maxArea) {
+    const seen = new Uint8Array(w * h), out = [];
+    for (let s = 0; s < w * h; s++) {
+      if (!mask[s] || seen[s]) continue;
+      const stack = [s]; seen[s] = 1; let area = 0, sx = 0, sy = 0, minX = w, maxX = 0, minY = h, maxY = 0;
+      while (stack.length) {
+        const i = stack.pop(); area++; const x = i % w, y = (i / w) | 0; sx += x; sy += y;
+        minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+          const j = yy * w + xx; if (mask[j] && !seen[j]) { seen[j] = 1; stack.push(j); }
+        }
+      }
+      if (area >= minArea && area <= maxArea) out.push({ cx: sx / area, cy: sy / area, area, fill: area / ((maxX - minX + 1) * (maxY - minY + 1)) });
+    }
+    return out;
+  }
+  function analyzeComboPhoto(imageData, manifest, palette, opts = {}) {
+    const w = imageData.width, h = imageData.height, d = imageData.data;
+    const lum = i => 0.2126 * d[i * 4] + 0.7152 * d[i * 4 + 1] + 0.0722 * d[i * 4 + 2];
+    const dark = new Uint8Array(w * h), bright = new Uint8Array(w * h);
+    for (let i = 0; i < w * h; i++) { const y = lum(i); dark[i] = y < 70 ? 1 : 0; bright[i] = y > 180 ? 1 : 0; }
+    const top = components(dark, w, h, 20, 4000).filter(c => c.cy < h * 0.5 && c.fill > 0.5);
+    const bot = components(bright, w, h, 20, 4000).filter(c => c.cy > h * 0.8 && c.fill > 0.5);
+    let TL, TR, BL, BR;
+    if (opts.markers) { ({ TL, TR, BL, BR } = opts.markers); }
+    else {
+      if (top.length < 2 || bot.length < 2) throw new Error('找不到四个角定位点（上黑下白）');
+      TL = top.reduce((a, b) => a.cx < b.cx ? a : b); TR = top.reduce((a, b) => a.cx > b.cx ? a : b);
+      BL = bot.reduce((a, b) => a.cx < b.cx ? a : b); BR = bot.reduce((a, b) => a.cx > b.cx ? a : b);
+    }
+    const boardCorners = manifest.markers.map(m => ({ cx: m.x, cy: m.y })); // [TL,TR,BR,BL]
+    const imgCorners = [TL, TR, BR, BL];
+    const map = CS.batchCalibration.homography(boardCorners, imgCorners);
+    const pxPerMm = Math.hypot(TR.cx - TL.cx, TR.cy - TL.cy) / (manifest.boardW - 4);
+    const r = Math.max(2, Math.round(pxPerMm * 1.5));
+    const observations = manifest.cells.map(cell => {
+      const s = CS.batchCalibration.sampleMedian(imageData, map, cell.cx, cell.cy, r);
+      // Local substrate in the 2 mm gap beside the cell (same half), averaged over
+      // left+right, so uneven lighting / exposure gradient doesn't bias the base.
+      const gap = cell.size / 2 + 1;
+      const sL = CS.batchCalibration.sampleMedian(imageData, map, cell.cx - gap, cell.cy, r);
+      const sR = CS.batchCalibration.sampleMedian(imageData, map, cell.cx + gap, cell.cy, r);
+      const sub = [0, 1, 2].map(c => Math.round((sL.rgb[c] + sR.rgb[c]) / 2));
+      return {
+        cellId: cell.cellId,
+        observedLinear: s.rgb.map(v => C.srgbToLinear(v / 255)),
+        substrateLinear: sub.map(v => C.srgbToLinear(v / 255)),
+        channelsOk: s.rgb.map(v => v > 2 && v < 254)
+      };
+    });
+    const fit = fitJointModel(observations, manifest, opts);
+    return { observations, markers: { TL, TR, BL, BR }, pxPerMm, fit };
+  }
+
+  CS.calibrationJoint = { buildComboManifest, fitJointModel, publishModel, modelFromTheta, buildComboBoard3MF, buildComboBoardBlob, analyzeComboPhoto };
 })(typeof globalThis !== 'undefined' ? globalThis : this);
