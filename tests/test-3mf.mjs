@@ -2,6 +2,7 @@ import { createRequire } from 'module';
 import fs from 'fs';
 const require = createRequire(import.meta.url);
 require('../app/js/color.js');
+require('../app/js/optics.js');
 require('../app/js/data-lut.js');
 require('../app/js/data-filaments.js');
 require('../app/js/engine.js');

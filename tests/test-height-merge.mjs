@@ -1,6 +1,7 @@
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 require('../app/js/color.js');
+require('../app/js/optics.js');
 require('../app/js/engine.js');
 const { engine } = globalThis.CS;
 const C = globalThis.CS.color;

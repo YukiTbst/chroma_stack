@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 const require = createRequire(import.meta.url);
 require('../app/js/color.js');
+require('../app/js/optics.js');
 require('../app/js/calibration.js');
 require('../app/js/zip.js');
 require('../app/js/batch-calibration.js');

@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 require('../app/js/color.js');
+require('../app/js/optics.js');
 require('../app/js/batch-calibration.js');
 require('../app/js/matrix-calibration.js');
 const C = globalThis.CS.color, M = globalThis.CS.matrixCalibration, B = globalThis.CS.batchCalibration;

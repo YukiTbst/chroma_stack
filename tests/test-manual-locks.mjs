@@ -28,6 +28,7 @@ globalThis.document = {
 globalThis.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
 
 require('../app/js/color.js');
+require('../app/js/optics.js');
 require('../app/js/earcut.js');
 require('../app/js/engine.js');
 require('../app/js/exporter.js');

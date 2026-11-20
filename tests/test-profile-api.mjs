@@ -244,6 +244,21 @@ try {
   const mixed = await CS.profiles.init();
   assert.deepEqual(mixed.calibrations, {}, 'mirror for another profile is ignored');
   console.log('profile concurrency checks passed');
+
+  /* ---- P1/C08: profile-v2 calibration block round-trips; unknown schema rejected ---- */
+  const v2prof = (await req('POST', 'profiles', { name: 'v2', data: {} })).body;
+  const goodV2 = { schemaVersion: 2, materials: { k: { hex: '#000000' } }, models: [{ modelId: 'm1', params: { k: { hdR: 0.04 } }, status: 'published' }], activeModelId: 'm1', observations: [{ sessionId: 's1', manifestHash: 'abc' }], legacyIndex: {} };
+  const r2 = await req('PUT', 'profiles/' + v2prof.id, { data: { calibrationV2: goodV2 }, expectedRevision: v2prof.revision });
+  assert.equal(r2.status, 200, 'valid v2 accepted');
+  const back = (await req('GET', 'profiles/' + v2prof.id)).body;
+  assert.deepEqual(back.data.calibrationV2, goodV2, 'v2 round-trips without field loss');
+  const badSchema = await req('PUT', 'profiles/' + v2prof.id, { data: { calibrationV2: { schemaVersion: 99 } }, expectedRevision: back.revision });
+  assert.equal(badSchema.status, 400, 'unknown schema rejected');
+  const badActive = await req('PUT', 'profiles/' + v2prof.id, { data: { calibrationV2: { schemaVersion: 2, models: [], activeModelId: 'nope' } }, expectedRevision: back.revision });
+  assert.equal(badActive.status, 400, 'dangling activeModelId rejected');
+  const still = (await req('GET', 'profiles/' + v2prof.id)).body;
+  assert.deepEqual(still.data.calibrationV2, goodV2, 'rejected writes do not clobber stored v2');
+  console.log('profile-v2 schema checks passed');
 } finally {
   server.kill();
   fs.rmSync(DATA_DIR, { recursive: true, force: true });

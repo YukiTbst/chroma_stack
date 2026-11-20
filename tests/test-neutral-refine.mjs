@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 require('../app/js/color.js');
+require('../app/js/optics.js');
 require('../app/js/data-filaments.js');
 require('../app/js/earcut.js');
 require('../app/js/engine.js');

@@ -10,6 +10,7 @@ import zlib from 'node:zlib';
 
 const require = createRequire(import.meta.url);
 require('../app/js/color.js');
+require('../app/js/optics.js');
 require('../app/js/batch-calibration.js');
 require('../app/js/matrix-calibration.js');
 const C = globalThis.CS.color;

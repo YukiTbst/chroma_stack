@@ -1,7 +1,7 @@
 /* Classic Web Worker: build one calibration plan off the UI thread.
    app.js falls back to synchronous planning if this worker is unavailable. */
 'use strict';
-importScripts('color.js', 'data-filaments.js', 'data-lut.js', 'earcut.js', 'engine.js');
+importScripts('color.js', 'data-filaments.js', 'data-lut.js', 'earcut.js', 'optics.js', 'engine.js');
 
 self.onmessage = function (e) {
   const msg = e.data || {};

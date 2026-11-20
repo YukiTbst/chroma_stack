@@ -2,6 +2,7 @@ import { createRequire } from 'module';
 import assert from 'node:assert/strict';
 const require = createRequire(import.meta.url);
 require('../app/js/color.js');
+require('../app/js/optics.js');
 require('../app/js/engine.js');
 globalThis.earcut = require('../app/js/earcut.js');
 require('../app/js/zip.js');

@@ -855,21 +855,12 @@
   }
 
   function stackTransmission(thickness, hd) {
-    if (!(thickness > 0) || !(hd > 0)) return 1;
-    return Math.pow(10, -thickness / hd);
+    return CS.optics.transmission(thickness, hd);
   }
 
   function compositeLinear(bg, seq, palette, layerHeight) {
-    let cur = { r: bg.r, g: bg.g, b: bg.b };
-    for (let i = 0; i < seq.length; i++) {
-      const p = palette[seq[i]], fg = p.lin;
-      // Real filaments are spectrally selective: each channel has its own HD.
-      const Tr = stackTransmission(layerHeight, p.hdR != null ? p.hdR : p.hd);
-      const Tg = stackTransmission(layerHeight, p.hdG != null ? p.hdG : p.hd);
-      const Tb = stackTransmission(layerHeight, p.hdB != null ? p.hdB : p.hd);
-      cur = { r: fg.r * (1 - Tr) + cur.r * Tr, g: fg.g * (1 - Tg) + cur.g * Tg, b: fg.b * (1 - Tb) + cur.b * Tb };
-    }
-    return cur;
+    // Single source of the attenuation math lives in optics.js (P1/S01).
+    return CS.optics.compositeLinear(bg, seq, palette, layerHeight);
   }
 
   function runsInSeq(seq) {

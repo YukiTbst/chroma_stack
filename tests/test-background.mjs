@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 const require = createRequire(import.meta.url);
 require('../app/js/color.js');
+require('../app/js/optics.js');
 require('../app/js/engine.js');
 require('../app/js/view3d.js');
 globalThis.earcut = require('../app/js/earcut.js');

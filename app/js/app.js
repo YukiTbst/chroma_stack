@@ -194,6 +194,7 @@
     state.filamentCalibrations = saved && saved.calibrations && typeof saved.calibrations === 'object' ? saved.calibrations : {};
     state.lutTdOverrides = saved && saved.lutTdOverrides && typeof saved.lutTdOverrides === 'object' ? saved.lutTdOverrides : {};
     state.lutHexOverrides = saved && saved.lutHexOverrides && typeof saved.lutHexOverrides === 'object' ? saved.lutHexOverrides : {};
+    state.calibrationV2 = saved && saved.calibrationV2 && typeof saved.calibrationV2 === 'object' ? saved.calibrationV2 : null;
     state.tdPalette = state.tdPalette.map(applyCalibrationRecord);
     state.backgroundHoleIds.clear();
     state.backgroundPick = false; state.backgroundHolePick = false;

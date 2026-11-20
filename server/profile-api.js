@@ -26,6 +26,10 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+// Repo layout: server/ sits beside app/js/. Standalone deployment (e.g. a single
+// service dir) ships calibration-data.js next to this file; fall back to it.
+try { require('../app/js/calibration-data.js'); } catch (e) { require('./calibration-data.js'); }
+const CD = globalThis.CS.calibrationData;
 
 const PORT = Number(process.env.PORT || 8124);
 const DATA_DIR = process.env.DATA_DIR || './data';
@@ -45,6 +49,13 @@ function sanitizeData(input) {
   for (const field of Object.keys(out)) {
     const v = src[field];
     if (v && typeof v === 'object' && !Array.isArray(v)) out[field] = v;
+  }
+  // P1/profile-v2: preserve a validated calibration block; reject unknown future
+  // schemas instead of silently dropping them (C08).
+  if (src.calibrationV2 !== undefined) {
+    const v = CD.validateV2(src.calibrationV2);
+    if (!v.ok) throw new Error('invalid calibrationV2: ' + v.error);
+    if (v.value) out.calibrationV2 = v.value;
   }
   return out;
 }
@@ -193,7 +204,7 @@ const server = http.createServer(async (req, res) => {
     send(res, 404, { error: 'not found' });
   } catch (e) {
     const msg = String(e && e.message || e);
-    const status = msg === 'body too large' ? 413 : msg === 'invalid JSON' ? 400 : 500;
+    const status = msg === 'body too large' ? 413 : (msg === 'invalid JSON' || msg.startsWith('invalid calibrationV2')) ? 400 : 500;
     if (!res.headersSent) send(res, status, { error: msg });
     else res.end();
   }
