@@ -309,18 +309,20 @@
       TL = top.reduce((a, b) => a.cx < b.cx ? a : b); TR = top.reduce((a, b) => a.cx > b.cx ? a : b);
       BL = bot.reduce((a, b) => a.cx < b.cx ? a : b); BR = bot.reduce((a, b) => a.cx > b.cx ? a : b);
     }
-    const boardCorners = manifest.markers.map(m => ({ cx: m.x, cy: m.y })); // [TL,TR,BR,BL]
+    const boardCorners = manifest.markers.map(m => ({ cx: opts.mirrorBoard ? manifest.boardW - m.x : m.x, cy: m.y })); // [TL,TR,BR,BL]
     const imgCorners = [TL, TR, BR, BL];
     const map = CS.batchCalibration.homography(boardCorners, imgCorners);
     const pxPerMm = Math.hypot(TR.cx - TL.cx, TR.cy - TL.cy) / (manifest.boardW - 4);
     const r = Math.max(2, Math.round(pxPerMm * 1.5));
     const observations = manifest.cells.map(cell => {
-      const s = CS.batchCalibration.sampleMedian(imageData, map, cell.cx, cell.cy, r);
+      // Older printed boards laid the white half right-to-left; allow per-half mirror.
+      const cx = (opts.mirrorWhiteHalf && cell.base === 'W') ? manifest.boardW - cell.cx : cell.cx;
+      const s = CS.batchCalibration.sampleMedian(imageData, map, cx, cell.cy, r);
       // Local substrate in the 2 mm gap beside the cell (same half), averaged over
       // left+right, so uneven lighting / exposure gradient doesn't bias the base.
       const gap = cell.size / 2 + 1;
-      const sL = CS.batchCalibration.sampleMedian(imageData, map, cell.cx - gap, cell.cy, r);
-      const sR = CS.batchCalibration.sampleMedian(imageData, map, cell.cx + gap, cell.cy, r);
+      const sL = CS.batchCalibration.sampleMedian(imageData, map, cx - gap, cell.cy, r);
+      const sR = CS.batchCalibration.sampleMedian(imageData, map, cx + gap, cell.cy, r);
       const sub = [0, 1, 2].map(c => Math.round((sL.rgb[c] + sR.rgb[c]) / 2));
       return {
         cellId: cell.cellId,
@@ -332,6 +334,24 @@
     const fit = fitJointModel(observations, manifest, opts);
     return { observations, markers: { TL, TR, BL, BR }, pxPerMm, fit };
   }
+  /* Relative-calibration white-balance: with no independent reference card, use the
+     thickest white-on-white anchor as a neutral-white reference to derive per-channel
+     camera gain, then divide it out of every observation/substrate so the fit runs in
+     consistent scene space. This is an explicit assumption (white-as-neutral), valid
+     for relative calibration only. Returns gain to re-apply when rendering. */
+  function normalizeWhite(observations, manifest) {
+    const ref = observations.find(o => {
+      const c = manifest.cells.find(x => x.cellId === o.cellId);
+      return c && c.base === 'W' && c.stack.length === 1 && c.stack[0].materialId === 'w' && c.stack[0].layerCount === 8;
+    });
+    const gain = ref ? ref.observedLinear.map(v => Math.min(1, Math.max(0.2, v))) : [1, 1, 1];
+    const norm = observations.map(o => ({
+      ...o,
+      observedLinear: o.observedLinear.map((v, c) => Math.min(1, v / gain[c])),
+      substrateLinear: o.substrateLinear.map((v, c) => Math.min(1, v / gain[c]))
+    }));
+    return { observations: norm, gain };
+  }
 
-  CS.calibrationJoint = { buildComboManifest, fitJointModel, publishModel, modelFromTheta, buildComboBoard3MF, buildComboBoardBlob, analyzeComboPhoto };
+  CS.calibrationJoint = { buildComboManifest, fitJointModel, publishModel, modelFromTheta, buildComboBoard3MF, buildComboBoardBlob, analyzeComboPhoto, normalizeWhite };
 })(typeof globalThis !== 'undefined' ? globalThis : this);
