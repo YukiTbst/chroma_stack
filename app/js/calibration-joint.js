@@ -29,12 +29,22 @@
       push('repeat', [{ materialId: a, layerCount: 2 }], 'W', 'dev');
     }
     const manifest = { schemaVersion: 1, boardId: 'combo-' + ids.length, layerHeight: lh, firstLayer: Number(opts.firstLayer) || lh, cells, references: [{ kind: 'independent-white', linear: [1, 1, 1] }] };
-    // Grid layout so generation / labels / sampling / fitting all read ONE manifest.
-    const cols = 10, pitch = 10, size = 8, margin = 6;
-    cells.forEach((c, i) => { c.cx = margin + (i % cols) * pitch + size / 2; c.cy = margin + Math.floor(i / cols) * pitch + size / 2; c.size = size; });
+    // Dual-substrate layout: the differential-transmittance fitter needs paired
+    // black/white anchors, so 'W' cells sit on a white half and 'K' on a black half
+    // (white top / black bottom), joined by a first-layer bridge. Generation,
+    // labels, sampling and fitting all read this ONE manifest.
+    const cols = 10, pitch = 10, size = 8, margin = 6, halfGap = 4;
+    const wCells = cells.filter(c => c.base === 'W'), kCells = cells.filter(c => c.base === 'K');
+    const halfW = Math.ceil(wCells.length / cols) * pitch, halfK = Math.ceil(kCells.length / cols) * pitch;
     manifest.boardW = margin * 2 + cols * pitch;
-    manifest.boardD = margin * 2 + Math.ceil(cells.length / cols) * pitch;
-    manifest.markers = [{ x: 2, y: 2 }, { x: manifest.boardW - 2, y: 2 }, { x: manifest.boardW - 2, y: manifest.boardD - 2 }, { x: 2, y: manifest.boardD - 2 }];
+    manifest.boardD = margin * 2 + halfW + halfGap + halfK;
+    manifest.halves = { W: { y0: margin, y1: margin + halfW }, K: { y0: margin + halfW + halfGap, y1: margin + halfW + halfGap + halfK } };
+    wCells.forEach((c, i) => { c.cx = margin + (i % cols) * pitch + size / 2; c.cy = manifest.halves.W.y0 + Math.floor(i / cols) * pitch + size / 2; c.size = size; });
+    kCells.forEach((c, i) => { c.cx = margin + (i % cols) * pitch + size / 2; c.cy = manifest.halves.K.y0 + Math.floor(i / cols) * pitch + size / 2; c.size = size; });
+    manifest.markers = [
+      { x: 2, y: 2, filament: 'K' }, { x: manifest.boardW - 2, y: 2, filament: 'K' },
+      { x: manifest.boardW - 2, y: manifest.boardD - 2, filament: 'W' }, { x: 2, y: manifest.boardD - 2, filament: 'W' }
+    ];
     manifest.baseLayers = 2; manifest.baseHeight = manifest.firstLayer + (manifest.baseLayers - 1) * lh;
     manifest.manifestHash = CD.manifestHash(manifest);
     return manifest;
@@ -52,11 +62,19 @@
      over a shared foundation; the SAME manifest is embedded for later analysis. */
   function buildComboBoard3MF(palette, manifest) {
     const lh = manifest.layerHeight, baseH = manifest.baseHeight;
-    const baseIndex = palette.reduce((b, p, i) => C.hexToLab(p.hex).L < C.hexToLab(palette[b].hex).L ? i : b, 0);
-    const objects = [];
-    const bp = [], bi = []; addBox(bp, bi, 0, 0, 0, manifest.boardW, manifest.boardD, baseH);
-    objects.push({ name: 'foundation', pindex: baseIndex, pos: bp, idx: bi });
     const matIndex = id => palette.findIndex(p => (p.id || '') === id || p.name === id);
+    const blackIndex = palette.reduce((b, p, i) => C.hexToLab(p.hex).L < C.hexToLab(palette[b].hex).L ? i : b, 0);
+    const whiteIndex = palette.reduce((b, p, i) => C.hexToLab(p.hex).L > C.hexToLab(palette[b].hex).L ? i : b, 0);
+    const halves = manifest.halves || { W: { y0: 0, y1: manifest.boardD / 2 }, K: { y0: manifest.boardD / 2, y1: manifest.boardD } };
+    const objects = [];
+    // White half foundation (top), black half foundation (bottom), joined by a
+    // first-layer bridge so the plate is one connected solid.
+    const wp = [], wi = []; addBox(wp, wi, 0, halves.W.y0, 0, manifest.boardW, halves.W.y1, baseH);
+    objects.push({ name: 'foundation-white', pindex: whiteIndex, pos: wp, idx: wi });
+    const kp = [], ki = []; addBox(kp, ki, 0, halves.K.y0, 0, manifest.boardW, halves.K.y1, baseH);
+    objects.push({ name: 'foundation-black', pindex: blackIndex, pos: kp, idx: ki });
+    const brp = [], bri = []; addBox(brp, bri, 0, halves.W.y1, 0, manifest.boardW, halves.K.y0, manifest.firstLayer);
+    objects.push({ name: 'bridge', pindex: blackIndex, pos: brp, idx: bri });
     for (const cell of manifest.cells) {
       let z = baseH;
       const x0 = cell.cx - cell.size / 2, y0 = cell.cy - cell.size / 2;
@@ -67,9 +85,12 @@
         z = z1;
       }
     }
-    const mp = [], mi = [];
-    for (const m of manifest.markers) addBox(mp, mi, m.x - 1, m.y - 1, baseH, m.x + 1, m.y + 1, baseH + 2 * lh);
-    objects.push({ name: 'markers', pindex: palette.findIndex(p => C.hexToLab(p.hex).L > 50) , pos: mp, idx: mi });
+    // Corner markers use the OPPOSITE colour of their half so they stay detectable.
+    for (const code of ['K', 'W']) {
+      const mp = [], mi = [];
+      for (const m of manifest.markers.filter(m => m.filament === code)) addBox(mp, mi, m.x - 1, m.y - 1, baseH, m.x + 1, m.y + 1, baseH + 2 * lh);
+      if (mp.length) objects.push({ name: 'markers-' + code, pindex: code === 'K' ? blackIndex : whiteIndex, pos: mp, idx: mi });
+    }
     const parts = ['<?xml version="1.0" encoding="UTF-8"?>', '<model unit="millimeter" xml:lang="zh-CN" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">', ' <metadata name="Application">ChromaStack Combo Calibration</metadata>', ' <resources>', '  <basematerials id="1">'];
     for (const p of palette) parts.push(`   <base name="${escapeXml(p.name)}" displaycolor="#${p.hex.replace('#', '').toUpperCase()}FF" />`);
     parts.push('  </basematerials>');
@@ -77,18 +98,38 @@
       parts.push(`  <object id="${i + 2}" type="model" pid="1" pindex="${o.pindex}" name="${escapeXml(o.name)}">`, '   <mesh><vertices>');
       for (let j = 0; j < o.pos.length; j += 3) parts.push(`    <vertex x="${o.pos[j].toFixed(3)}" y="${o.pos[j + 1].toFixed(3)}" z="${o.pos[j + 2].toFixed(3)}" />`);
       parts.push('   </vertices><triangles>');
-      for (let j = 0; j < o.idx.length; j += 3) parts.push(`    <triangle v1="${o.idx[j]}" v2="${o.idx[j + 1]}" v3="${o.idx[j + 2]}" />`);
+      for (let j = 0; j < o.idx.length; j += 3) parts.push(`    <triangle v1="${o.idx[j]}" v2="${o.idx[j + 1]}" v3="${o.idx[j + 2]}" pid="1" pindex="${o.pindex}" />`);
       parts.push('   </triangles></mesh>', '  </object>');
     });
     const aid = objects.length + 2;
     parts.push(`  <object id="${aid}" type="model" name="ChromaStack_Combo_Calibration"><components>`);
     objects.forEach((o, i) => parts.push(`   <component objectid="${i + 2}" />`));
     parts.push('  </components></object>', ' </resources>', ` <build><item objectid="${aid}" /></build></model>`);
-    const config = `<?xml version="1.0" encoding="UTF-8"?>\n<config>\n <object id="${aid}">\n  <metadata key="name" value="ChromaStack Combo Calibration"/>\n  <metadata key="extruder" value="1"/>\n${objects.map((o, i) => `  <part id="${i + 2}" subtype="normal_part"><metadata key="name" value="${escapeXml(o.name)}"/><metadata key="extruder" value="${o.pindex + 1}"/></part>`).join('\n')}\n </object>\n</config>`;
+    const config = `<?xml version="1.0" encoding="UTF-8"?>\n<config>\n <object id="${aid}">\n  <metadata key="name" value="ChromaStack Combo Calibration"/>\n  <metadata key="extruder" value="1"/>\n${objects.map((o, i) => `  <part id="${i + 2}" subtype="normal_part"><metadata key="name" value="${escapeXml(o.name)}"/><metadata key="extruder" value="${o.pindex + 1}"/></part>`).join('\n')}\n </object>\n <plate>\n  <metadata key="plater_id" value="1"/>\n  <metadata key="plater_name" value=""/>\n  <metadata key="locked" value="false"/>\n  <metadata key="filament_map_mode" value="Auto For Flush"/>\n  <model_instance>\n   <metadata key="object_id" value="${aid}"/>\n   <metadata key="instance_id" value="0"/>\n   <metadata key="identify_id" value="1"/>\n  </model_instance>\n </plate>\n <assemble>\n  <assemble_item object_id="${aid}" instance_id="0" transform="1 0 0 0 1 0 0 0 1 0 0 0" offset="0 0 0" />\n </assemble>\n</config>`;
     const ct = `<?xml version="1.0" encoding="UTF-8"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\n <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>\n <Default Extension="config" ContentType="text/xml"/>\n <Default Extension="json" ContentType="application/json"/>\n</Types>`;
     const rels = `<?xml version="1.0" encoding="UTF-8"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n <Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>\n</Relationships>`;
     const ps = manifest.printSettings || { nozzleDiameter: 0.4, lineWidth: 0.42, layerHeight: manifest.layerHeight, initialLayerHeight: manifest.firstLayer, amsSlots: palette.map((p, i) => i + 1), filaments: palette };
-    const projectSettings = `<?xml version="1.0" encoding="UTF-8"?>\n<config>\n <process>\n  <metadata key="layer_height" value="${ps.layerHeight}"/>\n  <metadata key="initial_layer_height" value="${ps.initialLayerHeight}"/>\n  <metadata key="nozzle_diameter" value="${ps.nozzleDiameter}"/>\n  <metadata key="wall_line_width" value="${ps.lineWidth}"/>\n  <metadata key="line_width" value="${ps.lineWidth}"/>\n  <metadata key="wall_loops" value="2"/>\n  <metadata key="top_shell_layers" value="3"/>\n  <metadata key="bottom_shell_layers" value="2"/>\n  <metadata key="sparse_infill_density" value="15%"/>\n  <metadata key="brim_type" value="outer_only"/>\n  <metadata key="brim_width" value="3"/>\n </process>\n <plate>\n  <metadata key="plater_id" value="1"/>\n  <metadata key="filament_map" value="${(ps.amsSlots || palette.map((p, i) => i + 1)).join(',')}"/>\n  <metadata key="filament_colour" value="${palette.map(p => '#' + p.hex.replace('#', '').toUpperCase()).join(';')}"/>\n </plate>\n</config>`;
+    // JSON project profile (same convention as the main exporter): without it Bambu
+    // reports "配置无效，仅加载几何" and drops part-to-extruder assignments.
+    const projectSettings = JSON.stringify({
+      layer_height: String(ps.layerHeight),
+      initial_layer_print_height: String(ps.initialLayerHeight),
+      wall_loops: '2',
+      top_shell_layers: '3',
+      bottom_shell_layers: '2',
+      sparse_infill_density: '15%',
+      brim_type: 'outer_only',
+      brim_width: '3',
+      printer_model: 'ChromaStack',
+      printer_settings_id: 'ChromaStack ' + ps.nozzleDiameter + ' nozzle',
+      nozzle_diameter: [String(ps.nozzleDiameter)],
+      line_width: String(ps.lineWidth),
+      printable_height: '180',
+      filament_colour: palette.map(p => p.hex),
+      filament_type: palette.map(() => 'PLA'),
+      filament_settings_id: palette.map(() => 'Generic PLA @ChromaStack ' + ps.nozzleDiameter + ' nozzle'),
+      filament_vendor: palette.map(p => /Bambu/i.test(p.brand || '') ? 'Bambu Lab' : 'Generic')
+    }, null, 2);
     const files = [
       { name: '[Content_Types].xml', data: ct }, { name: '_rels/.rels', data: rels },
       { name: '3D/3dmodel.model', data: parts.join('\n') },

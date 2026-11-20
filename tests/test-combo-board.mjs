@@ -53,4 +53,12 @@ assert.ok(model.includes('ChromaStack_Combo_Calibration'), 'model present');
 const c0 = manifest.cells[0];
 const topZ = (manifest.baseHeight + c0.thicknessMm).toFixed(3);
 assert.ok(model.includes(`z="${topZ}"`), `cell top vertex z=${topZ} present in geometry`);
+// Dual-substrate contract: W cells on white half, K cells on black half.
+assert.ok(manifest.halves && manifest.halves.W && manifest.halves.K, 'manifest defines two substrate halves');
+for (const c of manifest.cells) {
+  if (c.base === 'W') assert.ok(c.cy > manifest.halves.W.y0 && c.cy < manifest.halves.W.y1, 'W cell on white half');
+  else assert.ok(c.cy > manifest.halves.K.y0 && c.cy < manifest.halves.K.y1, 'K cell on black half');
+}
+assert.ok(model.includes('foundation-white') && model.includes('foundation-black'), 'both substrate foundations present');
+console.log('dual-substrate halves verified: W', manifest.halves.W, 'K', manifest.halves.K);
 console.log('combo board manifest round-trip + thickness identity passed, cells', manifest.cells.length);
