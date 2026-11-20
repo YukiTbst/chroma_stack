@@ -299,9 +299,11 @@
     const w = imageData.width, h = imageData.height, d = imageData.data;
     const lum = i => 0.2126 * d[i * 4] + 0.7152 * d[i * 4 + 1] + 0.0722 * d[i * 4 + 2];
     const dark = new Uint8Array(w * h), bright = new Uint8Array(w * h);
-    for (let i = 0; i < w * h; i++) { const y = lum(i); dark[i] = y < 70 ? 1 : 0; bright[i] = y > 180 ? 1 : 0; }
-    const top = components(dark, w, h, 20, 4000).filter(c => c.cy < h * 0.5 && c.fill > 0.5);
-    const bot = components(bright, w, h, 20, 4000).filter(c => c.cy > h * 0.8 && c.fill > 0.5);
+    for (let i = 0; i < w * h; i++) { const y = lum(i); dark[i] = y < 70 ? 1 : 0; bright[i] = y > 120 ? 1 : 0; }
+    // Auto-detect the 4 corner pads as small isolated squares (area window excludes
+    // the large colour cells). Not hardcoded to any one photo.
+    const top = components(dark, w, h, 60, 2000).filter(c => c.cy < h * 0.5 && c.fill > 0.6);
+    const bot = components(bright, w, h, 60, 2000).filter(c => c.cy > h * 0.5 && c.fill > 0.6);
     let TL, TR, BL, BR;
     if (opts.markers) { ({ TL, TR, BL, BR } = opts.markers); }
     else {
@@ -309,20 +311,28 @@
       TL = top.reduce((a, b) => a.cx < b.cx ? a : b); TR = top.reduce((a, b) => a.cx > b.cx ? a : b);
       BL = bot.reduce((a, b) => a.cx < b.cx ? a : b); BR = bot.reduce((a, b) => a.cx > b.cx ? a : b);
     }
-    const boardCorners = (opts.boardCorners || manifest.markers).map(m => ({ cx: opts.mirrorBoard ? manifest.boardW - m.x : m.x, cy: m.y })); // [TL,TR,BR,BL]
     const imgCorners = [TL, TR, BR, BL];
-    const map = CS.batchCalibration.homography(boardCorners, imgCorners);
     const pxPerMm = Math.hypot(TR.cx - TL.cx, TR.cy - TL.cy) / (manifest.boardW - 4);
     const r = Math.max(2, Math.round(pxPerMm * 1.5));
+    // Auto-select board<->photo orientation (identity/mirrorX/mirrorY/rot180) by
+    // thick-anchor hue-class agreement, so a mirrored/rotated capture still aligns.
+    const M = manifest.markers;
+    const perms = { identity: [M[0], M[1], M[2], M[3]], mirrorX: [M[1], M[0], M[3], M[2]], mirrorY: [M[3], M[2], M[1], M[0]], rot180: [M[2], M[3], M[0], M[1]] };
+    const thick = manifest.cells.filter(c => c.type === 'single' && c.stack[0].layerCount >= 4);
+    let bestOrient = 'identity', bestScore = -1, map = null;
+    for (const [name, bc] of Object.entries(perms)) {
+      const mp = CS.batchCalibration.homography(bc, imgCorners);
+      let score = 0;
+      for (const c of thick) { const s = CS.batchCalibration.sampleMedian(imageData, mp, c.cx, c.cy, r); if (hueClass(s.rgb) === c.stack[0].materialId) score++; }
+      if (score > bestScore) { bestScore = score; bestOrient = name; map = mp; }
+    }
     const observations = manifest.cells.map(cell => {
-      // Older printed boards laid the white half right-to-left; allow per-half mirror.
-      const cx = (opts.mirrorWhiteHalf && cell.base === 'W') ? manifest.boardW - cell.cx : cell.cx;
-      const s = CS.batchCalibration.sampleMedian(imageData, map, cx, cell.cy, r);
+      const s = CS.batchCalibration.sampleMedian(imageData, map, cell.cx, cell.cy, r);
       // Local substrate in the 2 mm gap beside the cell (same half), averaged over
       // left+right, so uneven lighting / exposure gradient doesn't bias the base.
       const gap = cell.size / 2 + 1;
-      const sL = CS.batchCalibration.sampleMedian(imageData, map, cx - gap, cell.cy, r);
-      const sR = CS.batchCalibration.sampleMedian(imageData, map, cx + gap, cell.cy, r);
+      const sL = CS.batchCalibration.sampleMedian(imageData, map, cell.cx - gap, cell.cy, r);
+      const sR = CS.batchCalibration.sampleMedian(imageData, map, cell.cx + gap, cell.cy, r);
       const sub = [0, 1, 2].map(c => Math.round((sL.rgb[c] + sR.rgb[c]) / 2));
       return {
         cellId: cell.cellId,
@@ -332,7 +342,23 @@
       };
     });
     const fit = fitJointModel(observations, manifest, opts);
-    return { observations, markers: { TL, TR, BL, BR }, pxPerMm, fit };
+    return { observations, markers: { TL, TR, BL, BR }, pxPerMm, orientation: bestOrient, anchorMatch: bestScore + '/' + thick.length, fit };
+  }
+  function hueClass(rgb) {
+    const [r, g, b] = rgb.map(v => v / 255);
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+    const sat = mx > 0 ? (mx - mn) / mx : 0;
+    if (sat < 0.12) return mx < 0.3 ? 'k' : 'w';
+    let hue;
+    if (mx === r) hue = 60 * (((g - b) / (mx - mn)) % 6);
+    else if (mx === g) hue = 60 * ((b - r) / (mx - mn) + 2);
+    else hue = 60 * ((r - g) / (mx - mn) + 4);
+    if (hue < 0) hue += 360;
+    if (hue >= 15 && hue < 45) return 'o';
+    if (hue >= 45 && hue < 75) return 'y';
+    if (hue >= 180 && hue < 230) return 'c';
+    if (hue >= 290 && hue < 345) return 'm';
+    return '?';
   }
   /* Relative-calibration white-balance: with no independent reference card, use the
      thickest white-on-white anchor as a neutral-white reference to derive per-channel
