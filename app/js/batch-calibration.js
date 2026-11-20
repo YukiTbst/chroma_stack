@@ -330,5 +330,13 @@
     return { layout, markers, results, whiteBalance: { white, gains, hd: whiteFit.hd, residual: whiteFit.error }, score };
   }
 
-  CS.batchCalibration = { buildBatchLayout, buildBatchCalibration3MF, buildBatchCalibrationBlob, analyzeBatchPhoto, detectMarkers, homography, solveLinear, transmission, searchScalar, sampleMedian };
+  /* P0 / C04: analysis thickness must come from the board identity (the layout
+     captured when the plate was generated), never a silent 0.08 default. A missing
+     identity returns null so the caller enters a pending-confirmation state. */
+  function resolveAnalysisLayout(palette, persistedLayout) {
+    if (persistedLayout && Number(persistedLayout.layerHeight) > 0 && Array.isArray(persistedLayout.patches)) return persistedLayout;
+    return null;
+  }
+
+  CS.batchCalibration = { buildBatchLayout, buildBatchCalibration3MF, buildBatchCalibrationBlob, analyzeBatchPhoto, detectMarkers, homography, solveLinear, transmission, searchScalar, sampleMedian, resolveAnalysisLayout };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

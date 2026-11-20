@@ -306,7 +306,9 @@
     const fits = {};
     for (const code of codes) {
       const rows = data[code];
-      const hd = [0.05, 0.05, 0.05];
+      const hd = [null, null, null];
+      const hdBound = [null, null, null];
+      const channelState = ['unresolved', 'unresolved', 'unresolved'];
       for (let c = 0; c < 3; c++) {
         let sdd = 0, sdt = 0, slopeMin = 0;
         for (const d of [...new Set(rows.map(r => r.d))]) {
@@ -328,8 +330,21 @@
           if (T < 0.05) { slopeMin = Math.max(slopeMin, -Math.log10(0.05) / d); continue; }
           sdd += d * d; sdt += d * -Math.log10(T);
         }
-        const slope = Math.max(sdd > 1e-9 ? sdt / sdd : 0, slopeMin, 1e-3);
-        hd[c] = clamp(1 / slope, 0.01, 2);
+        // P0: a channel with no regressable pair and no bound carries NO
+        // information. It must stay unresolved (null), never fall back to a
+        // fabricated "very transparent" HD=2 / TD=20.
+        if (sdd > 1e-9) {
+          const slope = Math.max(sdt / sdd, slopeMin, 1e-3);
+          hd[c] = clamp(1 / slope, 0.01, 2);
+          channelState[c] = 'estimated';
+        } else if (slopeMin > 0) {
+          hd[c] = clamp(1 / slopeMin, 0.01, 2);
+          hdBound[c] = hd[c]; // upper bound on HD (opaque side), not a point estimate
+          channelState[c] = 'bounded';
+        } else {
+          hd[c] = null;
+          channelState[c] = 'unresolved';
+        }
       }
       const thick = rows.filter(r => r.d >= 0.3);
       const use = thick.length >= 2 ? thick : rows;
@@ -339,7 +354,7 @@
           n++;
           if (s.rgb[c] <= 2) low++;
           if (s.rgb[c] >= 254) high++;
-          if (!s.ok[c]) continue;
+          if (!s.ok[c] || hd[c] == null) continue;
           const T = Math.pow(10, -s.d / hd[c]);
           num += (1 - T) * (s.o[c] - s.b[c] * T);
           den += (1 - T) ** 2;
@@ -347,15 +362,19 @@
         if (den > 1e-10) return clamp(num / den, 0, 4);
         if (low === n) return 0;
         if (high === n) return 1;
-        return 0.5;
+        return null; // no information: do not invent a mid-grey opaque value
       });
-      let error = 0;
+      let error = 0, en = 0;
       for (const s of use) for (let c = 0; c < 3; c++) {
+        if (hd[c] == null || linear[c] == null) continue;
         const T = Math.pow(10, -s.d / hd[c]);
         error += (C.linearToSrgb8(linear[c] * (1 - T) + s.b[c] * T) - s.rgb[c]) ** 2;
+        en++;
       }
-      const hdAvg = (hd[0] + hd[1] + hd[2]) / 3;
-      fits[code] = { hd: hdAvg, hdR: hd[0], hdG: hd[1], hdB: hd[2], linear, error: error / (use.length * 3), rgb: linear.map(v => C.linearToSrgb8(v)) };
+      const hdNum = hd.filter(v => v != null);
+      const hdAvg = hdNum.length ? hdNum.reduce((a, b) => a + b, 0) / hdNum.length : null;
+      const publishable = channelState.every(s => s !== 'unresolved') && linear.every(v => v != null);
+      fits[code] = { hd: hdAvg, hdR: hd[0], hdG: hd[1], hdB: hd[2], hdBound, channelState, publishable, linear, error: en ? error / en : Infinity, rgb: linear.map(v => v == null ? null : C.linearToSrgb8(v)) };
     }
     return { fits, illumination: { K: 1, W: 1 } };
   }
@@ -481,17 +500,19 @@
     const fits = joint.fits, illum = joint.illumination;
     // White opaque is pure white by definition, so its camera-space opaque
     // colour IS the per-channel camera gain (linear space).
-    const gains = fits.W.linear.map(g => clamp(g, 0.25, 4));
+    const gains = fits.W.linear.map(g => g == null ? 1 : clamp(g, 0.25, 4));
     const results = [];
     for (const code of codes) {
       const k = mapping[code], fit = fits[code], samples = anchors[code];
       const spread = Math.max(...[0, 1, 2].map(c => Math.max(...samples.map(s => s.rgb[c])) - Math.min(...samples.map(s => s.rgb[c]))));
-      const identifiable = spread >= 5 && Number.isFinite(fit.hd) && Number.isFinite(fit.error) && fit.error < 2500;
+      const identifiable = spread >= 5 && Number.isFinite(fit.hd) && Number.isFinite(fit.error) && fit.error < 2500 && fit.publishable;
       const nominalHd = Number(palette[k].hd) || Number(palette[k].td) * 0.1 || 0.5;
-      const hd = identifiable ? [fit.hdR, fit.hdG, fit.hdB] : [nominalHd, nominalHd, nominalHd];
-      const sceneLinear = code === 'W' ? [1, 1, 1] : fit.linear.map((v, c) => clamp(v / gains[c], 0, 1));
-      const opaqueCam = identifiable ? fit.linear : sceneLinear.map((v, c) => v * gains[c]);
-      const opaque = code === 'W' ? [255, 255, 255] : sceneLinear.map(v => C.linearToSrgb8(v));
+      // Unresolved channels stay null (missing information), never a fake value.
+      const hd = [0, 1, 2].map(c => fit.channelState[c] === 'unresolved' ? null : (identifiable ? fit['hd' + 'RGB'[c]] : nominalHd));
+      const sceneLinear = code === 'W' ? [1, 1, 1] : fit.linear.map((v, c) => v == null ? null : clamp(v / gains[c], 0, 1));
+      const opaqueCam = identifiable ? fit.linear : sceneLinear.map((v, c) => v == null ? null : v * gains[c]);
+      const hasNull = sceneLinear.some(v => v == null);
+      const opaque = code === 'W' ? [255, 255, 255] : (hasNull ? null : sceneLinear.map(v => C.linearToSrgb8(v)));
       const residuals = [];
       for (const s of samples) {
         const kk = illum[s.base];
@@ -499,6 +520,7 @@
         const b = s.substrate.map(v => C.srgbToLinear(v / 255));
         for (let c = 0; c < 3; c++) {
           if (s.rgb[c] <= 2 || s.rgb[c] >= 254) continue; // censored channel
+          if (hd[c] == null || opaqueCam[c] == null) continue;
           const den = b[c] - opaqueCam[c];
           if (Math.abs(den) < 1e-4) continue;
           const T = (o[c] - opaqueCam[c]) / den;
@@ -508,13 +530,14 @@
       residuals.sort((a, b) => a - b);
       let residual = residuals.length ? residuals[(residuals.length / 2) | 0] : 1;
       if (!identifiable) residual = Math.max(residual, 0.4);
-      const tdR = clamp(hd[0] * 10, 0.1, 20), tdG = clamp(hd[1] * 10, 0.1, 20), tdB = clamp(hd[2] * 10, 0.1, 20);
-      const td = 0.2126 * tdR + 0.7152 * tdG + 0.0722 * tdB;
+      const tdR = hd[0] == null ? null : clamp(hd[0] * 10, 0.1, 20), tdG = hd[1] == null ? null : clamp(hd[1] * 10, 0.1, 20), tdB = hd[2] == null ? null : clamp(hd[2] * 10, 0.1, 20);
+      const td = (tdR == null || tdG == null || tdB == null) ? null : 0.2126 * tdR + 0.7152 * tdG + 0.0722 * tdB;
       results.push({
         index: k, code, id: palette[k].id, name: palette[k].name, brand: palette[k].brand, material: palette[k].material,
-        hex: C.rgbToHex(opaque[0], opaque[1], opaque[2]),
-        hd: (hd[0] + hd[1] + hd[2]) / 3, hdR: hd[0], hdG: hd[1], hdB: hd[2],
+        hex: opaque ? C.rgbToHex(opaque[0], opaque[1], opaque[2]) : palette[k].hex,
+        hd: (hd[0] == null || hd[1] == null || hd[2] == null) ? null : (hd[0] + hd[1] + hd[2]) / 3, hdR: hd[0], hdG: hd[1], hdB: hd[2],
         td, tdR, tdG, tdB,
+        channelState: fit.channelState, publishable: fit.publishable,
         score: clamp(1 - residual * 2, 0, 1), residual, samples,
         railSample: baseSample[code === 'W' ? 'K' : 'W'],
         fitError: fit.error, opaqueFit: identifiable
@@ -526,6 +549,10 @@
     for (const code of codes) camLinear[code] = fits[code].linear;
     const checks = [];
     for (const cell of layout.cells.filter(c => c.kind === 'mixed')) {
+      const involved = cell.recipe.map(f => results.find(x => x.code === f));
+      // A mixed cell touching an unresolved channel cannot be predicted; exclude
+      // it from the cross-check rather than fabricate a prediction.
+      if (involved.some(r => !r || r.hd == null || camLinear[r.code].some(v => v == null))) continue;
       const s = sampleCell(cell);
       const sub = { rgb: substrateOf(cell) };
       let lin = sub.rgb.map(v => C.srgbToLinear(v / 255));
@@ -554,5 +581,13 @@
     };
   }
 
-  CS.matrixCalibration = { buildMatrixLayout, detectMatrixMarkers, markerCandidates, matchMatrixPalette, analyzeMatrixPhoto, fitAnchors, fitMatrixAnchors };
+  /* P0 publish gate: a result set may only be applied/saved as a measurement when
+     every material has no unresolved channel. Bounded channels are publishable as
+     bounds; unresolved (missing information) blocks publishing so a fabricated
+     TD=20 can never overwrite the active calibration. */
+  function canPublish(results) {
+    return (results || []).every(r => r && r.publishable !== false && !(r.channelState || []).some(s => s === 'unresolved'));
+  }
+
+  CS.matrixCalibration = { buildMatrixLayout, detectMatrixMarkers, markerCandidates, matchMatrixPalette, analyzeMatrixPhoto, fitAnchors, fitMatrixAnchors, canPublish };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

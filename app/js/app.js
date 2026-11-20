@@ -2068,6 +2068,9 @@
       const { blob, meta } = CS.batchCalibration.buildBatchCalibrationBlob({ palette, layerHeight: state.layerHeight });
       state.batchLayout = meta.layout;
       state.batchPalette = palette.map(p => ({ ...p }));
+      // P0/C04: persist the board identity (thickness manifest) so a later photo
+      // analysis after refresh uses the SAME layer height, not a silent default.
+      try { localStorage.setItem('chromastack.batch-layout.v1', JSON.stringify({ layout: meta.layout, palette: state.batchPalette })); } catch (e) { /* private mode */ }
       downloadBlob(blob, `批量标定板_${palette.length}种耗材.3mf`);
       const changes = meta.layout.layerFilaments.reduce((n, f, i) => n + (i > 0 && f !== meta.layout.layerFilaments[i - 1] ? 1 : 0), 0);
       $('batchCalibStatus').textContent = `已生成 ${palette.length} 色金字塔：${meta.layout.boardW}×${meta.layout.boardD} mm，高 ${meta.layout.maxHeight.toFixed(2)} mm。每个 Z 层仅一种耗材，仅 ${changes} 次段边界换色（擦料另计）；拍照时请让四个定位点完整入镜。`;
@@ -2091,9 +2094,13 @@
       ctx.strokeStyle = '#ffe16b'; ctx.strokeRect(r.railSample.x - 5, r.railSample.y - 5, 10, 10);
     }
     const checks = result.matrixChecks ? ` · 混色交叉验证 ΔE 平均 ${result.matrixChecks.meanDE.toFixed(1)} / 最大 ${result.matrixChecks.maxDE.toFixed(1)}` : '';
-    $('batchPhotoSummary').textContent = `平均识别置信度 ${(result.score * 100).toFixed(0)}% · 白平衡增益 ${result.whiteBalance.gains.map(g => g.toFixed(2)).join(' / ')}${checks}`;
+    $('batchPhotoSummary').textContent = `拟合残差分数 ${(result.score * 100).toFixed(0)}%（非准确率） · 白平衡增益 ${result.whiteBalance.gains.map(g => g.toFixed(2)).join(' / ')}${checks}`;
     const warn = $('batchPhotoWarn');
-    if (result.matrixChecks && result.matrixChecks.meanDE > 6) {
+    const unresolved = result.results.filter(r => (r.channelState || []).some(s => s === 'unresolved'));
+    if (unresolved.length) {
+      warn.hidden = false;
+      warn.textContent = `缺信息通道，禁止应用：${unresolved.map(r => `${r.name}(${(r.channelState || []).map((s, i) => s === 'unresolved' ? 'RGB'[i] : '').filter(Boolean).join('/')})`).join('、')} 的观测饱和/无对比，无法解出该通道；不会伪造 TD 值。请补拍或保留原标定。`;
+    } else if (result.matrixChecks && result.matrixChecks.meanDE > 6) {
       warn.hidden = false;
       warn.textContent = matrixPhotoBad(result)
         ? '交叉验证色差过大，禁止应用：照片疑似经过 HDR/AI 场景优化/美颜（黑底被提亮、白底被压暗、颜色被加饱和），或反光/阴影严重。请关闭 HDR 与 AI 优化、用均匀漫射光重拍后再识别。'
@@ -2101,14 +2108,25 @@
           ? '交叉验证色差偏大，但单色锚点自洽：混色格可能受换色冲刷不足污染（如 R>K 发灰）。单色锚点解出的 HD/TD 仍可用，请核对采样框后自行决定是否应用。'
           : '交叉验证色差偏大：请检查反光、阴影与对焦，必要时关闭 HDR/AI 优化重拍；应用前请自行确认采样框对齐。');
     } else { warn.hidden = true; warn.textContent = ''; }
-    $('batchPhotoResults').innerHTML = result.results.map(r => `<div class="family-item"><span class="family-swatch" style="background:${r.hex}"></span><b>${esc(r.name)}</b> · ${r.hex} · TD ${r.td.toFixed(2)} · 置信度 ${(r.score * 100).toFixed(0)}%</div>`).join('');
+    const fmtTd = v => v == null ? '—' : v.toFixed(2);
+    const stateLabel = s => s === 'estimated' ? '' : s === 'bounded' ? '界' : '缺';
+    $('batchPhotoResults').innerHTML = result.results.map(r => `<div class="family-item"><span class="family-swatch" style="background:${r.hex}"></span><b>${esc(r.name)}</b> · ${r.hex} · TD R/G/B ${fmtTd(r.tdR)}/${fmtTd(r.tdG)}/${fmtTd(r.tdB)}${(r.channelState || []).some(s => s !== 'estimated') ? ' · ' + (r.channelState || []).map((s, i) => s !== 'estimated' ? 'RGB'[i] + stateLabel(s) : '').filter(Boolean).join(' ') : ''} · 残差分数 ${(r.score * 100).toFixed(0)}%</div>`).join('');
     openModal('batchPhotoModal');
   }
 
   function analyzeBatchPhotoFile(file) {
     if (!file) return;
+    // P0/C04: recover the persisted board identity before choosing palette/layout.
+    if (!state.batchLayout) {
+      try {
+        const persisted = JSON.parse(localStorage.getItem('chromastack.batch-layout.v1') || 'null');
+        if (persisted && persisted.layout) { state.batchLayout = persisted.layout; state.batchPalette = persisted.palette; }
+      } catch (e) { /* ignore */ }
+    }
     const palette = state.batchLayout && state.batchPalette ? state.batchPalette : currentCalibrationPalette();
     if (!palette.length) { toast('请先添加需要标定的耗材'); return; }
+    const layout = CS.batchCalibration.resolveAnalysisLayout(palette, state.batchLayout);
+    if (!layout) { toast('缺少标定板身份（层高 manifest）：请重新生成标定板后再识别；不会按默认 0.08 mm 猜测旧板厚度'); return; }
     const url = URL.createObjectURL(file), img = new Image();
     img.onload = () => {
       try {
@@ -2118,7 +2136,6 @@
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const layout = state.batchLayout || CS.batchCalibration.buildBatchLayout(palette);
         const result = CS.batchCalibration.analyzeBatchPhoto(imageData, palette, { layout });
         showBatchPhotoResult(result, imageData);
       } catch (e) {
@@ -2168,6 +2185,12 @@
   function applyBatchPhoto() {
     const result = state.batchPhotoResult;
     if (!result) return;
+    // P0: missing channel information must never be saved as a measurement.
+    if (!CS.matrixCalibration.canPublish(result.results)) {
+      const bad = result.results.filter(r => (r.channelState || []).some(s => s === 'unresolved')).map(r => r.name).join('、');
+      toast(`已阻止应用：${bad || '部分耗材'} 存在未解决通道（观测缺信息），不能写成标定值；请补拍该通道或保留原标定`);
+      return;
+    }
     if (result.matrixChecks && result.matrixChecks.meanDE > 10 && matrixPhotoBad(result)) {
       toast('交叉验证色差过大，已阻止应用：请关闭 HDR/AI 优化并用均匀漫射光重拍');
       return;
@@ -2184,7 +2207,7 @@
       const key = CS.settings.filamentKey(p);
       state.filamentCalibrations[key] = {
         id: p.id || '', name: p.name, brand: p.brand || '', material: p.material || 'PLA',
-        hex: r.hex, td: r.td, tdR, tdG, tdB, source: 'photo', score: r.score, updatedAt: Date.now()
+        hex: r.hex, td: r.td, tdR, tdG, tdB, source: 'photo', score: r.score, channelState: r.channelState || null, updatedAt: Date.now()
       };
       if (state.engine === 'lut') {
         const tdOverrides = state.lutTdOverrides[state.lutKey] || (state.lutTdOverrides[state.lutKey] = {});
