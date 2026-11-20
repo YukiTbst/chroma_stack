@@ -1,0 +1,56 @@
+/* P2配套: the printable combination board embeds the SAME manifest used for
+   generation/fitting; thickness identity survives the 3MF round-trip (C04).
+   Run: node tests/test-combo-board.mjs */
+import assert from 'node:assert/strict';
+import zlib from 'node:zlib';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+require('../app/js/color.js');
+require('../app/js/optics.js');
+require('../app/js/calibration-data.js');
+require('../app/js/batch-calibration.js');
+require('../app/js/matrix-calibration.js');
+require('../app/js/zip.js');
+require('../app/js/calibration-joint.js');
+const J = globalThis.CS.calibrationJoint;
+
+const palette = [{ id: 'k', name: 'K', hex: '#000000' }, { id: 'w', name: 'W', hex: '#ffffff' }, { id: 'r', name: 'R', hex: '#c00d1e' }];
+const manifest = J.buildComboManifest(palette, { layerHeight: 0.06 });
+assert.equal(manifest.layerHeight, 0.06, 'board honours requested layer height, not default 0.08');
+const { bytes } = J.buildComboBoard3MF(palette, manifest);
+const buf = Buffer.from(bytes);
+let meta = null;
+for (let i = 0; i + 4 < buf.length; i++) {
+  if (buf.readUInt32LE(i) !== 0x04034b50) continue;
+  const nameLen = buf.readUInt16LE(i + 26), extraLen = buf.readUInt16LE(i + 28);
+  const name = buf.slice(i + 30, i + 30 + nameLen).toString();
+  if (name !== 'Metadata/chromastack-combo-calibration.json') continue;
+  const method = buf.readUInt16LE(i + 8), compSize = buf.readUInt32LE(i + 18);
+  const raw = buf.slice(i + 30 + nameLen + extraLen, i + 30 + nameLen + extraLen + compSize);
+  meta = JSON.parse(method === 8 ? zlib.inflateRawSync(raw).toString() : raw.toString());
+  break;
+}
+assert.ok(meta, 'manifest embedded in 3MF');
+assert.equal(meta.manifest.manifestHash, manifest.manifestHash, 'embedded manifest hash matches generation');
+assert.equal(meta.manifest.layerHeight, 0.06);
+for (const c of meta.manifest.cells) {
+  const expect = c.stack.reduce((s, x) => s + x.layerCount, 0) * 0.06;
+  assert.ok(Math.abs(c.thicknessMm - expect) < 1e-9, 'cell thickness = layers * manifest layerHeight');
+}
+// geometry: a cell's top Z equals baseHeight + thickness (read vertices of its parts)
+const model = (() => {
+  for (let i = 0; i + 4 < buf.length; i++) {
+    if (buf.readUInt32LE(i) !== 0x04034b50) continue;
+    const nameLen = buf.readUInt16LE(i + 26), extraLen = buf.readUInt16LE(i + 28);
+    const name = buf.slice(i + 30, i + 30 + nameLen).toString();
+    if (name !== '3D/3dmodel.model') continue;
+    const method = buf.readUInt16LE(i + 8), compSize = buf.readUInt32LE(i + 18);
+    const raw = buf.slice(i + 30 + nameLen + extraLen, i + 30 + nameLen + extraLen + compSize);
+    return method === 8 ? zlib.inflateRawSync(raw).toString() : raw.toString();
+  }
+})();
+assert.ok(model.includes('ChromaStack_Combo_Calibration'), 'model present');
+const c0 = manifest.cells[0];
+const topZ = (manifest.baseHeight + c0.thicknessMm).toFixed(3);
+assert.ok(model.includes(`z="${topZ}"`), `cell top vertex z=${topZ} present in geometry`);
+console.log('combo board manifest round-trip + thickness identity passed, cells', manifest.cells.length);

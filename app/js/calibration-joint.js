@@ -29,8 +29,76 @@
       push('repeat', [{ materialId: a, layerCount: 2 }], 'W', 'dev');
     }
     const manifest = { schemaVersion: 1, boardId: 'combo-' + ids.length, layerHeight: lh, cells, references: [{ kind: 'independent-white', linear: [1, 1, 1] }] };
+    // Grid layout so generation / labels / sampling / fitting all read ONE manifest.
+    const cols = 10, pitch = 10, size = 8, margin = 6;
+    cells.forEach((c, i) => { c.cx = margin + (i % cols) * pitch + size / 2; c.cy = margin + Math.floor(i / cols) * pitch + size / 2; c.size = size; });
+    manifest.boardW = margin * 2 + cols * pitch;
+    manifest.boardD = margin * 2 + Math.ceil(cells.length / cols) * pitch;
+    manifest.markers = [{ x: 2, y: 2 }, { x: manifest.boardW - 2, y: 2 }, { x: manifest.boardW - 2, y: manifest.boardD - 2 }, { x: 2, y: manifest.boardD - 2 }];
+    manifest.baseLayers = 2; manifest.baseHeight = 2 * lh;
     manifest.manifestHash = CD.manifestHash(manifest);
     return manifest;
+  }
+
+  function escapeXml(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+  function addBox(pos, idx, x0, y0, z0, x1, y1, z1) {
+    const b = pos.length / 3;
+    const v = [[x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0], [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]];
+    for (const p of v) pos.push(p[0], p[1], p[2]);
+    const q = [[0, 2, 1], [0, 3, 2], [4, 5, 6], [4, 6, 7], [0, 1, 5], [0, 5, 4], [1, 2, 6], [1, 6, 5], [2, 3, 7], [2, 7, 6], [3, 0, 4], [3, 4, 7]];
+    for (const t of q) idx.push(b + t[0], b + t[1], b + t[2]);
+  }
+  /* Printable combination board: one part per contiguous material run per cell,
+     over a shared foundation; the SAME manifest is embedded for later analysis. */
+  function buildComboBoard3MF(palette, manifest) {
+    const lh = manifest.layerHeight, baseH = manifest.baseHeight;
+    const baseIndex = palette.reduce((b, p, i) => C.hexToLab(p.hex).L < C.hexToLab(palette[b].hex).L ? i : b, 0);
+    const objects = [];
+    const bp = [], bi = []; addBox(bp, bi, 0, 0, 0, manifest.boardW, manifest.boardD, baseH);
+    objects.push({ name: 'foundation', pindex: baseIndex, pos: bp, idx: bi });
+    const matIndex = id => palette.findIndex(p => (p.id || '') === id || p.name === id);
+    for (const cell of manifest.cells) {
+      let z = baseH;
+      const x0 = cell.cx - cell.size / 2, y0 = cell.cy - cell.size / 2;
+      for (const seg of cell.stack) {
+        const z1 = z + seg.layerCount * lh;
+        const pos = [], idx = []; addBox(pos, idx, x0, y0, z, x0 + cell.size, y0 + cell.size, z1);
+        objects.push({ name: cell.cellId + ' ' + seg.materialId, pindex: Math.max(0, matIndex(seg.materialId)), pos, idx });
+        z = z1;
+      }
+    }
+    const mp = [], mi = [];
+    for (const m of manifest.markers) addBox(mp, mi, m.x - 1, m.y - 1, baseH, m.x + 1, m.y + 1, baseH + 2 * lh);
+    objects.push({ name: 'markers', pindex: palette.findIndex(p => C.hexToLab(p.hex).L > 50) , pos: mp, idx: mi });
+    const parts = ['<?xml version="1.0" encoding="UTF-8"?>', '<model unit="millimeter" xml:lang="zh-CN" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">', ' <metadata name="Application">ChromaStack Combo Calibration</metadata>', ' <resources>', '  <basematerials id="1">'];
+    for (const p of palette) parts.push(`   <base name="${escapeXml(p.name)}" displaycolor="#${p.hex.replace('#', '').toUpperCase()}FF" />`);
+    parts.push('  </basematerials>');
+    objects.forEach((o, i) => {
+      parts.push(`  <object id="${i + 2}" type="model" pid="1" pindex="${o.pindex}" name="${escapeXml(o.name)}">`, '   <mesh><vertices>');
+      for (let j = 0; j < o.pos.length; j += 3) parts.push(`    <vertex x="${o.pos[j].toFixed(3)}" y="${o.pos[j + 1].toFixed(3)}" z="${o.pos[j + 2].toFixed(3)}" />`);
+      parts.push('   </vertices><triangles>');
+      for (let j = 0; j < o.idx.length; j += 3) parts.push(`    <triangle v1="${o.idx[j]}" v2="${o.idx[j + 1]}" v3="${o.idx[j + 2]}" />`);
+      parts.push('   </triangles></mesh>', '  </object>');
+    });
+    const aid = objects.length + 2;
+    parts.push(`  <object id="${aid}" type="model" name="ChromaStack_Combo_Calibration"><components>`);
+    objects.forEach((o, i) => parts.push(`   <component objectid="${i + 2}" />`));
+    parts.push('  </components></object>', ' </resources>', ` <build><item objectid="${aid}" /></build></model>`);
+    const config = `<?xml version="1.0" encoding="UTF-8"?>\n<config>\n <object id="${aid}">\n  <metadata key="name" value="ChromaStack Combo Calibration"/>\n  <metadata key="extruder" value="1"/>\n${objects.map((o, i) => `  <part id="${i + 2}" subtype="normal_part"><metadata key="name" value="${escapeXml(o.name)}"/><metadata key="extruder" value="${o.pindex + 1}"/></part>`).join('\n')}\n </object>\n</config>`;
+    const ct = `<?xml version="1.0" encoding="UTF-8"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\n <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>\n <Default Extension="config" ContentType="text/xml"/>\n <Default Extension="json" ContentType="application/json"/>\n</Types>`;
+    const rels = `<?xml version="1.0" encoding="UTF-8"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n <Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>\n</Relationships>`;
+    const files = [
+      { name: '[Content_Types].xml', data: ct }, { name: '_rels/.rels', data: rels },
+      { name: '3D/3dmodel.model', data: parts.join('\n') },
+      { name: 'Metadata/model_settings.config', data: config },
+      { name: 'Metadata/chromastack-combo-calibration.json', data: JSON.stringify({ app: 'ChromaStack Combo Calibration', manifest, palette }, null, 2) }
+    ];
+    return { bytes: CS.zip.createZip(files), meta: { manifest, palette } };
+  }
+  function buildComboBoardBlob(palette, opts) {
+    const manifest = buildComboManifest(palette, opts);
+    const out = buildComboBoard3MF(palette, manifest);
+    return { blob: new Blob([out.bytes], { type: 'model/3mf' }), meta: out.meta };
   }
 
   function modelFromTheta(theta, lh) {
@@ -151,5 +219,5 @@
     return { ...base, models: [...(base.models || []), entry], activeModelId: entry.modelId };
   }
 
-  CS.calibrationJoint = { buildComboManifest, fitJointModel, publishModel, modelFromTheta };
+  CS.calibrationJoint = { buildComboManifest, fitJointModel, publishModel, modelFromTheta, buildComboBoard3MF, buildComboBoardBlob };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

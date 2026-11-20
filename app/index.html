@@ -141,6 +141,11 @@
       <button class="btn wide" id="btnPhotoCalibration">上传照片批量识别</button>
       <input type="file" id="batchPhotoInput" accept="image/*" hidden>
       <p class="hint" id="batchCalibStatus">黑色两层薄底 → 白色 → 其余耗材，三色阶逐层收成金字塔；每个 Z 层仅一种耗材，四角白色定位柱只在白色料带内增高。</p>
+      <button class="btn wide" id="btnComboPlate">生成组合标定板 3MF（内嵌 manifest）</button>
+      <button class="btn wide" id="btnComboImport">导入组合观测 JSON</button>
+      <input type="file" id="comboObsInput" accept=".json,application/json" hidden>
+      <button class="btn wide" id="btnComboPublish">联合拟合并发布模型</button>
+      <p class="hint" id="comboCalibStatus">组合板含单材锚点/正反序/多段(A-B-A)/保留组/重复格；发布走 profile-v2 原子切换，失败保留原模型。观测与模型版本可追溯。</p>
       <button class="btn wide" id="btnMatrixPhoto">上传多色矩阵照片识别</button>
       <label class="field"><span>矩阵板型</span><select id="matrixBoardType">
         <option value="v2" selected>100 mm 六色（1/2/4/8 层）</option>
