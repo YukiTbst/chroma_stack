@@ -328,11 +328,12 @@
     }
     const observations = manifest.cells.map(cell => {
       const s = CS.batchCalibration.sampleMedian(imageData, map, cell.cx, cell.cy, r);
-      // Local substrate in the 2 mm gap beside the cell (same half), averaged over
-      // left+right, so uneven lighting / exposure gradient doesn't bias the base.
+      // Substrate ROI must be NARROWER than the ~16px inter-cell gap so the window
+      // never reaches into a neighbouring colour cell (review F3/三.1).
+      const rSub = Math.max(2, Math.round(pxPerMm * 0.5));
       const gap = cell.size / 2 + 1;
-      const sL = CS.batchCalibration.sampleMedian(imageData, map, cell.cx - gap, cell.cy, r);
-      const sR = CS.batchCalibration.sampleMedian(imageData, map, cell.cx + gap, cell.cy, r);
+      const sL = CS.batchCalibration.sampleMedian(imageData, map, cell.cx - gap, cell.cy, rSub);
+      const sR = CS.batchCalibration.sampleMedian(imageData, map, cell.cx + gap, cell.cy, rSub);
       const sub = [0, 1, 2].map(c => Math.round((sL.rgb[c] + sR.rgb[c]) / 2));
       return {
         cellId: cell.cellId,
@@ -370,12 +371,19 @@
       const c = manifest.cells.find(x => x.cellId === o.cellId);
       return c && c.base === 'W' && c.stack.length === 1 && c.stack[0].materialId === 'w' && c.stack[0].layerCount === 8;
     });
-    const gain = ref ? ref.observedLinear.map(v => Math.min(1, Math.max(0.2, v))) : [1, 1, 1];
-    const norm = observations.map(o => ({
-      ...o,
-      observedLinear: o.observedLinear.map((v, c) => Math.min(1, v / gain[c])),
-      substrateLinear: o.substrateLinear.map((v, c) => Math.min(1, v / gain[c]))
-    }));
+    const gain = ref ? ref.observedLinear.map(v => Math.max(0.2, v)) : [1, 1, 1];
+    // Do NOT silently clip: keep raw normalized values and mark channels that exceed
+    // the white reference as censored (channelsOk=false) so the fit treats them as
+    // bounds/invalid, not precise measurements (review 三.2).
+    const norm = observations.map(o => {
+      const ol = o.observedLinear.map((v, c) => v / gain[c]);
+      const sl = o.substrateLinear.map((v, c) => v / gain[c]);
+      return {
+        ...o, observedLinear: ol, substrateLinear: sl,
+        channelsOk: o.channelsOk.map((ok, c) => ok && ol[c] <= 1.0 && ol[c] >= 0),
+        clipped: o.channelsOk.map((ok, c) => ok && ol[c] > 1.0)
+      };
+    });
     return { observations: norm, gain };
   }
 
