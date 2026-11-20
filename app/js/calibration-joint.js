@@ -223,15 +223,15 @@
     let best = null;
     for (const start of starts) {
       const theta = clone(start);
-      for (let sweep = 0; sweep < 2; sweep++) {
+      for (let sweep = 0; sweep < 4; sweep++) {
         for (const id of ids) {
           for (let c = 0; c < 3; c++) {
             // Bounded coordinate scan over log HD (positive by construction).
             let bx = theta[id].logHd[c], be = Infinity;
-            for (let i = 0; i <= 60; i++) { const x = Math.log(0.01) + (Math.log(2) - Math.log(0.01)) * i / 60; theta[id].logHd[c] = x; const e = listLoss(modelFromTheta(theta, lh), train, noiseScale); if (e < be) { be = e; bx = x; } }
+            for (let i = 0; i <= 80; i++) { const x = Math.log(0.01) + (Math.log(2) - Math.log(0.01)) * i / 80; theta[id].logHd[c] = x; const e = listLoss(modelFromTheta(theta, lh), train, noiseScale); if (e < be) { be = e; bx = x; } }
             theta[id].logHd[c] = bx;
             let bo = theta[id].opaque[c], boe = Infinity;
-            for (let i = 0; i <= 40; i++) { const x = i / 40; theta[id].opaque[c] = x; const e = listLoss(modelFromTheta(theta, lh), train, noiseScale); if (e < boe) { boe = e; bo = x; } }
+            for (let i = 0; i <= 50; i++) { const x = i / 50; theta[id].opaque[c] = x; const e = listLoss(modelFromTheta(theta, lh), train, noiseScale); if (e < boe) { boe = e; bo = x; } }
             theta[id].opaque[c] = bo;
           }
         }
