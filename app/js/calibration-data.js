@@ -12,7 +12,13 @@
     for (let i = 0; i < s.length; i++) { h = ((h << 5) + h + s.charCodeAt(i)) | 0; }
     return (h >>> 0).toString(16).padStart(8, '0');
   }
-  function canonical(obj) { return JSON.stringify(obj, Object.keys(obj || {}).sort()); }
+  // Recursive key-sorted stable stringify. (A key-array replacer would whitelist
+  // keys at EVERY depth and silently drop nested cell/marker geometry.)
+  function canonical(v) {
+    if (v === null || typeof v !== 'object') return JSON.stringify(v);
+    if (Array.isArray(v)) return '[' + v.map(canonical).join(',') + ']';
+    return '{' + Object.keys(v).sort().map(k => JSON.stringify(k) + ':' + canonical(v[k])).join(',') + '}';
+  }
   function manifestHash(manifest) { return hashString(canonical(manifest)); }
 
   function emptyV2() {

@@ -41,9 +41,12 @@
     manifest.halves = { W: { y0: margin, y1: margin + halfW }, K: { y0: margin + halfW + halfGap, y1: margin + halfW + halfGap + halfK } };
     wCells.forEach((c, i) => { c.cx = margin + (i % cols) * pitch + size / 2; c.cy = manifest.halves.W.y0 + Math.floor(i / cols) * pitch + size / 2; c.size = size; });
     kCells.forEach((c, i) => { c.cx = margin + (i % cols) * pitch + size / 2; c.cy = manifest.halves.K.y0 + Math.floor(i / cols) * pitch + size / 2; c.size = size; });
+    // Corner markers must sit ON the foundation halves (inside their y-range),
+    // not in the empty outer margin, and use the opposite colour of their half.
+    const mTop = manifest.halves.W.y0 + 2, mBot = manifest.halves.K.y1 - 2;
     manifest.markers = [
-      { x: 2, y: 2, filament: 'K' }, { x: manifest.boardW - 2, y: 2, filament: 'K' },
-      { x: manifest.boardW - 2, y: manifest.boardD - 2, filament: 'W' }, { x: 2, y: manifest.boardD - 2, filament: 'W' }
+      { x: 2, y: mTop, filament: 'K' }, { x: manifest.boardW - 2, y: mTop, filament: 'K' },
+      { x: manifest.boardW - 2, y: mBot, filament: 'W' }, { x: 2, y: mBot, filament: 'W' }
     ];
     manifest.baseLayers = 2; manifest.baseHeight = manifest.firstLayer + (manifest.baseLayers - 1) * lh;
     manifest.manifestHash = CD.manifestHash(manifest);

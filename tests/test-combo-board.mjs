@@ -60,5 +60,19 @@ for (const c of manifest.cells) {
   else assert.ok(c.cy > manifest.halves.K.y0 && c.cy < manifest.halves.K.y1, 'K cell on black half');
 }
 assert.ok(model.includes('foundation-white') && model.includes('foundation-black'), 'both substrate foundations present');
+// Markers must be ON the board (inside a foundation half), not in the empty margin.
+for (const m of manifest.markers) {
+  const half = m.filament === 'K' ? manifest.halves.W : manifest.halves.K; // opposite-colour marker sits on the other half
+  assert.ok(m.x >= 0 && m.x <= manifest.boardW, 'marker x on board');
+  assert.ok(m.y >= half.y0 && m.y <= half.y1, `marker y=${m.y} inside its half ${half.y0}..${half.y1}`);
+}
+console.log('markers on-board verified:', JSON.stringify(manifest.markers));
+// manifestHash must actually capture nested geometry (marker/cell moves change it).
+const CD = globalThis.CS.calibrationData;
+const h0 = CD.manifestHash(manifest);
+const moved = JSON.parse(JSON.stringify(manifest)); moved.markers[0].y += 1;
+assert.notEqual(CD.manifestHash(moved), h0, 'hash must change when a marker moves');
+const movedCell = JSON.parse(JSON.stringify(manifest)); movedCell.cells[0].cx += 1;
+assert.notEqual(CD.manifestHash(movedCell), h0, 'hash must change when a cell moves');
 console.log('dual-substrate halves verified: W', manifest.halves.W, 'K', manifest.halves.K);
 console.log('combo board manifest round-trip + thickness identity passed, cells', manifest.cells.length);
