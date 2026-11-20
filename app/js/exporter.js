@@ -121,8 +121,18 @@
       structureCleanup = CS.engine.mergeSmallRegions(flatMask, flatFilament, familyId, lab, plan.families, plan.palette, ew, eh, minAreaPx, null, null, coarseLock);
       for (let i = 0; i < flatMask.length; i++) if (!flatMask[i]) flatFilament[i] = 0xffff;
     }
+    let regionOf = null;
+    if (plan.regionOf && plan.regionRecipes) {
+      regionOf = new Int32Array(ew * eh).fill(-1);
+      for (let dy = 0; dy < eh; dy++) for (let dx = 0; dx < ew; dx++) {
+        const sx = Math.min(plan.w - 1, Math.floor((dx + 0.5) * plan.w / ew));
+        const sy = Math.min(plan.h - 1, Math.floor((dy + 0.5) * plan.h / eh));
+        regionOf[dy * ew + dx] = plan.regionOf[sy * plan.w + sx];
+      }
+    }
     return {
       ew, eh, flatMask, flatFilament, familyId, printMask, structureCleanup,
+      regionOf, regionRecipes: plan.regionRecipes || null,
       changeStats: {
         sourcePixels, changedPixels,
         changedPercent: sourcePixels ? +(changedPixels / sourcePixels * 100).toFixed(2) : 0
@@ -139,6 +149,17 @@
     for (let i = 0; i < n; i++) {
       if (printMask && !printMask[i]) continue;
       let fi = -1;
+      // P5: coordinated spatial regions are the single material source; export
+      // must not fall back to family/flat labels and cut same-material neighbours.
+      if (plane.regionRecipes && plane.regionOf) {
+        const rr = plane.regionRecipes[plane.regionOf[i]];
+        if (rr) {
+          if (z < plan.gradStartLayer) fi = plan.foundationIndex;
+          else { const li = z - plan.gradStartLayer; fi = li < rr.length ? rr[li] : -1; }
+          if (fi >= 0) masks[fi][i] = 1;
+          continue;
+        }
+      }
       if (flatMask[i]) {
         if (z < (plan.flatBaseLayers || 0)) fi = plan.foundationIndex;
         else if (z < plan.flatLayers) fi = flatFilament[i];
