@@ -309,7 +309,7 @@
       TL = top.reduce((a, b) => a.cx < b.cx ? a : b); TR = top.reduce((a, b) => a.cx > b.cx ? a : b);
       BL = bot.reduce((a, b) => a.cx < b.cx ? a : b); BR = bot.reduce((a, b) => a.cx > b.cx ? a : b);
     }
-    const boardCorners = manifest.markers.map(m => ({ cx: opts.mirrorBoard ? manifest.boardW - m.x : m.x, cy: m.y })); // [TL,TR,BR,BL]
+    const boardCorners = (opts.boardCorners || manifest.markers).map(m => ({ cx: opts.mirrorBoard ? manifest.boardW - m.x : m.x, cy: m.y })); // [TL,TR,BR,BL]
     const imgCorners = [TL, TR, BR, BL];
     const map = CS.batchCalibration.homography(boardCorners, imgCorners);
     const pxPerMm = Math.hypot(TR.cx - TL.cx, TR.cy - TL.cy) / (manifest.boardW - 4);
