@@ -1006,7 +1006,8 @@
   // Enumerate the reachable color gamut for the selected filaments. With a
   // small palette this is exact (e.g. 4 colors × 6 layers = 5,460 stacks), so
   // matching is not greedy and unreachable colors become measurable gaps.
-  function buildTdGamut(palette, foundation, layerHeight, maxLayers, variableHeight) {
+  function buildTdGamut(palette, foundation, layerHeight, maxLayers, variableHeight, opts) {
+    opts = opts || {};
     const bg = foundation ? foundation.lin : { r: 1, g: 1, b: 1 };
     const K = palette.length;
     const budget = 120000;
@@ -1028,9 +1029,13 @@
       const bucket = seen.get(key);
       if (bucket) {
         // Keep up to three structurally different recipes per near-identical
-        // colour bucket; do not discard the second just because the first was
-        // enumerated.
-        if (bucket.some(idx => entries[idx].runs === runs && entries[idx].distinct === distinct)) return;
+        // colour bucket. In diverse mode (P3/S04) equal runs/distinct does NOT
+        // mean equal stack: A-A-B and A-B-A differ per Z, so only exact duplicates
+        // are dropped and layer-order diversity survives.
+        const dup = opts.diverse
+          ? bucket.some(idx => entries[idx].seq.join(',') === seq.join(','))
+          : bucket.some(idx => entries[idx].runs === runs && entries[idx].distinct === distinct);
+        if (dup) return;
         if (bucket.length >= 3) return;
         bucket.push(entries.length);
       } else {
@@ -1121,6 +1126,20 @@
           lengths[i]++; extra--;
         }
         pushSeq(buildRunSeq(colors, lengths), r);
+      }
+    }
+    if (opts.allowRepeat) {
+      // P3/S03: non-contiguous repeat runs (A-B-A) that the used[] permutation
+      // generator cannot produce. Bounded quota; fixed length for equal-height.
+      const total = maxLayers;
+      for (let a = 0; a < K; a++) for (let b = 0; b < K; b++) {
+        if (a === b || total < 3) continue;
+        const mid = Math.max(1, Math.floor(total / 3));
+        const comps = [[1, total - 2, 1], [mid, total - 2 * mid, mid]];
+        for (const lengths of comps) {
+          if (lengths.some(l => l < 1)) continue;
+          pushSeq(buildRunSeq([a, b, a], lengths), 3);
+        }
       }
     }
     Object.defineProperty(entries, 'neutral', {
@@ -2490,8 +2509,15 @@
     const startOverride = Math.round(Number(options.gradStartLayerOverride) || 0);
     const topOverride = Number(options.gradTopMmOverride) || 0;
     const requestedColorLayers = colorLayers;
-    const geoInput = { engine, flatTopMm, layerHeight, reliefMm, colorLayers: requestedColorLayers, baseLayers, startOverride, topOverride };
-    const geo = deriveLayerGeometry(geoInput);
+    // P3: equal-height (flat) mode — one common top surface for every retained
+    // region; relief is disabled and all regions get exactly N colour layers.
+    const equalHeight = engine === 'td' && options.equalHeight === true;
+    const geoInput = { engine, flatTopMm, layerHeight, reliefMm: equalHeight ? 0 : reliefMm, colorLayers: requestedColorLayers, baseLayers, startOverride, topOverride };
+    let geo = deriveLayerGeometry(geoInput);
+    if (equalHeight) {
+      const gs = geo.gradStartLayer, N = geo.colorLayers;
+      geo = { ...geo, flatLayers: gs + N, flatBaseLayers: gs, flatTopLayers: N, gradTopLayer: gs + N };
+    }
     const flatLayers = geo.flatLayers;
     let gradTopLayer = geo.gradTopLayer, gradStartLayer = geo.gradStartLayer;
     colorLayers = geo.colorLayers;
@@ -2530,9 +2556,9 @@
     const snapMask = options.edgeSnap === false
       ? null
       : (edgeMask || (gradCount > 0 ? buildEdgeMask(lab, w, h, 1) : null));
-    const variableHeight = engine === 'td' && options.variableHeight !== false;
+    const variableHeight = engine === 'td' && options.variableHeight !== false && !equalHeight;
     const gamut = engine === 'td' && gradCount > 0
-      ? buildTdGamut(palette, foundation, layerHeight, colorLayers, variableHeight)
+      ? buildTdGamut(palette, foundation, layerHeight, colorLayers, variableHeight, equalHeight ? { allowRepeat: true, diverse: true } : undefined)
       : null;
     let families = [];
     let heightMerge = null;
@@ -3271,6 +3297,7 @@
       engine, w, h, n, pixelSize, widthMm: w * pixelSize, heightMm: h * pixelSize,
       layerHeight, flatLayers, flatBaseLayers, gradStartLayer, gradTopLayer, actualGradTopLayer, maxGradLayers: colorLayers, maxLayers, flatTopMm: flatLayers * layerHeight,
       gradTopMm: gradTopLayer * layerHeight, actualGradTopMm: actualGradTopLayer * layerHeight, reliefMm: actualRelief, variableHeight,
+      equalHeight, commonTopLayer: equalHeight ? gradTopLayer : null,
       palette, foundation, foundationIndex: baseIndex, lutKey: options.lutKey || (engine === 'lut' ? 'bambu_8' : null),
       flatMask, flatFilament, familyId, regionId, regionCount, families, familyPixels, nearest, residual, stds, stdT, resT,
       predicted, preview, alpha, printMask, background, holeMap, smoothLevel,
@@ -3403,10 +3430,14 @@
     }
     if (z < plan.gradStartLayer) return plan.foundationIndex;
     const f = plan.familyId[i];
-    if (f < 0) return -1;
+    if (f < 0) {
+      // P3/G01: equal-height envelope/support columns are solid foundation up to
+      // the common top, not AIR gaps that would break the flat-surface contract.
+      if (plan.equalHeight && z < plan.commonTopLayer) return plan.foundationIndex;
+      return -1;
+    }
     const li = z - plan.gradStartLayer;
     if (li >= 0 && li < plan.families[f].recipe.length) return plan.families[f].recipe[li];
-    return -1;
     return -1;
   }
 
