@@ -29,6 +29,8 @@
     gradStartOverride: null,
     gradTopMmOverride: null,
     variableHeight: true,
+    geometryMode: 'relief',
+    qualityPolicy: 'color',
     layerHeight: 0.08,
     gradLayers: 6,
     stdThreshold: 0,
@@ -214,7 +216,10 @@
       sectionPosition: state.sectionPosition, exaggeration: state.exaggeration
     };
     for (const [id, value] of Object.entries(values)) if ($(id)) $(id).value = String(value);
-    $('variableHeight').checked = state.variableHeight;
+    $('variableHeight').checked = state.variableHeight && state.geometryMode !== 'flat';
+    $('variableHeight').disabled = state.engine === 'lut' || state.geometryMode === 'flat';
+    if ($('geometryMode')) $('geometryMode').value = state.geometryMode;
+    if ($('qualityPolicy')) $('qualityPolicy').value = state.qualityPolicy;
     $('vectorFlat').checked = state.vectorFlat;
     $('backgroundEnvelope').checked = state.backgroundEnvelope;
     $('section3D').checked = state.section3D;
@@ -532,6 +537,8 @@
     return {
       engine: 'td', palette: state.tdPalette, widthMm: state.widthMm,
       flatTopMm: state.flatTopMm, reliefMm: state.reliefMm, gradStartLayerOverride: state.gradStartOverride, gradTopMmOverride: state.gradTopMmOverride, variableHeight: state.variableHeight, layerHeight: state.layerHeight,
+      equalHeight: state.geometryMode === 'flat', qualityPolicy: state.qualityPolicy,
+      layerCoordination: state.geometryMode === 'flat' && state.qualityPolicy !== 'color',
       gradLayers: state.gradLayers, foundationIndex: state.foundationIndex,
       families: state.families, stdThreshold: state.stdThreshold,
       residualThreshold: state.residualThreshold, minFlatPercent: state.minFlatPercent, smoothLevel: state.smoothLevel, smoothMm: state.smoothMm, lineWidthMm: state.lineWidthMm, mergeDeltaE: state.mergeDeltaE,
@@ -1616,6 +1623,8 @@
     $('gradStartLayer').addEventListener('input', (e) => { state.gradStartOverride = clamp(Number(e.target.value) || 1, 1, 240); markDirty(false); });
     $('gradTopMm').addEventListener('input', (e) => { state.gradTopMmOverride = clamp(Number(e.target.value) || 0.8, 0.08, 20); state.gradStartOverride = clamp(Number($('gradStartLayer').value) || 1, 1, 240); markDirty(false); });
     $('variableHeight').addEventListener('change', (e) => { state.variableHeight = !!e.target.checked; markDirty(false); });
+    $('geometryMode').addEventListener('change', (e) => { state.geometryMode = e.target.value === 'flat' ? 'flat' : 'relief'; markDirty(false); });
+    $('qualityPolicy').addEventListener('change', (e) => { state.qualityPolicy = e.target.value; markDirty(false); });
     $('layerHeight').addEventListener('change', (e) => {
       if (state.engine !== 'td') return;
       const next = Number(e.target.value) || 0.08;

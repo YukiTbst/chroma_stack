@@ -3293,11 +3293,56 @@
       if (f >= 0 && families[f].sharedBaseLayers >= 2) sharedBasePixels++;
     }
 
+    // P4 integration: equal-height + continuity policy -> spatial same-layer
+    // coordination over a frozen baseline. Heights are fixed (equal-height), so the
+    // optimizer only swaps near-color stacks to reduce internal material boundary.
+    let regionOf = null, regionRecipes = null, coordination = null;
+    if (equalHeight && options.layerCoordination && CS.layerOptimizer && gamut) {
+      const budget = options.qualityPolicy === 'continuity' ? 2.0 : 1.0;
+      const graph = CS.layerOptimizer.buildRegionGraph({ n, w, h, printMask, flatMask, flatFilament, familyId }, pixelSize, options.manualMask);
+      const N = colorLayers;
+      const regs = graph.regions.map(r => {
+        const m0 = r.members[0];
+        const cur = flatMask[m0] ? new Array(N).fill(flatFilament[m0]) : (familyId[m0] >= 0 ? families[familyId[m0]].recipe.slice() : new Array(N).fill(baseIndex));
+        let locked = !!r.locked;
+        let sL = 0, sA = 0, sB = 0;
+        for (const i of r.members) {
+          if (lineProtectMask && lineProtectMask[i]) locked = true;
+          sL += lab[i * 3]; sA += lab[i * 3 + 1]; sB += lab[i * 3 + 2];
+        }
+        const mean = { L: sL / r.members.length, a: sA / r.members.length, b: sB / r.members.length };
+        const neutralSrc = Math.hypot(mean.a, mean.b) < 8;
+        const cands = [cur];
+        if (!locked) for (const c of matchGamutCandidates(mean, gamut, 6, budget, neutralSrc)) cands.push(c.g.seq.slice());
+        return { id: r.id, lab: mean, area: r.area, locked, stack: cur, candidates: cands, edges: r.edges, members: r.members };
+      });
+      const model = { materials: {} };
+      palette.forEach((p, i) => { model.materials[String(i)] = p; });
+      const res = CS.layerOptimizer.coordinateLayers({ model, boundaryLinear: foundation.lin, layerThicknessMm: layerHeight, regions: regs, lambdaB: 1, lambdaA: 0.2, colorBudget: budget });
+      regionOf = graph.regionOf; regionRecipes = {};
+      let changed = 0;
+      regs.forEach((r, idx) => {
+        const st = res.assignment[idx];
+        if (st.join(',') === r.stack.join(',')) return;
+        regionRecipes[r.id] = st; changed++;
+        const cl = compositeLab(foundation.lin, st, palette, layerHeight);
+        const hex = C.labToHex(cl.lab); const rgb = C.hexToRgb(hex);
+        for (const i of r.members) {
+          predicted[i] = { lab: cl.lab, hex, family: familyId[i] };
+          preview[i * 4] = rgb.r; preview[i * 4 + 1] = rgb.g; preview[i * 4 + 2] = rgb.b; preview[i * 4 + 3] = 255;
+        }
+      });
+      coordination = { changedRegions: changed, boundaryBefore: res.boundaryBefore, boundaryAfter: res.boundaryAfter, improved: res.improved, colorBudget: budget };
+      if (changed) warnings.push(`同层材料协调：${changed} 个空间区域改用近色配方，内部材料边界 ${res.boundaryBefore.toFixed(1)}→${res.boundaryAfter.toFixed(1)} mm·层；色差预算 ${budget} ΔE，线稿/中性/锁定不变。`);
+      else warnings.push('同层材料协调：当前颜色预算下无可用合层收益，保留原配方。');
+    }
+
     return {
       engine, w, h, n, pixelSize, widthMm: w * pixelSize, heightMm: h * pixelSize,
       layerHeight, flatLayers, flatBaseLayers, gradStartLayer, gradTopLayer, actualGradTopLayer, maxGradLayers: colorLayers, maxLayers, flatTopMm: flatLayers * layerHeight,
       gradTopMm: gradTopLayer * layerHeight, actualGradTopMm: actualGradTopLayer * layerHeight, reliefMm: actualRelief, variableHeight,
       equalHeight, commonTopLayer: equalHeight ? gradTopLayer : null,
+      regionOf, regionRecipes, coordination,
       palette, foundation, foundationIndex: baseIndex, lutKey: options.lutKey || (engine === 'lut' ? 'bambu_8' : null),
       flatMask, flatFilament, familyId, regionId, regionCount, families, familyPixels, nearest, residual, stds, stdT, resT,
       predicted, preview, alpha, printMask, background, holeMap, smoothLevel,
@@ -3424,6 +3469,16 @@
   function filamentAt(plan, x, y, z) {
     const i = y * plan.w + x;
     if (plan.printMask && !plan.printMask[i]) return -1;
+    // P4/P5: coordinated spatial regions override the family/flat recipe; this is
+    // the single material source consumed by preview, layer maps and export.
+    if (plan.regionRecipes && plan.regionOf) {
+      const rr = plan.regionRecipes[plan.regionOf[i]];
+      if (rr) {
+        if (z < plan.gradStartLayer) return plan.foundationIndex;
+        const li = z - plan.gradStartLayer;
+        return li < rr.length ? rr[li] : -1;
+      }
+    }
     if (plan.flatMask[i]) {
       if (z < (plan.flatBaseLayers || 0)) return plan.foundationIndex;
       return z < plan.flatLayers ? plan.flatFilament[i] : -1;

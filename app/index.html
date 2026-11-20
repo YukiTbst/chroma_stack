@@ -110,6 +110,22 @@
         <span><b>渐变区阶梯浮雕</b><small>开：不同颜色停在不同层，形成高低台阶；关：所有渐变块拉到同一高度，只换颜色。</small></span>
         <input type="checkbox" id="variableHeight" checked>
       </label>
+      <div class="field-grid">
+        <label class="field"><span>输出形式</span>
+          <select id="geometryMode">
+            <option value="relief" selected>彩色浮雕</option>
+            <option value="flat">等高彩色</option>
+          </select>
+        </label>
+        <label class="field"><span>质量策略</span>
+          <select id="qualityPolicy">
+            <option value="color" selected>颜色优先</option>
+            <option value="balanced">均衡</option>
+            <option value="continuity">连续区域优先</option>
+          </select>
+        </label>
+      </div>
+      <p class="hint">等高彩色：整个有效轮廓同一顶面，用三通道 TD 模型搜索受预算约束的合法配方（不查旧 LUT 表）。连续区域优先：在色差预算内让相邻空间区域同层同料、减少内部材料边界；仅等高模式生效，线稿/中性/手工锁硬约束不变。</p>
 
       <div class="structure-line" id="structureLine">
         <div><b>纯色区</b><span>0 → —</span></div>
