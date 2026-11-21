@@ -324,17 +324,37 @@
   function publishModel(v2, fitted, session) {
     if (!fitted || !fitted.publishable) return null;
     const base = v2 && v2.schemaVersion === 2 ? v2 : cd().emptyV2();
+    const modelId = fitted.model.modelId;
+    const dom = fitted.model.compatibilityDomain || null;
+    const sess = session ? { sessionId: session.sessionId, manifestHash: session.manifestHash, observationCount: (session.observations || []).length } : null;
     const entry = {
-      modelId: fitted.model.modelId, params: fitted.model.params, status: 'published',
-      compatibilityDomain: fitted.model.compatibilityDomain, channelStates: fitted.channelStates || null,
-      session: session ? { sessionId: session.sessionId, manifestHash: session.manifestHash, observationCount: (session.observations || []).length } : null,
+      modelId, params: fitted.model.params, status: 'published',
+      compatibilityDomain: dom, channelStates: fitted.channelStates || null,
+      // F08: provenance is recorded on the entry itself, not only via optional session
+      // fields, so source judgment does not depend on a session being supplied.
+      source: { kind: 'joint-fit', boardManifestHash: dom ? dom.boardManifestHash : null, layerHeightMm: dom ? dom.layerHeightMm : null, sessionId: sess ? sess.sessionId : null },
+      session: sess,
       metrics: { devDE: fitted.devDE, testDE: fitted.testDE, worstTestDE: fitted.worstTestDE != null ? fitted.worstTestDE : null, effectiveChannels: fitted.gate ? fitted.gate.effectiveChannels : null }
     };
-    let observations = base.observations || [];
+    // F08: idempotent publish. modelId is content-derived, so re-publishing the same
+    // model replaces its entry in place instead of appending a duplicate (which would
+    // grow models without bound and create duplicate-id blocks).
+    const models = (base.models || []).slice();
+    const idx = models.findIndex(m => m.modelId === modelId);
+    if (idx >= 0) models[idx] = entry; else models.push(entry);
+    // F08: dedupe retained observations by session+manifest+cell so repeat publish of
+    // the same session does not grow the observation log; a new session adds its own.
+    const observations = (base.observations || []).slice();
     if (session && Array.isArray(session.observations)) {
-      observations = [...observations, ...session.observations.map(o => ({ ...o, sessionId: session.sessionId, manifestHash: session.manifestHash }))];
+      const seen = new Set(observations.map(o => o.sessionId + '|' + o.manifestHash + '|' + o.cellId));
+      for (const o of session.observations) {
+        const k = session.sessionId + '|' + session.manifestHash + '|' + o.cellId;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        observations.push({ ...o, sessionId: session.sessionId, manifestHash: session.manifestHash });
+      }
     }
-    return { ...base, models: [...(base.models || []), entry], activeModelId: entry.modelId, observations };
+    return { ...base, models, activeModelId: modelId, observations };
   }
 
   /* #100 transaction confirmation: verify the publish actually took effect — the
