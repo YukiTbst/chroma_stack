@@ -1264,6 +1264,15 @@
 
   function actualTopLayer(p, i, mask) {
     if (p.printMask && !p.printMask[i]) return 0;
+    // F02: the heightmap/height stats must follow the FINAL material source, same as
+    // view3d.samplePlan / engine.filamentAt — coordinated region recipe length, or the
+    // equal-height common top (incl. envelope support). The old rule drew the envelope
+    // low (gradStartLayer) and ignored coordinated recipe lengths.
+    if (p.regionRecipes && p.regionOf) {
+      const rr = p.regionRecipes[p.regionOf[i]];
+      if (rr) return p.gradStartLayer + rr.length;
+    }
+    if (p.equalHeight) return p.commonTopLayer;
     if (mask[i]) return p.flatLayers;
     const f = p.familyId[i];
     return f >= 0 ? p.gradStartLayer + p.families[f].recipe.length : p.gradStartLayer;
@@ -2412,7 +2421,7 @@
   // Automated-acceptance handle: the real state, option builder and brush
   // primitives so tests can run state -> buildOptions -> buildPlan end to end
   // without a browser. Internal diagnostics only, not a user-facing feature.
-  CS.appDebug = { state, buildOptions, ensureBrushCanvas, applyPaint, snapshotUndo, undoBrush, clearBrush, clearManualEdits, rebaseBrushCanvas, markDirty, resetSettings, publishComboModel };
+  CS.appDebug = { state, buildOptions, ensureBrushCanvas, applyPaint, snapshotUndo, undoBrush, clearBrush, clearManualEdits, rebaseBrushCanvas, markDirty, resetSettings, publishComboModel, actualTopLayer, actualHeightStats };
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
