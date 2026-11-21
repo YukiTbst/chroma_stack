@@ -305,26 +305,6 @@
     return inside;
   }
 
-  function morphMask(mask, w, h, radius, grow) {
-    const out = new Uint8Array(mask.length);
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        let hit = grow ? 0 : 1;
-        for (let dy = -radius; dy <= radius && (grow ? !hit : hit); dy++) {
-          const yy = Math.max(0, Math.min(h - 1, y + dy));
-          for (let dx = -radius; dx <= radius; dx++) {
-            const xx = Math.max(0, Math.min(w - 1, x + dx));
-            const v = mask[yy * w + xx];
-            if (grow && v) { hit = 1; break; }
-            if (!grow && !v) { hit = 0; break; }
-          }
-        }
-        out[y * w + x] = hit;
-      }
-    }
-    return out;
-  }
-
   function validateLocalEdges(indices, startIdx) {
     const edges = new Map();
     for (let i = startIdx; i < indices.length; i += 3) {
@@ -693,22 +673,14 @@
       for (const n of edgeCounts.values()) if (n !== 2) { nonManifold = true; break; }
     }
     if (nonManifold) {
-      // Large organic masks are usually only unmeshable because of 1-px pinches
-      // in their jagged boundary; a single-pixel growth (+0.15 mm at this grid)
-      // lets the primary path succeed with ~20k triangles instead of millions.
-      // Thin text/line masks keep the exact per-cell tiling so their strokes and
-      // 1-px gaps stay pixel-identical.
-      let px = 0;
-      for (let i = 0; i < mask.length; i++) px += mask[i] ? 1 : 0;
+      // F-OUTLINE-01: never dilate the mask to make it meshable. Growing the mask by
+      // even 1px thickens thin lines inside the same material (1px->3px, 2px->4px) and
+      // overlaps neighbouring materials at the same layer/XY, breaking the
+      // one-material-per-voxel contract and the "footprint bit-identical" guarantee.
+      // Exact per-cell tiling keeps the footprint identical and is guaranteed
+      // watertight (heavier for large organic masks, but correct).
       positions.length = startPos * 3;
       indices.length = startIdx;
-      if (depth < 1 && px > 20000) {
-        const grown = morphMask(mask, w, h, 1, true);
-        const mode = meshPrism(grown, w, h, pixelSize, z0, z1, positions, indices, false, depth + 1);
-        if (indices.length > startIdx) return mode;
-        positions.length = startPos * 3;
-        indices.length = startIdx;
-      }
       return meshPrismTiling(mask, w, h, pixelSize, z0, z1, positions, indices);
     }
     return 'earcut';
