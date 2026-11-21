@@ -2105,8 +2105,8 @@
         const obj = JSON.parse(String(reader.result));
         if (!obj.manifest || !Array.isArray(obj.observations)) throw new Error('需要 {manifest, observations}');
         const v = CS.calibrationData.validateV2(obj.model ? { schemaVersion: 2, models: [obj.model] } : null);
-        state.comboObs = { manifest: obj.manifest, observations: obj.observations };
-        $('comboCalibStatus').textContent = `已导入 ${obj.observations.length} 条组合观测（manifest ${obj.manifest.manifestHash || '?'}）。点击"联合拟合并发布模型"。`;
+        state.comboObs = { manifest: obj.manifest, observations: obj.observations, relative: !!obj.relative, photoHash: obj.photoHash || '' };
+        $('comboCalibStatus').textContent = `已导入 ${obj.observations.length} 条组合观测（manifest ${obj.manifest.manifestHash || '?'}${obj.relative ? '，相对标定' : ''}）。点击"联合拟合并发布模型"。`;
         toast('组合观测已导入');
       } catch (e) { toast('观测导入失败：' + (e.message || e)); }
     };
@@ -2115,20 +2115,27 @@
   function publishComboModel() {
     if (!state.comboObs) { toast('请先导入组合观测 JSON'); return; }
     try {
-      const fitted = CS.calibrationJoint.fitJointModel(state.comboObs.observations, state.comboObs.manifest, {});
-      const pub = CS.calibrationJoint.publishModel(state.calibrationV2, fitted);
+      const manifest = state.comboObs.manifest;
+      const fitted = CS.calibrationJoint.fitJointModel(state.comboObs.observations, manifest, { relative: !!state.comboObs.relative });
+      const sessionId = CS.calibrationData.makeSessionId(manifest, state.comboObs.photoHash || '');
+      const session = { sessionId, manifestHash: manifest.manifestHash, observations: state.comboObs.observations };
+      const pub = CS.calibrationJoint.publishModel(state.calibrationV2, fitted, session);
       if (!pub) {
-        $('comboCalibStatus').textContent = `未发布：held-out ΔE ${fitted.testDE == null ? '—' : fitted.testDE.toFixed(1)} 超容差或存在未解决通道；保留原生效模型。`;
+        const reasons = (fitted.gate && fitted.gate.reasons) || [];
+        $('comboCalibStatus').textContent = `未发布（保留原生效模型）：${reasons.length ? reasons.join('；') : 'held-out 超容差或存在未解决通道'}。最差留出 ΔE ${fitted.worstTestDE == null ? '—' : fitted.worstTestDE.toFixed(1)} / 平均 ${fitted.testDE == null ? '—' : fitted.testDE.toFixed(1)}。`;
         toast('拟合未达发布条件，保留原模型');
         return;
       }
+      // #100 transaction confirmation: only commit if the publish actually took effect.
+      const confirm = CS.calibrationJoint.confirmPublish(pub, fitted.model.modelId);
+      if (!confirm.ok) { toast('发布事务确认失败：' + confirm.error + '；保留原模型'); return; }
       state.calibrationV2 = pub;
       CS.settings.save(state);
       // Lifecycle: a newly published model invalidates any stale plan so the next
       // compute uses the new activeModel (review m44 item 4).
       state.plan = null; markDirty(true);
-      $('comboCalibStatus').textContent = `已发布模型 ${fitted.model.modelId}（train ${fitted.trainLoss.toFixed(3)} / dev ${fitted.devDE == null ? '—' : fitted.devDE.toFixed(1)} / test ${fitted.testDE.toFixed(1)} ΔE），activeModelId 已原子切换；旧计划已失效，请重新计算。`;
-      toast('组合标定模型已发布，旧计划已失效');
+      $('comboCalibStatus').textContent = `已发布模型 ${fitted.model.modelId}（train ${fitted.trainLoss.toFixed(3)} / dev ${fitted.devDE == null ? '—' : fitted.devDE.toFixed(1)} / test ${fitted.testDE.toFixed(1)} / 最差 ${fitted.worstTestDE == null ? '—' : fitted.worstTestDE.toFixed(1)} ΔE），activeModelId 已原子切换并确认；留存 ${confirm.observations} 条观测，适用域层高 ${confirm.domain ? confirm.domain.layerHeightMm : '?'} mm；旧计划已失效，请重新计算。`;
+      toast('组合标定模型已发布并确认，旧计划已失效');
     } catch (e) { toast('发布失败：' + (e.message || e)); }
   }
 

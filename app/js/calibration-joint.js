@@ -310,19 +310,65 @@
     const unresolved = gate.unresolved > 0;
     const modelId = cd().makeModelId(theta, [manifest.manifestHash]);
     return {
-      model: { modelId, params: theta, status: publishable ? 'published' : 'restricted', compatibilityDomain: { layerHeightMm: lh }, trainLoss: best.loss },
+      model: { modelId, params: theta, status: publishable ? 'published' : 'restricted', compatibilityDomain: { layerHeightMm: lh, boardManifestHash: manifest.manifestHash, materialIds: ids.slice() }, trainLoss: best.loss },
       trainLoss: best.loss, devDE, testDE, worstTestDE, identifiability, channelStates, gate, unresolved, publishable,
       splits: { train: train.length, dev: bySplit.dev.length, test: bySplit.test.length }
     };
   }
 
   /* Atomic publish: returns a NEW v2 block with the model appended and activeModelId
-     switched, or null (caller keeps the old active model) when not publishable. */
-  function publishModel(v2, fitted) {
+     switched, or null (caller keeps the old active model) when not publishable.
+     #100: when a session {sessionId, manifestHash, observations} is supplied, the
+     source observations are retained (append-only) and linked to the model entry,
+     and the applicable domain is recorded for cross-domain detection. */
+  function publishModel(v2, fitted, session) {
     if (!fitted || !fitted.publishable) return null;
     const base = v2 && v2.schemaVersion === 2 ? v2 : cd().emptyV2();
-    const entry = { modelId: fitted.model.modelId, params: fitted.model.params, status: 'published', compatibilityDomain: fitted.model.compatibilityDomain, channelStates: fitted.channelStates || null, metrics: { devDE: fitted.devDE, testDE: fitted.testDE, worstTestDE: fitted.worstTestDE != null ? fitted.worstTestDE : null, effectiveChannels: fitted.gate ? fitted.gate.effectiveChannels : null } };
-    return { ...base, models: [...(base.models || []), entry], activeModelId: entry.modelId };
+    const entry = {
+      modelId: fitted.model.modelId, params: fitted.model.params, status: 'published',
+      compatibilityDomain: fitted.model.compatibilityDomain, channelStates: fitted.channelStates || null,
+      session: session ? { sessionId: session.sessionId, manifestHash: session.manifestHash, observationCount: (session.observations || []).length } : null,
+      metrics: { devDE: fitted.devDE, testDE: fitted.testDE, worstTestDE: fitted.worstTestDE != null ? fitted.worstTestDE : null, effectiveChannels: fitted.gate ? fitted.gate.effectiveChannels : null }
+    };
+    let observations = base.observations || [];
+    if (session && Array.isArray(session.observations)) {
+      observations = [...observations, ...session.observations.map(o => ({ ...o, sessionId: session.sessionId, manifestHash: session.manifestHash }))];
+    }
+    return { ...base, models: [...(base.models || []), entry], activeModelId: entry.modelId, observations };
+  }
+
+  /* #100 transaction confirmation: verify the publish actually took effect — the
+     requested model is active, present, and the whole v2 block still validates. */
+  function confirmPublish(v2, modelId) {
+    if (!v2 || v2.schemaVersion !== 2) return { ok: false, error: 'no calibration v2 block' };
+    if (v2.activeModelId !== modelId) return { ok: false, error: 'activeModelId does not match the published model' };
+    const m = (v2.models || []).find(x => x.modelId === modelId);
+    if (!m) return { ok: false, error: 'published model not found' };
+    const v = cd().validateV2(v2);
+    if (!v.ok) return { ok: false, error: v.error };
+    return { ok: true, modelId, domain: m.compatibilityDomain || null, session: m.session || null, observations: (v2.observations || []).length };
+  }
+
+  /* #100: read the ACTUAL manifest embedded in a generated combo board 3MF, so
+     analysis uses the printed board's identity/geometry rather than a rebuilt
+     approximation. The sync generator stores entries uncompressed (method 0). */
+  function readComboManifest(bytes) {
+    const buf = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    const dec = new TextDecoder();
+    for (let i = 0; i + 30 <= buf.length; i++) {
+      if (dv.getUint32(i, true) !== 0x04034b50) continue;
+      const nameLen = dv.getUint16(i + 26, true), extraLen = dv.getUint16(i + 28, true);
+      const name = dec.decode(buf.subarray(i + 30, i + 30 + nameLen));
+      if (name !== 'Metadata/chromastack-combo-calibration.json') continue;
+      const method = dv.getUint16(i + 8, true), compSize = dv.getUint32(i + 18, true);
+      if (method !== 0) throw new Error('内嵌 manifest 为压缩存储，请用同步生成的组合板 3MF');
+      const start = i + 30 + nameLen + extraLen;
+      const obj = JSON.parse(dec.decode(buf.subarray(start, start + compSize)));
+      if (!obj || !obj.manifest) throw new Error('3MF 未内嵌组合标定 manifest');
+      return { manifest: obj.manifest, palette: obj.palette || null };
+    }
+    throw new Error('3MF 中找不到组合标定 manifest');
   }
 
   /* Analyse a printed combo board photo: locate the 4 corner markers (dark on the
@@ -476,5 +522,5 @@
     return { observations: norm, gain };
   }
 
-  CS.calibrationJoint = { buildComboManifest, fitJointModel, publishModel, publishGate, modelFromTheta, buildComboBoard3MF, buildComboBoardBlob, analyzeComboPhoto, normalizeWhite };
+  CS.calibrationJoint = { buildComboManifest, fitJointModel, publishModel, publishGate, confirmPublish, readComboManifest, modelFromTheta, buildComboBoard3MF, buildComboBoardBlob, analyzeComboPhoto, normalizeWhite };
 })(typeof globalThis !== 'undefined' ? globalThis : this);
