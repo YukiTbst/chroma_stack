@@ -957,16 +957,33 @@
       list.innerHTML = '<div class="placeholder-small">当前没有渐变区；整幅画都落在纯色区。</div>';
       return;
     }
+    // F04: show the FINAL coordinated colour per family, not the nominal recipe
+    // prediction (coordination re-assigns regions to near-color recipes).
+    const finalHex = {};
+    if (p.predicted && p.familyId) {
+      const counts = {};
+      for (let i = 0; i < p.n; i++) {
+        if (p.printMask && !p.printMask[i]) continue;
+        const f = p.familyId[i]; if (f < 0) continue;
+        const hx = p.predicted[i] && p.predicted[i].hex; if (!hx) continue;
+        const k = hx.toLowerCase(); (counts[f] = counts[f] || {})[k] = (counts[f][k] || 0) + 1;
+      }
+      for (const f in counts) { const keys = Object.keys(counts[f]); keys.sort((a, b) => counts[f][b] - counts[f][a]); finalHex[f] = keys[0]; }
+    }
+    const coordinated = !!(p.coordination && p.coordination.changedRegions > 0);
     list.innerHTML = fams.slice(0, 8).map(f => {
-      const chips = f.recipe.map((fi, idx) => {
-        const pal = p.palette[fi];
+      const fi = p.families.indexOf(f);
+      const shownHex = finalHex[fi] || f.predictedHex;
+      const changed = coordinated && shownHex.toLowerCase() !== f.predictedHex.toLowerCase();
+      const chips = f.recipe.map((pal_i, idx) => {
+        const pal = p.palette[pal_i];
         return `<span class="recipe-chip" style="background:${esc(pal.hex)}" title="${esc(pal.name)} · 第 ${idx + 1} 层（底→顶）"></span>`;
       }).join('<span class="recipe-arrow">↑</span>');
       return `<div class="family-item">
         <div class="family-top">
           <span class="family-swatch" style="background:${esc(f.targetHex)}" title="目标色"></span>
-          <b>${esc(f.targetHex)} → ${esc(f.predictedHex)}</b>
-          <em>ΔE ${f.deltaE.toFixed(1)} · ${f.pixelCount}px · ${f.recipe.length}层${f.sharedBaseLayers ? ' · 共底'+f.sharedBaseLayers : ''}</em>
+          <b>${esc(f.targetHex)} → ${esc(shownHex)}</b>
+          <em>ΔE ${f.deltaE.toFixed(1)} · ${f.pixelCount}px · ${f.recipe.length}层${f.sharedBaseLayers ? ' · 共底'+f.sharedBaseLayers : ''}${changed ? ' · 协调后色' : ''}</em>
         </div>
         <div class="recipe-chips">${chips}</div>
       </div>`;
@@ -2028,14 +2045,26 @@
     } finally { hideProgress(); }
   }
 
+  function regionMapHex(p, i) {
+    if (p.printMask && !p.printMask[i]) return '#1c2328';
+    // F04: the region map shows the FINAL colour, not pre-coordination family data.
+    if (p.flatMask[i]) {
+      // coordinated flat regions may top out in a different material than nominal
+      const top = actualTopLayer(p, i, p.flatMask);
+      const fi = CS.engine.filamentAt(p, i % p.w, (i / p.w) | 0, Math.max(0, top - 1));
+      if (fi >= 0) return p.palette[fi].hex;
+      return p.palette[p.flatFilament[i] !== 0xffff ? p.flatFilament[i] : p.nearest[i]].hex;
+    }
+    if (p.predicted && p.predicted[i]) return p.predicted[i].hex;
+    const f = p.familyId[i];
+    return f >= 0 ? p.families[f].predictedHex : '#1c2328';
+  }
+
   function buildRegionMapCanvas(p) {
     const out = new Uint8ClampedArray(p.w * p.h * 4);
     for (let i = 0; i < p.w * p.h; i++) {
       if (p.printMask && !p.printMask[i]) continue;
-      let hex = '#1c2328';
-      if (p.flatMask[i]) hex = p.palette[p.flatFilament[i] !== 0xffff ? p.flatFilament[i] : p.nearest[i]].hex;
-      else { const f = p.familyId[i]; if (f >= 0) hex = p.families[f].predictedHex; }
-      const c = C.hexToRgb(hex);
+      const c = C.hexToRgb(regionMapHex(p, i));
       out[i * 4] = c.r; out[i * 4 + 1] = c.g; out[i * 4 + 2] = c.b; out[i * 4 + 3] = 255;
     }
     return imageDataCanvas(new ImageData(out, p.w, p.h));
@@ -2421,7 +2450,7 @@
   // Automated-acceptance handle: the real state, option builder and brush
   // primitives so tests can run state -> buildOptions -> buildPlan end to end
   // without a browser. Internal diagnostics only, not a user-facing feature.
-  CS.appDebug = { state, buildOptions, ensureBrushCanvas, applyPaint, snapshotUndo, undoBrush, clearBrush, clearManualEdits, rebaseBrushCanvas, markDirty, resetSettings, publishComboModel, actualTopLayer, actualHeightStats };
+  CS.appDebug = { state, buildOptions, ensureBrushCanvas, applyPaint, snapshotUndo, undoBrush, clearBrush, clearManualEdits, rebaseBrushCanvas, markDirty, resetSettings, publishComboModel, actualTopLayer, actualHeightStats, regionMapHex };
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

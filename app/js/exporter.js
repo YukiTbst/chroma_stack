@@ -1013,6 +1013,23 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
         coordination = { ...plan.coordination, regions };
       }
     }
+    // F04: dominant FINAL predicted hex per family (post-coordination), so the plan
+    // package family colour is not the stale pre-coordination recipe prediction.
+    const familyFinalHex = plan.families.map(() => null);
+    if (plan.predicted && plan.familyId) {
+      const counts = plan.families.map(() => ({}));
+      for (let i = 0; i < plan.n; i++) {
+        if (plan.printMask && !plan.printMask[i]) continue;
+        const f = plan.familyId[i]; if (f < 0 || !counts[f]) continue;
+        const hx = plan.predicted[i] && plan.predicted[i].hex; if (!hx) continue;
+        const k = hx.toLowerCase(); counts[f][k] = (counts[f][k] || 0) + 1;
+      }
+      for (let f = 0; f < counts.length; f++) {
+        const keys = Object.keys(counts[f]); if (!keys.length) continue;
+        keys.sort((a, b) => counts[f][b] - counts[f][a]);
+        familyFinalHex[f] = keys[0];
+      }
+    }
     return {
       app: 'ChromaStack',
       engine: plan.engine,
@@ -1053,6 +1070,7 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
       coordination,
       families: plan.families.map((f, i) => ({
         id: i, pixels: f.pixelCount, targetHex: f.targetHex, predictedHex: f.predictedHex,
+        finalPredictedHex: familyFinalHex[i] || f.predictedHex,
         coordinated: changedFamilies.has(i),
         deltaE00: +f.deltaE.toFixed(2), layers: f.recipe.length, topMm: +((plan.gradStartLayer + f.recipe.length) * plan.layerHeight).toFixed(3),
         recipeBottomToTop: f.recipe.map(x => plan.palette[x].name)
