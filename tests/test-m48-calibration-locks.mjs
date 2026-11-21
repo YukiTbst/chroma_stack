@@ -60,7 +60,7 @@ function locksIntact(n) {
   const obs = manifest.cells.map(cell => { const sub = baseLin[cell.base]; const pred = O.predictStack(km, cell.stack, { linearRgb: { r: sub[0], g: sub[1], b: sub[2] } }, 0.08).linearRgb; return { cellId: cell.cellId, observedLinear: [pred.r, pred.g, pred.b], substrateLinear: sub.slice(), channelsOk: [true, true, true] }; });
   dbg.state.comboObs = { manifest, observations: obs };
   dbg.state.calibrationV2 = CD.emptyV2();
-  dbg.publishComboModel();
+  await dbg.publishComboModel();
   assert.ok(dbg.state.calibrationV2 && dbg.state.calibrationV2.activeModelId, 'model actually published (markDirty path exercised)');
   locksIntact(n);
   assert.equal(dbg.state.plan, null, 'publish still invalidates the stale plan');

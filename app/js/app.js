@@ -2155,7 +2155,7 @@
     };
     reader.readAsText(file);
   }
-  function publishComboModel() {
+  async function publishComboModel() {
     if (!state.comboObs) { toast('请先导入组合观测 JSON'); return; }
     try {
       const manifest = state.comboObs.manifest;
@@ -2169,16 +2169,33 @@
         toast('拟合未达发布条件，保留原模型');
         return;
       }
-      // #100 transaction confirmation: only commit if the publish actually took effect.
-      const confirm = CS.calibrationJoint.confirmPublish(pub, fitted.model.modelId);
-      if (!confirm.ok) { toast('发布事务确认失败：' + confirm.error + '；保留原模型'); return; }
+      const prevV2 = state.calibrationV2;
+      // Commit locally and push, then bind confirmation to the SERVER ACK (F06): a
+      // local-only validate is not enough when a cloud profile is active.
       state.calibrationV2 = pub;
       CS.settings.save(state);
+      let ack = null;
+      if (CS.profiles && CS.profiles.activeId && CS.profiles.activeId()) {
+        try { await CS.profiles.flush(false); } catch (e) { /* push failure surfaces via revision/conflict */ }
+        const cached = CS.profiles.cachedData() || {};
+        const ackV2 = cached.calibrationV2 || cached;
+        ack = { profileId: CS.profiles.activeId(), revision: CS.profiles.revision(), activeModelId: ackV2 ? ackV2.activeModelId : null };
+      }
+      const confirm = CS.calibrationJoint.confirmPublish(pub, fitted.model.modelId, ack);
+      if (!confirm.ok) {
+        // F06: the server did not acknowledge — roll back to the previous active model
+        // so local and cloud state cannot diverge into a false "published" claim.
+        state.calibrationV2 = prevV2;
+        CS.settings.save(state);
+        $('comboCalibStatus').textContent = `发布未确认：${confirm.error}；已保留原生效模型。`;
+        toast('发布事务确认失败：' + confirm.error + '；保留原模型');
+        return;
+      }
       // Lifecycle: a newly published model invalidates any stale plan so the next
       // compute uses the new activeModel (review m44 item 4). F01: keep manual region
       // locks + undo history — calibration does not change the image segmentation.
       state.plan = null; markDirty(false);
-      $('comboCalibStatus').textContent = `已发布模型 ${fitted.model.modelId}（train ${fitted.trainLoss.toFixed(3)} / dev ${fitted.devDE == null ? '—' : fitted.devDE.toFixed(1)} / test ${fitted.testDE.toFixed(1)} / 最差 ${fitted.worstTestDE == null ? '—' : fitted.worstTestDE.toFixed(1)} ΔE），activeModelId 已原子切换并确认；留存 ${confirm.observations} 条观测，适用域层高 ${confirm.domain ? confirm.domain.layerHeightMm : '?'} mm；旧计划已失效，请重新计算。`;
+      $('comboCalibStatus').textContent = `已发布模型 ${fitted.model.modelId}（train ${fitted.trainLoss.toFixed(3)} / dev ${fitted.devDE == null ? '—' : fitted.devDE.toFixed(1)} / test ${fitted.testDE.toFixed(1)} / 最差 ${fitted.worstTestDE == null ? '—' : fitted.worstTestDE.toFixed(1)} ΔE），activeModelId 已原子切换${confirm.serverRevision != null ? `，服务器 revision ${confirm.serverRevision} 已确认` : '并确认'}；留存 ${confirm.observations} 条观测，适用域层高 ${confirm.domain ? confirm.domain.layerHeightMm : '?'} mm；旧计划已失效，请重新计算。`;
       toast('组合标定模型已发布并确认，旧计划已失效');
     } catch (e) { toast('发布失败：' + (e.message || e)); }
   }
@@ -2453,7 +2470,7 @@
   // Automated-acceptance handle: the real state, option builder and brush
   // primitives so tests can run state -> buildOptions -> buildPlan end to end
   // without a browser. Internal diagnostics only, not a user-facing feature.
-  CS.appDebug = { state, buildOptions, ensureBrushCanvas, applyPaint, snapshotUndo, undoBrush, clearBrush, clearManualEdits, rebaseBrushCanvas, markDirty, resetSettings, publishComboModel, actualTopLayer, actualHeightStats, regionMapHex };
+  CS.appDebug = { state, buildOptions, ensureBrushCanvas, applyPaint, snapshotUndo, undoBrush, clearBrush, clearManualEdits, rebaseBrushCanvas, markDirty, resetSettings, publishComboModel, actualTopLayer, actualHeightStats, regionMapHex, runPlanInWorker };
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

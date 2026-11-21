@@ -358,15 +358,22 @@
   }
 
   /* #100 transaction confirmation: verify the publish actually took effect — the
-     requested model is active, present, and the whole v2 block still validates. */
-  function confirmPublish(v2, modelId) {
+     requested model is active, present, and the whole v2 block still validates.
+     F06: when a server ACK {profileId, revision, activeModelId} is supplied (an active
+     cloud profile), confirmation also requires the server to have acknowledged a
+     revision whose data has this model active — local validation alone is not enough. */
+  function confirmPublish(v2, modelId, ack) {
     if (!v2 || v2.schemaVersion !== 2) return { ok: false, error: 'no calibration v2 block' };
     if (v2.activeModelId !== modelId) return { ok: false, error: 'activeModelId does not match the published model' };
     const m = (v2.models || []).find(x => x.modelId === modelId);
     if (!m) return { ok: false, error: 'published model not found' };
     const v = cd().validateV2(v2);
     if (!v.ok) return { ok: false, error: v.error };
-    return { ok: true, modelId, domain: m.compatibilityDomain || null, session: m.session || null, observations: (v2.observations || []).length };
+    if (ack && ack.profileId) {
+      if (ack.revision == null) return { ok: false, error: '服务器未确认保存（无 revision）；本地与云端可能不一致' };
+      if (ack.activeModelId != null && ack.activeModelId !== modelId) return { ok: false, error: '服务器确认的数据未激活该模型' };
+    }
+    return { ok: true, modelId, domain: m.compatibilityDomain || null, session: m.session || null, observations: (v2.observations || []).length, serverRevision: ack ? ack.revision : null };
   }
 
   /* #100: read the ACTUAL manifest embedded in a generated combo board 3MF, so
