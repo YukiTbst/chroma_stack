@@ -2411,18 +2411,23 @@
     // carries just a bound and an 'unresolved' channel no information — neither may
     // be used as a point TD/opaque, so those channels keep the library value. Legacy
     // models without a per-channel state are treated as estimated (backward compat).
+    // F02: coverage / cross-domain / effective source are reported, never silent.
+    let opticalModelDiag = null;
     if (engine === 'td' && options.opticalModel && options.opticalModel.params) {
       const params = options.opticalModel.params;
       const chKeys = ['r', 'g', 'b'];
+      const covered = [], uncovered = [];
+      let partialChannels = 0, effectiveChannels = 0;
       for (const p of palette) {
         const t = params[p.id] || params[p.name];
-        if (!t) continue;
+        if (!t) { uncovered.push({ id: p.id, name: p.name }); continue; }
         const st = t.state || ['estimated', 'estimated', 'estimated'];
         const lin = { r: p.lin.r, g: p.lin.g, b: p.lin.b };
         const hd = [p.hdR, p.hdG, p.hdB];
         const used = [false, false, false];
         for (let c = 0; c < 3; c++) {
-          if (st[c] === 'estimated') { lin[chKeys[c]] = t.opaque[c]; hd[c] = Math.exp(t.logHd[c]); used[c] = true; }
+          if (st[c] === 'estimated') { lin[chKeys[c]] = t.opaque[c]; hd[c] = Math.exp(t.logHd[c]); used[c] = true; effectiveChannels++; }
+          else partialChannels++;
         }
         p.lin = lin;
         p.hdR = hd[0]; p.hdG = hd[1]; p.hdB = hd[2];
@@ -2432,8 +2437,13 @@
         p.fromModel = used.some(Boolean);
         p.modelChannels = used;
         p.modelState = st.slice();
+        covered.push({ id: p.id, name: p.name, state: st.slice(), used });
       }
       foundation = palette[baseIndex];
+      const dom = options.opticalModel.compatibilityDomain;
+      const crossDomain = (dom && dom.layerHeightMm != null && Math.abs(dom.layerHeightMm - layerHeight) > 1e-6)
+        ? { modelLayerHeightMm: dom.layerHeightMm, productionLayerHeightMm: layerHeight } : null;
+      opticalModelDiag = { applied: true, source: 'calibrationV2', covered, uncovered, partialChannels, effectiveChannels, crossDomain };
     }
 
     let flatMask, stds, residual, nearest, stdT, resT;
@@ -3210,6 +3220,7 @@
       neutralAudit.memberFamilies = neutralReconcile.created;
     }
     const diagnostics = {
+      opticalModel: opticalModelDiag,
       sensitivity: { frac: 0.1, worstDE: +sensWorst.toFixed(2), worstHex: sensHex, familiesOver5: sensOver5 },
       fill: { filledPixels: flatFillStats.filled, rejectedPixels: flatFillStats.rejected },
       manualPixels: manualPaintPixels,
@@ -3233,6 +3244,12 @@
       }
     };
     const warnings = [];
+    if (opticalModelDiag) {
+      const om = opticalModelDiag;
+      if (om.uncovered.length) warnings.push(`标定模型未覆盖 ${om.uncovered.length} 种耗材（${om.uncovered.map(u => u.name || u.id).join('、')}），这些仍用库值 TD；请确认材料 ID 匹配或补标定。`);
+      if (om.crossDomain) warnings.push(`标定模型跨域使用：模型适用层高 ${om.crossDomain.modelLayerHeightMm} mm，当前生产层高 ${om.crossDomain.productionLayerHeightMm} mm；预测可能偏差，建议在同层高重标定。`);
+      if (om.partialChannels) warnings.push(`标定模型有 ${om.partialChannels} 个通道仅界限(bounded)或无信息(unresolved)，已保留库值不当点参数；这些通道预测仍依赖库 TD。`);
+    }
     if (diagnostics.sensitivity.familiesOver5 > 0) {
       warnings.push(`模型敏感度：${diagnostics.sensitivity.familiesOver5} 个渐变配方在 ±10% HD 情景下色差 >5 ΔE（最大 ${diagnostics.sensitivity.worstDE}，目标 ${diagnostics.sensitivity.worstHex}）。这是仿真情景，不是实测区间；可在这些区域降低透明料层数或补充标定。`);
     }
