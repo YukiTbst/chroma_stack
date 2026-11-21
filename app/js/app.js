@@ -254,7 +254,9 @@
     state.plan = null;
     CS.settings.clear();
     syncControlsFromState();
-    markDirty(true);
+    // F01: resetting calibration changes TD values, not the image segmentation —
+    // keep the user's manual region locks + undo history (markDirty(false)).
+    markDirty(false);
     toast(backup ? '已重置当前 profile 的标定；其他参数未改动（已保留可恢复备份）' : '已重置当前 profile 的标定；其他参数未改动');
   }
 
@@ -2132,8 +2134,9 @@
       state.calibrationV2 = pub;
       CS.settings.save(state);
       // Lifecycle: a newly published model invalidates any stale plan so the next
-      // compute uses the new activeModel (review m44 item 4).
-      state.plan = null; markDirty(true);
+      // compute uses the new activeModel (review m44 item 4). F01: keep manual region
+      // locks + undo history — calibration does not change the image segmentation.
+      state.plan = null; markDirty(false);
       $('comboCalibStatus').textContent = `已发布模型 ${fitted.model.modelId}（train ${fitted.trainLoss.toFixed(3)} / dev ${fitted.devDE == null ? '—' : fitted.devDE.toFixed(1)} / test ${fitted.testDE.toFixed(1)} / 最差 ${fitted.worstTestDE == null ? '—' : fitted.worstTestDE.toFixed(1)} ΔE），activeModelId 已原子切换并确认；留存 ${confirm.observations} 条观测，适用域层高 ${confirm.domain ? confirm.domain.layerHeightMm : '?'} mm；旧计划已失效，请重新计算。`;
       toast('组合标定模型已发布并确认，旧计划已失效');
     } catch (e) { toast('发布失败：' + (e.message || e)); }
@@ -2409,7 +2412,7 @@
   // Automated-acceptance handle: the real state, option builder and brush
   // primitives so tests can run state -> buildOptions -> buildPlan end to end
   // without a browser. Internal diagnostics only, not a user-facing feature.
-  CS.appDebug = { state, buildOptions, ensureBrushCanvas, applyPaint, snapshotUndo, undoBrush, clearBrush, clearManualEdits, rebaseBrushCanvas };
+  CS.appDebug = { state, buildOptions, ensureBrushCanvas, applyPaint, snapshotUndo, undoBrush, clearBrush, clearManualEdits, rebaseBrushCanvas, markDirty, resetSettings, publishComboModel };
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
