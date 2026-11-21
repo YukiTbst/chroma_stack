@@ -1008,6 +1008,31 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
   }
 
   function planSummary(plan) {
+    // #99: the plan package must carry the FINAL coordinated material, not only the
+    // pre-coordination colour-family segmentation. Build the region map summary and
+    // the per-region final recipes (authoritative regionRecipes == filamentAt).
+    const regionRecipes = plan.regionRecipes || null;
+    const regionOf = plan.regionOf || null;
+    let regionMap = null, coordination = null;
+    const changedFamilies = new Set();
+    if (regionOf) {
+      const regionCount = new Set(); const regionPixels = {}; const regionMember = {};
+      for (let i = 0; i < plan.n; i++) { const r = regionOf[i]; if (r < 0) continue; regionCount.add(r); regionPixels[r] = (regionPixels[r] || 0) + 1; if (regionMember[r] == null) regionMember[r] = i; }
+      regionMap = { regionCount: regionCount.size, coordinatedRegions: regionRecipes ? Object.keys(regionRecipes).length : 0 };
+      if (regionRecipes && plan.coordination) {
+        const regions = Object.keys(regionRecipes).map(k => {
+          const r = +k, rr = regionRecipes[r], m = regionMember[r], fam = m != null ? plan.familyId[m] : -1;
+          if (fam >= 0 && plan.families[fam] && plan.families[fam].recipe.join(',') !== rr.join(',')) changedFamilies.add(fam);
+          return {
+            regionId: r, pixels: regionPixels[r] || 0, familyId: fam,
+            predictedHex: m != null && plan.predicted[m] ? plan.predicted[m].hex : null,
+            layers: rr.length, topMm: +((plan.gradStartLayer + rr.length) * plan.layerHeight).toFixed(3),
+            recipeBottomToTop: rr.map(x => plan.palette[x].name)
+          };
+        }).sort((a, b) => b.pixels - a.pixels);
+        coordination = { ...plan.coordination, regions };
+      }
+    }
     return {
       app: 'ChromaStack',
       engine: plan.engine,
@@ -1044,8 +1069,11 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
         filamentGrams: plan.palette.map((p, i) => +plan.stats.grams[i].toFixed(2))
       },
       warnings: plan.warnings,
+      regionMap,
+      coordination,
       families: plan.families.map((f, i) => ({
         id: i, pixels: f.pixelCount, targetHex: f.targetHex, predictedHex: f.predictedHex,
+        coordinated: changedFamilies.has(i),
         deltaE00: +f.deltaE.toFixed(2), layers: f.recipe.length, topMm: +((plan.gradStartLayer + f.recipe.length) * plan.layerHeight).toFixed(3),
         recipeBottomToTop: f.recipe.map(x => plan.palette[x].name)
       })).filter(f => f.pixels > 0).sort((a, b) => b.pixels - a.pixels),
@@ -1092,6 +1120,16 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
     lines.push(`- 渐变区：0–${s.layers.gradientStartLayer} 层为基底（${s.foundation}），随后各色块按 1–${s.layers.gradientTopLayer - s.layers.gradientStartLayer} 层配方叠色；${s.layers.variableHeight ? '短线配方形成低台阶，最长配方到 ' + s.layers.actualGradientTopMm + ' mm。' : '所有渐变块等高。'}
 - 纯色区顶面 ${s.layers.flatTopMm} mm，渐变区最高 ${s.layers.actualGradientTopMm} mm；最高浮雕差 ${s.layers.reliefMm} mm。`);
     lines.push('- 3MF 是一个多 part 对象：每个“颜色 × 连续层区间”是一个水密 part，已写入 extruder 编号；导入 Bambu Studio 若提示“配置无效，仅加载几何数据”，点确认即可。');
+    if (s.coordination && s.coordination.regions && s.coordination.regions.length) {
+      lines.push('');
+      lines.push('## 同层材料协调（最终配方）');
+      lines.push('');
+      lines.push(`- 协调改动 ${s.coordination.changedRegions} 个空间区域，内部材料边界 ${(+s.coordination.boundaryBefore).toFixed(1)}→${(+s.coordination.boundaryAfter).toFixed(1)} mm·层，色差预算 ${s.coordination.colorBudget} ΔE。上方“层叠结构”的色族配方为协调前分割；下表为协调后最终配方，与导出 3MF / 3D / 逐层图一致。`);
+      lines.push('');
+      lines.push('| 区域 | 像素 | 层数 | 顶高 mm | 最终配方（底→顶） |');
+      lines.push('| --- | --- | --- | --- | --- |');
+      s.coordination.regions.forEach(r => lines.push(`| ${r.regionId} | ${r.pixels} | ${r.layers} | ${r.topMm} | ${r.recipeBottomToTop.join(' / ')} |`));
+    }
     lines.push('');
     lines.push('## 层内耗材（下界）');
     lines.push('');
