@@ -3090,7 +3090,7 @@
       const rgb = C.hexToRgb(predicted[i].hex);
       preview[i * 4] = rgb.r; preview[i * 4 + 1] = rgb.g; preview[i * 4 + 2] = rgb.b; preview[i * 4 + 3] = 255;
     }
-    const meanDE = colorStatPixels ? sumDE / colorStatPixels : 0;
+    let meanDE = colorStatPixels ? sumDE / colorStatPixels : 0;
     let cum = 0, p90 = 0, median = 0;
     for (let d = 0; d <= 100; d++) {
       cum += hist[d];
@@ -3412,18 +3412,37 @@
         toolChanges += Math.max(0, set.size - 1);
       }
     }
-    // F08: color-error stats must reflect the coordinated predicted colors.
+    // F03: color-error stats must FULLY reflect the coordinated predicted colors —
+    // meanDE, median/p90 (global hist), under2/5/10 and every group (line/flat/gradient),
+    // not just sumDE/maxDE/gradient. Rebuild from the final predicted exactly as the
+    // original pass does, skipping envelope support (real material, not a colour sample).
     if (regionRecipes) {
       sumDE = 0; sumDE2 = 0; maxDE = 0;
-      const gs = groupStats.gradient; gs.pixels = 0; gs.sum = 0; gs.max = 0; gs.hist = new Uint32Array(101);
-      let cnt = 0;
+      under2 = 0; under5 = 0; under10 = 0;
+      hist.fill(0);
+      for (const k of ['line', 'flat', 'gradient']) { const g = groupStats[k]; g.pixels = 0; g.sum = 0; g.max = 0; g.hist = new Uint32Array(101); }
+      let csp = 0;
       for (let i = 0; i < n; i++) {
         if (!printMask[i]) continue;
+        if (isEnvelopeSupport(i)) continue;
+        csp++;
         const de = C.deltaE2000(labAt(lab, i), predicted[i].lab);
-        sumDE += de; sumDE2 += de * de; if (de > maxDE) maxDE = de; cnt++;
-        if (!flatMask[i]) { gs.pixels++; gs.sum += de; if (de > gs.max) gs.max = de; gs.hist[Math.min(100, Math.round(de))]++; }
+        const groupName = (lineDirect && lineDirect[i]) ? 'line' : flatMask[i] ? 'flat' : 'gradient';
+        const gs = groupStats[groupName];
+        gs.pixels++; gs.sum += de; if (de > gs.max) gs.max = de; gs.hist[Math.min(100, Math.round(de))]++;
+        sumDE += de; sumDE2 += de * de; if (de > maxDE) maxDE = de;
+        hist[Math.min(100, Math.round(de))]++;
+        if (de <= 2) under2++; if (de <= 5) under5++; if (de <= 10) under10++;
       }
-      void cnt;
+      colorStatPixels = csp;
+      meanDE = colorStatPixels ? sumDE / colorStatPixels : 0;
+      let cumR = 0; median = 0; p90 = 0;
+      for (let d = 0; d <= 100; d++) { cumR += hist[d]; if (!median && cumR >= colorStatPixels * 0.5) median = d; if (!p90 && cumR >= colorStatPixels * 0.9) { p90 = d; break; } }
+      // diagnostics.groups was snapshotted before coordination; rebuild it from the
+      // refreshed group stats so the UI/group readouts match the final colours.
+      diagnostics.groups.line = groupSummary(groupStats.line);
+      diagnostics.groups.flat = groupSummary(groupStats.flat);
+      diagnostics.groups.gradient = groupSummary(groupStats.gradient);
     }
 
     return {
