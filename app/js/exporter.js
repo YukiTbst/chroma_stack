@@ -751,10 +751,18 @@
   }
 
   function exportGridFor(plan, exportMax) {
+    // F-OUTLINE-02: protected thin lines must export at the native preview grid.
+    // Downsampling a line-art plan lets the protected-stroke vote widen a 1px line to
+    // a full coarse cell (2x physical width) and swallow narrow white gaps, so the
+    // preview and the 3MF would disagree. Organic plans keep the 1280 long-side cap
+    // (meshing a huge photo grid is slow with no printable gain). An explicit
+    // exportMax override is always honoured.
+    const lineArt = !!(plan.lineApplied && (plan.lineProtectMask || plan.lineDirectMask));
+    const longSide = Math.max(plan.w, plan.h);
     const max = exportMax != null
       ? Math.max(80, Math.min(1024, Number(exportMax) || 300))
-      : Math.max(plan.w, plan.h) > 1280 ? 1280 : Math.max(plan.w, plan.h);
-    const scale = Math.min(1, max / Math.max(plan.w, plan.h));
+      : (lineArt ? longSide : (longSide > 1280 ? 1280 : longSide));
+    const scale = Math.min(1, max / longSide);
     const ew = Math.max(1, Math.round(plan.w * scale));
     const eh = Math.max(1, Math.round(plan.h * scale));
     return { width: ew, height: eh, scale, downscaled: scale < 0.999 };
