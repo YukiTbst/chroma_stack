@@ -115,6 +115,7 @@
           <select id="geometryMode">
             <option value="relief" selected>彩色浮雕</option>
             <option value="flat">等高彩色</option>
+            <option value="luminance">亮度浮雕（绘画）</option>
           </select>
         </label>
         <label class="field"><span>质量策略</span>
@@ -124,6 +125,18 @@
             <option value="continuity">连续区域优先</option>
           </select>
         </label>
+      </div>
+      <div id="luminanceCurveField" class="curve-field" hidden>
+        <div class="curve-head">
+          <span>亮度 → 高度曲线</span>
+          <span class="curve-presets">
+            <button type="button" id="curvePresetInvert" class="mini-btn">线稿凸起</button>
+            <button type="button" id="curvePresetLinear" class="mini-btn">亮高</button>
+            <button type="button" id="curvePresetContrast" class="mini-btn">S 对比</button>
+          </span>
+        </div>
+        <canvas id="luminanceCurve" width="240" height="160"></canvas>
+        <p class="hint">横轴=画面亮度（左暗右亮），纵轴=高度（下低上高）。拖动控制点调曲线；点击空白加点，双击点删除。“线稿凸起”=暗处高（白底黑线凸起）；最大起伏由“渐变区浮雕差”控制。颜色仍按配色求解，高度只由亮度决定。</p>
       </div>
       <p class="hint">等高彩色：整个有效轮廓同一顶面，用三通道 TD 模型搜索受预算约束的合法配方（不查旧 LUT 表）。连续区域优先：在色差预算内让相邻空间区域同层同料、减少内部材料边界；仅等高模式生效，线稿/中性/手工锁硬约束不变。</p>
 
@@ -455,6 +468,7 @@
 <script src="js/data-lut.js?v=20261119m48"></script>
 <script src="js/earcut.js?v=20261119m48"></script>
 <script src="js/optics.js?v=20261119m48"></script>
+<script src="js/height-curve.js?v=20261119m48"></script>
 <script src="js/engine.js?v=20261119m48"></script>
 <script src="js/modes.js?v=20261119m48"></script>
 <script src="js/zip.js?v=20261119m48"></script>

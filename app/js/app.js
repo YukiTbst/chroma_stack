@@ -31,6 +31,7 @@
     variableHeight: true,
     geometryMode: 'relief',
     qualityPolicy: 'color',
+    luminanceCurve: (globalThis.CS && CS.heightCurve) ? CS.heightCurve.invertCurve() : [{ x: 0, y: 1 }, { x: 1, y: 0 }],
     layerHeight: 0.08,
     gradLayers: 6,
     stdThreshold: 0,
@@ -216,10 +217,12 @@
       sectionPosition: state.sectionPosition, exaggeration: state.exaggeration
     };
     for (const [id, value] of Object.entries(values)) if ($(id)) $(id).value = String(value);
-    $('variableHeight').checked = state.variableHeight && state.geometryMode !== 'flat';
-    $('variableHeight').disabled = state.engine === 'lut' || state.geometryMode === 'flat';
+    $('variableHeight').checked = state.variableHeight && state.geometryMode === 'relief';
+    $('variableHeight').disabled = state.engine === 'lut' || state.geometryMode !== 'relief';
     if ($('geometryMode')) $('geometryMode').value = state.geometryMode;
     if ($('qualityPolicy')) $('qualityPolicy').value = state.qualityPolicy;
+    if ($('luminanceCurveField')) $('luminanceCurveField').hidden = state.geometryMode !== 'luminance';
+    if (state.geometryMode === 'luminance') renderCurveEditor();
     $('vectorFlat').checked = state.vectorFlat;
     $('backgroundEnvelope').checked = state.backgroundEnvelope;
     $('section3D').checked = state.section3D;
@@ -542,6 +545,7 @@
       engine: 'td', palette: state.tdPalette, widthMm: state.widthMm,
       flatTopMm: state.flatTopMm, reliefMm: state.reliefMm, gradStartLayerOverride: state.gradStartOverride, gradTopMmOverride: state.gradTopMmOverride, variableHeight: state.variableHeight, layerHeight: state.layerHeight,
       equalHeight: state.geometryMode === 'flat', qualityPolicy: state.qualityPolicy,
+      luminanceHeight: state.geometryMode === 'luminance', luminanceCurve: state.luminanceCurve,
       layerCoordination: state.geometryMode === 'flat' && state.qualityPolicy !== 'color',
       opticalModel: (state.calibrationV2 && state.calibrationV2.activeModelId)
         ? (state.calibrationV2.models || []).find(m => m.modelId === state.calibrationV2.activeModelId) || null
@@ -1608,6 +1612,54 @@
     toast('已清除手绘修整，回到自动分区');
   }
 
+  /* ---------------- luminance curve editor ---------------- */
+  const CURVE_PAD = 14;
+  function curveToCanvas(p, W, H) { return [CURVE_PAD + p.x * (W - 2 * CURVE_PAD), H - CURVE_PAD - p.y * (H - 2 * CURVE_PAD)]; }
+  function canvasToCurve(cx, cy, W, H) { return { x: clamp((cx - CURVE_PAD) / (W - 2 * CURVE_PAD), 0, 1), y: clamp((H - CURVE_PAD - cy) / (H - 2 * CURVE_PAD), 0, 1) }; }
+  function renderCurveEditor() {
+    const c = $('luminanceCurve'); if (!c || !c.getContext) return;
+    const ctx = c.getContext('2d'), W = c.width, H = c.height, pad = CURVE_PAD;
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = '#1c2328'; ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)'; ctx.lineWidth = 1;
+    for (let g = 0; g <= 4; g++) { const gx = pad + g / 4 * (W - 2 * pad), gy = H - pad - g / 4 * (H - 2 * pad); ctx.beginPath(); ctx.moveTo(gx, pad); ctx.lineTo(gx, H - pad); ctx.stroke(); ctx.beginPath(); ctx.moveTo(pad, gy); ctx.lineTo(W - pad, gy); ctx.stroke(); }
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)'; ctx.beginPath(); ctx.moveTo(pad, H - pad); ctx.lineTo(W - pad, pad); ctx.stroke();
+    const pts = state.luminanceCurve.slice().sort((a, b) => a.x - b.x);
+    const evalC = CS.heightCurve ? CS.heightCurve.evalCurve : (p, x) => x;
+    ctx.strokeStyle = '#d8a53a'; ctx.lineWidth = 2; ctx.beginPath();
+    for (let px = 0; px <= W - 2 * pad; px++) { const x = px / (W - 2 * pad); const y = evalC(pts, x); const cx = pad + px, cy = H - pad - y * (H - 2 * pad); if (px === 0) ctx.moveTo(cx, cy); else ctx.lineTo(cx, cy); }
+    ctx.stroke();
+    for (const p of pts) { const [cx, cy] = curveToCanvas(p, W, H); ctx.fillStyle = '#ffe16b'; ctx.beginPath(); ctx.arc(cx, cy, 4, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = '#1c2328'; ctx.lineWidth = 1; ctx.stroke(); }
+    ctx.fillStyle = 'rgba(255,255,255,0.5)'; ctx.font = '9px sans-serif';
+    ctx.fillText('暗', pad, H - 3); ctx.fillText('亮', W - pad - 9, H - 3); ctx.fillText('高', 2, pad + 3); ctx.fillText('低', 2, H - pad);
+  }
+  function bindCurveEditor() {
+    const c = $('luminanceCurve'); if (!c) return;
+    const W = c.width, H = c.height;
+    let dragPt = null;
+    const pos = (e) => { const r = c.getBoundingClientRect(); return [(e.clientX - r.left) * (W / r.width), (e.clientY - r.top) * (H / r.height)]; };
+    const hit = (mx, my) => { for (const p of state.luminanceCurve) { const [cx, cy] = curveToCanvas(p, W, H); if (Math.hypot(mx - cx, my - cy) < 8) return p; } return null; };
+    c.addEventListener('mousedown', (e) => {
+      const [mx, my] = pos(e); dragPt = hit(mx, my);
+      if (!dragPt) { dragPt = canvasToCurve(mx, my, W, H); state.luminanceCurve.push(dragPt); state.luminanceCurve.sort((a, b) => a.x - b.x); renderCurveEditor(); markDirty(false); }
+      e.preventDefault();
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!dragPt) return;
+      const [mx, my] = pos(e); const p = canvasToCurve(mx, my, W, H);
+      dragPt.x = p.x; dragPt.y = p.y; state.luminanceCurve.sort((a, b) => a.x - b.x); renderCurveEditor();
+    });
+    window.addEventListener('mouseup', () => { if (dragPt) { dragPt = null; markDirty(false); } });
+    c.addEventListener('dblclick', (e) => {
+      const [mx, my] = pos(e); const p = hit(mx, my);
+      if (p && state.luminanceCurve.length > 2) { state.luminanceCurve.splice(state.luminanceCurve.indexOf(p), 1); renderCurveEditor(); markDirty(false); }
+    });
+    const preset = (fn) => () => { state.luminanceCurve = fn(); renderCurveEditor(); markDirty(false); };
+    if ($('curvePresetInvert')) $('curvePresetInvert').addEventListener('click', preset(() => CS.heightCurve.invertCurve()));
+    if ($('curvePresetLinear')) $('curvePresetLinear').addEventListener('click', preset(() => CS.heightCurve.defaultCurve()));
+    if ($('curvePresetContrast')) $('curvePresetContrast').addEventListener('click', preset(() => CS.heightCurve.contrastCurve()));
+  }
+
   /* ---------------- events ---------------- */
   function bindEvents() {
     $('btnOpenImage').addEventListener('click', () => $('fileInput').click());
@@ -1646,8 +1698,9 @@
     $('gradStartLayer').addEventListener('input', (e) => { state.gradStartOverride = clamp(Number(e.target.value) || 1, 1, 240); markDirty(false); });
     $('gradTopMm').addEventListener('input', (e) => { state.gradTopMmOverride = clamp(Number(e.target.value) || 0.8, 0.08, 20); state.gradStartOverride = clamp(Number($('gradStartLayer').value) || 1, 1, 240); markDirty(false); });
     $('variableHeight').addEventListener('change', (e) => { state.variableHeight = !!e.target.checked; markDirty(false); });
-    $('geometryMode').addEventListener('change', (e) => { state.geometryMode = e.target.value === 'flat' ? 'flat' : 'relief'; markDirty(false); });
+    $('geometryMode').addEventListener('change', (e) => { state.geometryMode = ['flat', 'luminance'].includes(e.target.value) ? e.target.value : 'relief'; if ($('luminanceCurveField')) $('luminanceCurveField').hidden = state.geometryMode !== 'luminance'; if (state.geometryMode === 'luminance') renderCurveEditor(); markDirty(false); });
     $('qualityPolicy').addEventListener('change', (e) => { state.qualityPolicy = e.target.value; markDirty(false); });
+    bindCurveEditor();
     $('layerHeight').addEventListener('change', (e) => {
       if (state.engine !== 'td') return;
       const next = Number(e.target.value) || 0.08;

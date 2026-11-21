@@ -468,3 +468,12 @@ input[type="range"]::-moz-range-thumb { width: 12px; height: 12px; border-radius
 .advanced-params { margin: 10px 0 14px; border: 1px dashed rgba(90, 110, 100, .35); border-radius: 10px; padding: 6px 10px 4px; }
 .advanced-params > summary { cursor: pointer; font-size: 12px; color: #6b7a74; letter-spacing: .2px; }
 .advanced-params[open] > summary { margin-bottom: 8px; }
+
+/* Luminance→height curve editor (亮度浮雕 painting mode). */
+.curve-field { margin: 10px 0 12px; padding: 10px; border: 1px solid rgba(90, 110, 100, .3); border-radius: 10px; background: rgba(28, 35, 40, .35); }
+.curve-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; font-size: 12px; color: #cdd6d0; }
+.curve-presets { display: inline-flex; gap: 6px; }
+.mini-btn { font-size: 11px; padding: 3px 8px; border: 1px solid rgba(120, 140, 130, .4); border-radius: 6px; background: transparent; color: #cdd6d0; cursor: pointer; }
+.mini-btn:hover { border-color: var(--accent); color: var(--accent); }
+#luminanceCurve { display: block; width: 100%; max-width: 320px; height: auto; border-radius: 8px; cursor: crosshair; touch-action: none; }
+.curve-field .hint { margin: 8px 0 0; }
