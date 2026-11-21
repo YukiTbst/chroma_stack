@@ -303,12 +303,15 @@ void main() {
         target.push(base, base + 1, base + 2, base, base + 2, base + 3);
       }
     };
-    const layeredFace = (ax, az, bx, bz, lo, hi, i, nx, nz, section) => {
+    // ni is the NATIVE plan pixel index (source[gridCell]), not the grid cell index:
+    // when the stack grid is downsampled, materialAt must read the source pixel that
+    // sampleCell chose for this cell, otherwise walls/section show the wrong material.
+    const layeredFace = (ax, az, bx, bz, lo, hi, ni, nx, nz, section) => {
       let z = lo;
       while (z < hi) {
-        const fi = materialAt(p, i, z);
+        const fi = materialAt(p, ni, z);
         let end = z + 1;
-        while (end < hi && materialAt(p, i, end) === fi) end++;
+        while (end < hi && materialAt(p, ni, end) === fi) end++;
         if (fi >= 0) {
           const y0 = z * lh, y1 = end * lh;
           addQuad([[ax, y0, az], [bx, y0, bz], [bx, y1, bz], [ax, y1, az]], [nx, 0, nz], palette[fi], section);
@@ -337,21 +340,21 @@ void main() {
         const i = y * gw + x, top = tops[i];
         const x0 = -W / 2 + x * cw, x1 = x0 + cw;
         const z0 = -H / 2 + y * cd, z1 = z0 + cd;
-        if (x === 0) layeredFace(x0, z1, x0, z0, 0, top, i, -1, 0, false);
-        if (y === 0) layeredFace(x0, z0, x1, z0, 0, top, i, 0, -1, false);
+        if (x === 0) layeredFace(x0, z1, x0, z0, 0, top, source[i], -1, 0, false);
+        if (y === 0) layeredFace(x0, z0, x1, z0, 0, top, source[i], 0, -1, false);
         if (x + 1 < gw) {
           const other = tops[i + 1];
-          if (top > other) layeredFace(x1, z0, x1, z1, other, top, i, 1, 0, false);
-          else if (other > top) layeredFace(x1, z1, x1, z0, top, other, i + 1, -1, 0, false);
+          if (top > other) layeredFace(x1, z0, x1, z1, other, top, source[i], 1, 0, false);
+          else if (other > top) layeredFace(x1, z1, x1, z0, top, other, source[i + 1], -1, 0, false);
         } else {
-          layeredFace(x1, z0, x1, z1, 0, top, i, 1, 0, false);
+          layeredFace(x1, z0, x1, z1, 0, top, source[i], 1, 0, false);
         }
         if (y + 1 < gh) {
           const other = tops[i + gw];
-          if (top > other) layeredFace(x1, z1, x0, z1, other, top, i, 0, 1, false);
-          else if (other > top) layeredFace(x0, z1, x1, z1, top, other, i + gw, 0, -1, false);
+          if (top > other) layeredFace(x1, z1, x0, z1, other, top, source[i], 0, 1, false);
+          else if (other > top) layeredFace(x0, z1, x1, z1, top, other, source[i + gw], 0, -1, false);
         } else {
-          layeredFace(x1, z1, x0, z1, 0, top, i, 0, 1, false);
+          layeredFace(x1, z1, x0, z1, 0, top, source[i], 0, 1, false);
         }
       }
     }
@@ -365,7 +368,7 @@ void main() {
       for (let y = 0; y < gh; y++) {
         const i = y * gw + cut;
         const z0 = -H / 2 + y * cd, z1 = z0 + cd;
-        layeredFace(planeX, z0, planeX, z1, 0, tops[i], i, 1, 0, true);
+        layeredFace(planeX, z0, planeX, z1, 0, tops[i], source[i], 1, 0, true);
       }
     }
     if (!V.uint32Ext && positions.length / 3 > 65535) {
