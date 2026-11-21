@@ -2407,17 +2407,31 @@
     }
     // F02: a published calibrationV2 model overrides palette TD/opaque so production
     // colour-solving actually uses the saved calibration, not just the shared formula.
+    // F05: only 'estimated' channels are precise point values. A 'bounded' channel
+    // carries just a bound and an 'unresolved' channel no information — neither may
+    // be used as a point TD/opaque, so those channels keep the library value. Legacy
+    // models without a per-channel state are treated as estimated (backward compat).
     if (engine === 'td' && options.opticalModel && options.opticalModel.params) {
       const params = options.opticalModel.params;
+      const chKeys = ['r', 'g', 'b'];
       for (const p of palette) {
         const t = params[p.id] || params[p.name];
         if (!t) continue;
-        p.lin = { r: t.opaque[0], g: t.opaque[1], b: t.opaque[2] };
-        p.hdR = Math.exp(t.logHd[0]); p.hdG = Math.exp(t.logHd[1]); p.hdB = Math.exp(t.logHd[2]);
-        p.hd = (p.hdR + p.hdG + p.hdB) / 3;
-        p.tdR = p.hdR * 10; p.tdG = p.hdG * 10; p.tdB = p.hdB * 10; p.td = p.hd * 10;
+        const st = t.state || ['estimated', 'estimated', 'estimated'];
+        const lin = { r: p.lin.r, g: p.lin.g, b: p.lin.b };
+        const hd = [p.hdR, p.hdG, p.hdB];
+        const used = [false, false, false];
+        for (let c = 0; c < 3; c++) {
+          if (st[c] === 'estimated') { lin[chKeys[c]] = t.opaque[c]; hd[c] = Math.exp(t.logHd[c]); used[c] = true; }
+        }
+        p.lin = lin;
+        p.hdR = hd[0]; p.hdG = hd[1]; p.hdB = hd[2];
+        p.hd = (hd[0] + hd[1] + hd[2]) / 3;
+        p.tdR = hd[0] * 10; p.tdG = hd[1] * 10; p.tdB = hd[2] * 10; p.td = p.hd * 10;
         p.lab = C.rgb01ToLab({ r: C.linearToSrgb(p.lin.r), g: C.linearToSrgb(p.lin.g), b: C.linearToSrgb(p.lin.b) });
-        p.fromModel = true;
+        p.fromModel = used.some(Boolean);
+        p.modelChannels = used;
+        p.modelState = st.slice();
       }
       foundation = palette[baseIndex];
     }

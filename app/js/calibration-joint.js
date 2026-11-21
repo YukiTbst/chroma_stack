@@ -258,6 +258,16 @@
       });
     }
     const unresolved = ids.some(id => (initFit.fits[id] ? initFit.fits[id].channelState : ['unresolved', 'unresolved', 'unresolved']).some(s => s === 'unresolved'));
+    // F05: per-channel state from JOINT identifiability (constrained => estimated).
+    // When the joint fit cannot constrain a channel, the matrix init state tells a
+    // bound (bounded) apart from no information (unresolved). Train-derived only, so
+    // corrupting held-out observations never changes it. Carried in params[id].state.
+    const channelStates = {};
+    for (const id of ids) {
+      const ist = (initFit.fits[id] && initFit.fits[id].channelState) || ['unresolved', 'unresolved', 'unresolved'];
+      channelStates[id] = [0, 1, 2].map(c => identifiability[id][c] === 'constrained' ? 'estimated' : (ist[c] === 'unresolved' ? 'unresolved' : 'bounded'));
+      theta[id].state = channelStates[id].slice();
+    }
     const devDE = meanDE(model, bySplit.dev, lh), testDE = meanDE(model, bySplit.test, lh);
     const tolerance = Number(opts.tolerance) || 6;
     const publishable = !unresolved && testDE != null && testDE <= tolerance;
