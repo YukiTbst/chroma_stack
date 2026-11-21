@@ -194,6 +194,29 @@
     return s / list.length;
   }
 
+  /* F06 publish gate: re-evaluate identifiability from the JOINT fit's effective
+     channels + the WORST held-out cell + observation source + validation domain.
+     Absolute publish requires every channel estimated (a bound is not a point),
+     worst AND mean held-out ΔE within tolerance, an absolute observation source and
+     a matching validation domain. Returns reasons for the UI / review. */
+  function publishGate({ channelStates, worstTestDE, meanTestDE, tolerance, domainOk, sourceAbsolute }) {
+    const reasons = [];
+    const states = Object.values(channelStates || {}).flat();
+    const unresolved = states.filter(s => s === 'unresolved').length;
+    const bounded = states.filter(s => s === 'bounded').length;
+    const estimated = states.filter(s => s === 'estimated').length;
+    const tol = Number(tolerance) || 6;
+    if (!states.length) reasons.push('无通道可识别性诊断');
+    if (unresolved) reasons.push(`${unresolved} 个通道无信息(unresolved)`);
+    if (bounded) reasons.push(`${bounded} 个通道仅界限(bounded)，不足以发布绝对值`);
+    if (worstTestDE == null) reasons.push('无留出验证格');
+    else if (worstTestDE > tol) reasons.push(`最差留出格 ΔE ${worstTestDE.toFixed(2)} > 容差 ${tol}`);
+    if (meanTestDE != null && meanTestDE > tol) reasons.push(`平均留出 ΔE ${meanTestDE.toFixed(2)} > 容差 ${tol}`);
+    if (domainOk === false) reasons.push('验证域(层高)与模型适用域不符');
+    if (sourceAbsolute === false) reasons.push('观测为相对标定(无独立参考卡)，不能发布绝对值');
+    return { publishable: reasons.length === 0, reasons, effectiveChannels: estimated, totalChannels: states.length, unresolved, bounded };
+  }
+
   function fitJointModel(observations, manifest, opts = {}) {
     const lh = manifest.layerHeight;
     const noiseScale = Math.max(0.01, Number(opts.noiseScale) || 0.02);
@@ -257,7 +280,6 @@
         return (Math.min(up, dn) - best.loss) > 1e-4 ? 'constrained' : 'weak';
       });
     }
-    const unresolved = ids.some(id => (initFit.fits[id] ? initFit.fits[id].channelState : ['unresolved', 'unresolved', 'unresolved']).some(s => s === 'unresolved'));
     // F05: per-channel state from JOINT identifiability (constrained => estimated).
     // When the joint fit cannot constrain a channel, the matrix init state tells a
     // bound (bounded) apart from no information (unresolved). Train-derived only, so
@@ -269,12 +291,27 @@
       theta[id].state = channelStates[id].slice();
     }
     const devDE = meanDE(model, bySplit.dev, lh), testDE = meanDE(model, bySplit.test, lh);
+    // F06: worst held-out cell, not just the mean — one bad cell must block publish.
+    let worstTestDE = null;
+    if (bySplit.test.length) {
+      worstTestDE = 0;
+      for (const o of bySplit.test) {
+        const pred = O.predictStack(model, o.cell.stack, { linearRgb: { r: o.substrateLinear[0], g: o.substrateLinear[1], b: o.substrateLinear[2] } }, lh).linearRgb;
+        const de = C.deltaE2000(O.linearToLab(pred), O.linearToLab({ r: o.observedLinear[0], g: o.observedLinear[1], b: o.observedLinear[2] }));
+        if (de > worstTestDE) worstTestDE = de;
+      }
+    }
     const tolerance = Number(opts.tolerance) || 6;
-    const publishable = !unresolved && testDE != null && testDE <= tolerance;
+    // Validation domain must match the intended production layer height when given;
+    // a relative (white-normalised, no independent reference) fit cannot publish absolute.
+    const domainOk = opts.productionLayerHeight == null || Math.abs(Number(opts.productionLayerHeight) - lh) < 1e-6;
+    const gate = publishGate({ channelStates, worstTestDE, meanTestDE: testDE, tolerance, domainOk, sourceAbsolute: opts.relative !== true });
+    const publishable = gate.publishable;
+    const unresolved = gate.unresolved > 0;
     const modelId = cd().makeModelId(theta, [manifest.manifestHash]);
     return {
       model: { modelId, params: theta, status: publishable ? 'published' : 'restricted', compatibilityDomain: { layerHeightMm: lh }, trainLoss: best.loss },
-      trainLoss: best.loss, devDE, testDE, identifiability, unresolved, publishable,
+      trainLoss: best.loss, devDE, testDE, worstTestDE, identifiability, channelStates, gate, unresolved, publishable,
       splits: { train: train.length, dev: bySplit.dev.length, test: bySplit.test.length }
     };
   }
@@ -284,7 +321,7 @@
   function publishModel(v2, fitted) {
     if (!fitted || !fitted.publishable) return null;
     const base = v2 && v2.schemaVersion === 2 ? v2 : cd().emptyV2();
-    const entry = { modelId: fitted.model.modelId, params: fitted.model.params, status: 'published', compatibilityDomain: fitted.model.compatibilityDomain, metrics: { devDE: fitted.devDE, testDE: fitted.testDE } };
+    const entry = { modelId: fitted.model.modelId, params: fitted.model.params, status: 'published', compatibilityDomain: fitted.model.compatibilityDomain, channelStates: fitted.channelStates || null, metrics: { devDE: fitted.devDE, testDE: fitted.testDE, worstTestDE: fitted.worstTestDE != null ? fitted.worstTestDE : null, effectiveChannels: fitted.gate ? fitted.gate.effectiveChannels : null } };
     return { ...base, models: [...(base.models || []), entry], activeModelId: entry.modelId };
   }
 
@@ -400,5 +437,5 @@
     return { observations: norm, gain };
   }
 
-  CS.calibrationJoint = { buildComboManifest, fitJointModel, publishModel, modelFromTheta, buildComboBoard3MF, buildComboBoardBlob, analyzeComboPhoto, normalizeWhite };
+  CS.calibrationJoint = { buildComboManifest, fitJointModel, publishModel, publishGate, modelFromTheta, buildComboBoard3MF, buildComboBoardBlob, analyzeComboPhoto, normalizeWhite };
 })(typeof globalThis !== 'undefined' ? globalThis : this);
