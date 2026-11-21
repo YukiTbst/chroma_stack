@@ -2552,9 +2552,14 @@
     // P3: equal-height (flat) mode — one common top surface for every retained
     // region; relief is disabled and all regions get exactly N colour layers.
     const equalHeight = engine === 'td' && options.equalHeight === true;
-    const geoInput = { engine, flatTopMm, layerHeight, reliefMm: equalHeight ? 0 : reliefMm, colorLayers: requestedColorLayers, baseLayers, startOverride, topOverride };
+    // 亮度浮雕 (painting) mode: uniform N colour layers like equal-height, but the
+    // total column height is a per-pixel luminance-driven height field (colour on top,
+    // foundation body below) instead of a common top.
+    const luminanceHeight = engine === 'td' && options.luminanceHeight === true;
+    const uniformN = equalHeight || luminanceHeight;
+    const geoInput = { engine, flatTopMm, layerHeight, reliefMm: uniformN ? 0 : reliefMm, colorLayers: requestedColorLayers, baseLayers, startOverride, topOverride };
     let geo = deriveLayerGeometry(geoInput);
-    if (equalHeight) {
+    if (uniformN) {
       const gs = geo.gradStartLayer, N = geo.colorLayers;
       geo = { ...geo, flatLayers: gs + N, flatBaseLayers: gs, flatTopLayers: N, gradTopLayer: gs + N };
     }
@@ -2596,9 +2601,9 @@
     const snapMask = options.edgeSnap === false
       ? null
       : (edgeMask || (gradCount > 0 ? buildEdgeMask(lab, w, h, 1) : null));
-    const variableHeight = engine === 'td' && options.variableHeight !== false && !equalHeight;
+    const variableHeight = engine === 'td' && options.variableHeight !== false && !uniformN;
     const gamut = engine === 'td' && gradCount > 0
-      ? buildTdGamut(palette, foundation, layerHeight, colorLayers, variableHeight, equalHeight ? { allowRepeat: true, diverse: true } : undefined)
+      ? buildTdGamut(palette, foundation, layerHeight, colorLayers, variableHeight, uniformN ? { allowRepeat: true, diverse: true } : undefined)
       : null;
     let families = [];
     let heightMerge = null;
@@ -3104,6 +3109,29 @@
     const actualRelief = (gradTopLayer - flatLayers) * layerHeight;
     maxLayers = Math.max(flatLayers, gradTopLayer, supportOnlyPixels ? gradStartLayer : 0);
 
+    // 亮度浮雕 (painting) mode: per-pixel total height from source luminance via the
+    // control curve. Colour occupies the top N layers; foundation fills the body below,
+    // so brighter/darker regions rise/fall while the top colour is unchanged.
+    let topLayer = null, luminanceCurve = null, reliefLayers = 0;
+    if (luminanceHeight) {
+      const HC = CS.heightCurve;
+      luminanceCurve = (HC && HC.validateCurve(options.luminanceCurve).ok) ? options.luminanceCurve : (HC ? HC.defaultCurve() : [{ x: 0, y: 0 }, { x: 1, y: 1 }]);
+      reliefLayers = Math.max(0, Math.round(reliefMm / layerHeight));
+      const minTop = gradStartLayer + colorLayers;
+      const evalC = HC ? HC.evalCurve : (pts, x) => x;
+      topLayer = new Int32Array(n);
+      let maxTop = minTop;
+      for (let i = 0; i < n; i++) {
+        if (printMask && !printMask[i]) { topLayer[i] = 0; continue; }
+        const luma = Math.max(0, Math.min(1, lab[i * 3] / 100));
+        const frac = Math.max(0, Math.min(1, evalC(luminanceCurve, luma)));
+        const t = minTop + Math.round(frac * reliefLayers);
+        topLayer[i] = t; if (t > maxTop) maxTop = t;
+      }
+      maxLayers = maxTop;
+      gradTopLayer = maxTop;
+    }
+
     const grams = new Float64Array(palette.length);
     const pixelArea = pixelSize * pixelSize;
     let flatPixels = 0, gradPixels = 0;
@@ -3158,7 +3186,8 @@
       for (let z = 0; z < maxLayers; z++) {
         for (let i = 0; i < n; i++) {
           let on = 0;
-          if (flatMask[i]) on = z < flatLayers ? 1 : 0;
+          if (luminanceHeight) on = z < topLayer[i] ? 1 : 0;
+          else if (flatMask[i]) on = z < flatLayers ? 1 : 0;
           else if (z < gradStartLayer) on = 1;
           else {
             const f = familyId[i];
@@ -3418,6 +3447,21 @@
         toolChanges += Math.max(0, set.size - 1);
       }
     }
+    // 亮度浮雕: material stats follow the per-pixel height field (single material source).
+    if (luminanceHeight) {
+      const tmpPlan = { w, h, n, printMask, flatMask, flatFilament, familyId, families, regionOf, regionRecipes, gradStartLayer, flatBaseLayers, flatLayers, equalHeight, luminanceHeight, topLayer, colorLayers, foundationIndex: baseIndex };
+      grams.fill(0); toolChanges = 0;
+      for (let z = 0; z < maxLayers; z++) {
+        const set = new Set();
+        for (let i = 0; i < n; i++) {
+          if (!printMask[i]) continue;
+          const m = filamentAt(tmpPlan, i % w, (i / w) | 0, z);
+          if (m >= 0) { grams[m] += pixelArea * layerHeight / 1000 * 1.24; set.add(m); }
+        }
+        layerFilaments[z] = [...set];
+        toolChanges += Math.max(0, set.size - 1);
+      }
+    }
     // F03: color-error stats must FULLY reflect the coordinated predicted colors —
     // meanDE, median/p90 (global hist), under2/5/10 and every group (line/flat/gradient),
     // not just sumDE/maxDE/gradient. Rebuild from the final predicted exactly as the
@@ -3456,6 +3500,7 @@
       layerHeight, flatLayers, flatBaseLayers, gradStartLayer, gradTopLayer, actualGradTopLayer, maxGradLayers: colorLayers, maxLayers, flatTopMm: flatLayers * layerHeight,
       gradTopMm: gradTopLayer * layerHeight, actualGradTopMm: actualGradTopLayer * layerHeight, reliefMm: actualRelief, variableHeight,
       equalHeight, commonTopLayer: equalHeight ? gradTopLayer : null,
+      luminanceHeight, topLayer, luminanceCurve, reliefLayers, colorLayers,
       regionOf, regionRecipes, coordination,
       palette, foundation, foundationIndex: baseIndex, lutKey: options.lutKey || (engine === 'lut' ? 'bambu_8' : null),
       flatMask, flatFilament, familyId, regionId, regionCount, families, familyPixels, nearest, residual, stds, stdT, resT,
@@ -3583,6 +3628,21 @@
   function filamentAt(plan, x, y, z) {
     const i = y * plan.w + x;
     if (plan.printMask && !plan.printMask[i]) return -1;
+    // 亮度浮雕: per-pixel height field. Colour recipe/flat colour sits in the top N
+    // layers; foundation fills the body below; above the pixel top is air.
+    if (plan.luminanceHeight && plan.topLayer) {
+      const top = plan.topLayer[i];
+      if (z >= top) return -1;
+      const N = plan.colorLayers || plan.maxGradLayers;
+      const colorStart = top - N;
+      if (z < colorStart) return plan.foundationIndex;
+      const li = z - colorStart;
+      if (plan.regionRecipes && plan.regionOf) { const rr = plan.regionRecipes[plan.regionOf[i]]; if (rr) return li < rr.length ? rr[li] : plan.foundationIndex; }
+      if (plan.flatMask[i]) return plan.flatFilament[i];
+      const f = plan.familyId[i];
+      if (f >= 0) { const rec = plan.families[f].recipe; return li < rec.length ? rec[li] : plan.foundationIndex; }
+      return plan.foundationIndex;
+    }
     // P4/P5: coordinated spatial regions override the family/flat recipe; this is
     // the single material source consumed by preview, layer maps and export.
     if (plan.regionRecipes && plan.regionOf) {
