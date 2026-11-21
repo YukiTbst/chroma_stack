@@ -16,7 +16,15 @@
     const L = regions[0].stack.length;
     const predLab = stack => O.predictStack(model, stack.map(m => ({ materialId: m, layerCount: 1 })), { linearRgb: boundaryLinear }, lh).lab;
     const de = (stack, lab) => C.deltaE2000(predLab(stack), lab);
-    const feasible = (r, stack) => !r.locked && stack.length === L && de(stack, r.lab) <= colorBudget;
+    // F07: the colour budget is a floor relative to the region's own baseline error.
+    // A candidate that exceeds the absolute budget but is NO WORSE than the baseline
+    // (which may itself be over budget) is still feasible — rejecting it would discard
+    // a strict colour+boundary improvement. Never accept a candidate worse than both.
+    const feasible = (r, stack) => {
+      if (r.locked || stack.length !== L) return false;
+      const d = de(stack, r.lab);
+      return d <= colorBudget || d <= de(r.stack, r.lab);
+    };
     const colorCost = assign => regions.reduce((s, r, i) => s + r.area * de(assign[i], r.lab), 0);
     const boundaryCost = assign => {
       let b = 0;
@@ -70,7 +78,11 @@
     // Per-region feasibility: revert ONLY offending regions to baseline, not the
     // whole assignment (review F06: one bad region must not discard good moves).
     const finalAssign = assign.map((s, i) => feasible(regions[i], s) ? s : baseline[i]);
-    const revertedRegions = finalAssign.reduce((n, s, i) => n + (s === baseline[i] && assign[i] !== baseline[i] ? 1 : 0), 0);
+    // F07: count genuine content rollbacks only. assign[i] and baseline[i] are separate
+    // slices, so reference equality falsely flagged never-moved locked/over-budget
+    // regions as reverted. A revert is a proposal that differed in CONTENT from the
+    // baseline but ended back at the baseline content.
+    const revertedRegions = finalAssign.reduce((n, s, i) => n + (assign[i].join(',') !== baseline[i].join(',') && s.join(',') === baseline[i].join(',') ? 1 : 0), 0);
     const changed = finalAssign.some((s, i) => s.join(',') !== baseline[i].join(','));
     const ok = revertedRegions === 0;
     return {
