@@ -1281,6 +1281,8 @@
 
   function actualTopLayer(p, i, mask) {
     if (p.printMask && !p.printMask[i]) return 0;
+    // 亮度浮雕: per-pixel luminance height field.
+    if (p.luminanceHeight && p.topLayer) return p.topLayer[i];
     // F02: the heightmap/height stats must follow the FINAL material source, same as
     // view3d.samplePlan / engine.filamentAt — coordinated region recipe length, or the
     // equal-height common top (incl. envelope support). The old rule drew the envelope
@@ -1993,7 +1995,8 @@
     const zSet = new Set();
     for (let i = 0; i < n; i++) {
       let top = null;
-      if (plane.regionRecipes && plane.regionOf) { const rr = plane.regionRecipes[plane.regionOf[i]]; if (rr) top = p.gradStartLayer + rr.length; }
+      if (plane.luminanceHeight && plane.topLayer) top = plane.topLayer[i];
+      if (top == null && plane.regionRecipes && plane.regionOf) { const rr = plane.regionRecipes[plane.regionOf[i]]; if (rr) top = p.gradStartLayer + rr.length; }
       if (top == null) { if (p.equalHeight) top = p.commonTopLayer; else if (plane.flatMask[i]) top = p.flatLayers; else { const f = plane.familyId[i]; top = p.gradStartLayer + (f >= 0 ? p.families[f].recipe.length : 0); } }
       tops[i] = top;
       if (plane.printMask && !plane.printMask[i]) continue;

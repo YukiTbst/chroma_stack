@@ -204,6 +204,8 @@ void main() {
     const sy = Math.min(plan.h - 1, Math.max(0, Math.round(y)));
     const i = sy * plan.w + sx;
     if (plan.printMask && !plan.printMask[i]) return { top: 0, i };
+    // 亮度浮雕: top surface is the per-pixel luminance height field.
+    if (plan.luminanceHeight && plan.topLayer) return { top: plan.topLayer[i], i };
     let top = null;
     // F08: top surface must follow the final material source — coordinated region
     // recipe length, or the equal-height common top (incl. envelope support).

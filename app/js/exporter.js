@@ -26,6 +26,9 @@
         // buildLayerMasks falls back to pre-coordination family recipes.
         regionOf: plan.regionOf ? new Int32Array(plan.regionOf) : null,
         regionRecipes: plan.regionRecipes || null,
+        luminanceHeight: !!plan.luminanceHeight,
+        topLayer: plan.topLayer ? new Int32Array(plan.topLayer) : null,
+        colorLayers: plan.colorLayers || plan.maxGradLayers,
         structureCleanup: null,
         changeStats: { sourcePixels: 0, changedPixels: 0, changedPercent: 0 }
       };
@@ -153,6 +156,23 @@
     for (let i = 0; i < n; i++) {
       if (printMask && !printMask[i]) continue;
       let fi = -1;
+      // 亮度浮雕: per-pixel height field — colour in the top N layers, foundation below.
+      if (plane.luminanceHeight && plane.topLayer) {
+        const top = plane.topLayer[i];
+        if (z < top) {
+          const N = plane.colorLayers || plan.maxGradLayers;
+          const colorStart = top - N;
+          if (z < colorStart) fi = plan.foundationIndex;
+          else {
+            const li = z - colorStart;
+            if (plane.regionRecipes && plane.regionOf) { const rr = plane.regionRecipes[plane.regionOf[i]]; fi = rr ? (li < rr.length ? rr[li] : plan.foundationIndex) : plan.foundationIndex; }
+            else if (flatMask[i]) fi = flatFilament[i];
+            else { const f = familyId[i]; if (f >= 0) { const rec = plan.families[f].recipe; fi = li < rec.length ? rec[li] : plan.foundationIndex; } else fi = plan.foundationIndex; }
+          }
+          if (fi >= 0) masks[fi][i] = 1;
+        }
+        continue;
+      }
       // P5: coordinated spatial regions are the single material source; export
       // must not fall back to family/flat labels and cut same-material neighbours.
       if (plane.regionRecipes && plane.regionOf) {
@@ -758,10 +778,13 @@
     // (meshing a huge photo grid is slow with no printable gain). An explicit
     // exportMax override is always honoured.
     const lineArt = !!(plan.lineApplied && (plan.lineProtectMask || plan.lineDirectMask));
+    // 亮度浮雕: the per-pixel height field is the texture — downsampling would erase it,
+    // so luminance plans export at native resolution like line art.
+    const nativeMode = lineArt || !!plan.luminanceHeight;
     const longSide = Math.max(plan.w, plan.h);
     const max = exportMax != null
       ? Math.max(80, Math.min(1024, Number(exportMax) || 300))
-      : (lineArt ? longSide : (longSide > 1280 ? 1280 : longSide));
+      : (nativeMode ? longSide : (longSide > 1280 ? 1280 : longSide));
     const scale = Math.min(1, max / longSide);
     const ew = Math.max(1, Math.round(plan.w * scale));
     const eh = Math.max(1, Math.round(plan.h * scale));
