@@ -1982,9 +1982,50 @@
     return `叠彩_${p.engine === 'lut' ? 'LUT' : 'TD'}_${Math.round(p.widthMm)}x${Math.round(p.heightMm)}mm`;
   }
 
+  // F-OUTLINE-02: render the ACTUAL export grid top surface (not the native preview),
+  // so the user sees exactly what the 3MF will contain after downsampling.
+  function exportPreviewPlan(p) {
+    const grid = X.exportGridFor(p);
+    const plane = X.samplePlane(p, grid.width, grid.height);
+    const ew = grid.width, eh = grid.height, n = ew * eh;
+    const out = new Uint8ClampedArray(n * 4);
+    const tops = new Int32Array(n);
+    const zSet = new Set();
+    for (let i = 0; i < n; i++) {
+      let top = null;
+      if (plane.regionRecipes && plane.regionOf) { const rr = plane.regionRecipes[plane.regionOf[i]]; if (rr) top = p.gradStartLayer + rr.length; }
+      if (top == null) { if (p.equalHeight) top = p.commonTopLayer; else if (plane.flatMask[i]) top = p.flatLayers; else { const f = plane.familyId[i]; top = p.gradStartLayer + (f >= 0 ? p.families[f].recipe.length : 0); } }
+      tops[i] = top;
+      if (plane.printMask && !plane.printMask[i]) continue;
+      if (top > 0) zSet.add(top - 1);
+    }
+    const masksByZ = {};
+    for (const z of zSet) masksByZ[z] = X.buildLayerMasks(p, plane, z);
+    for (let i = 0; i < n; i++) {
+      if (plane.printMask && !plane.printMask[i]) continue;
+      const masks = masksByZ[tops[i] - 1]; if (!masks) continue;
+      for (let f = 0; f < p.palette.length; f++) if (masks[f][i]) { const c = C.hexToRgb(p.palette[f].hex); out[i * 4] = c.r; out[i * 4 + 1] = c.g; out[i * 4 + 2] = c.b; out[i * 4 + 3] = 255; break; }
+    }
+    return { width: ew, height: eh, data: out };
+  }
+
+  // F-OUTLINE-02: pre-export confirmation describing the downsample change. Native
+  // (line-art) exports return null — no confirmation needed.
+  function exportConfirmMessage(p) {
+    const grid = X.exportGridFor(p);
+    if (!grid.downscaled) return null;
+    const rep = X.exportReport(p);
+    const changed = rep.change ? rep.change.changedPercent : null;
+    return `导出将把长边缩到 ${grid.width}×${grid.height}（工作网格 ${p.w}×${p.h}）${changed == null ? '' : `，约 ${changed}% 源像素被重新归类`}。未保护的细线可能变细/消失、窄白缝可能合并。建议先点“导出预览”核对最终导出网格，或开启线稿保护以原生分辨率导出。确认继续导出？`;
+  }
+
   function export3MF() {
     const p = state.plan;
     if (!p || state.dirty || state.analyzing) { toast('请先计算并应用当前修改'); return; }
+    // F-OUTLINE-02: confirm before exporting a downscaled grid so the user knows the
+    // export may differ from the native preview (thin lines / narrow gaps).
+    const confirmMsg = exportConfirmMessage(p);
+    if (confirmMsg && !window.confirm(confirmMsg)) return;
     showProgress('正在生成水密 3MF…');
     setTimeout(async () => {
       try {
@@ -2007,10 +2048,12 @@
   function exportPreview() {
     const p = state.plan;
     if (!p || state.dirty || state.analyzing) { toast('请先计算并应用当前修改'); return; }
+    // F-OUTLINE-02: preview the FINAL export grid, not the native preview.
+    const pv = exportPreviewPlan(p);
     const c = document.createElement('canvas');
-    c.width = p.w; c.height = p.h;
-    c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(p.preview), p.w, p.h), 0, 0);
-    c.toBlob((blob) => { if (blob) downloadBlob(blob, filenameBase(p) + '_预览.png'); }, 'image/png');
+    c.width = pv.width; c.height = pv.height;
+    c.getContext('2d').putImageData(new ImageData(pv.data, pv.width, pv.height), 0, 0);
+    c.toBlob((blob) => { if (blob) downloadBlob(blob, filenameBase(p) + '_导出预览.png'); }, 'image/png');
   }
 
   async function exportPlanBundle() {
@@ -2470,7 +2513,7 @@
   // Automated-acceptance handle: the real state, option builder and brush
   // primitives so tests can run state -> buildOptions -> buildPlan end to end
   // without a browser. Internal diagnostics only, not a user-facing feature.
-  CS.appDebug = { state, buildOptions, ensureBrushCanvas, applyPaint, snapshotUndo, undoBrush, clearBrush, clearManualEdits, rebaseBrushCanvas, markDirty, resetSettings, publishComboModel, actualTopLayer, actualHeightStats, regionMapHex, runPlanInWorker };
+  CS.appDebug = { state, buildOptions, ensureBrushCanvas, applyPaint, snapshotUndo, undoBrush, clearBrush, clearManualEdits, rebaseBrushCanvas, markDirty, resetSettings, publishComboModel, actualTopLayer, actualHeightStats, regionMapHex, runPlanInWorker, exportPreviewPlan, exportConfirmMessage };
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
