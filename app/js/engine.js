@@ -3351,6 +3351,20 @@
       coordination = { changedRegions: changed, boundaryBefore: res.boundaryBefore, boundaryAfter: res.boundaryAfter, improved: res.improved, colorBudget: budget };
       if (changed) warnings.push(`同层材料协调：${changed} 个空间区域改用近色配方，内部材料边界 ${res.boundaryBefore.toFixed(1)}→${res.boundaryAfter.toFixed(1)} mm·层；色差预算 ${budget} ΔE，线稿/中性/锁定不变。`);
       else warnings.push('同层材料协调：当前颜色预算下无可用合层收益，保留原配方。');
+      // F08: recompute material stats from the FINAL coordinated material source so
+      // grams / toolChanges / layerFilaments agree with export/layer/3D.
+      const tmpPlan = { w, h, printMask, flatMask, flatFilament, familyId, families, regionOf, regionRecipes, gradStartLayer, flatBaseLayers, flatLayers, commonTopLayer: equalHeight ? gradTopLayer : null, equalHeight, foundationIndex: baseIndex };
+      grams.fill(0); toolChanges = 0;
+      for (let z = 0; z < maxLayers; z++) {
+        const set = new Set();
+        for (let i = 0; i < n; i++) {
+          if (!printMask[i]) continue;
+          const m = filamentAt(tmpPlan, i % w, (i / w) | 0, z);
+          if (m >= 0) { grams[m] += pixelArea * layerHeight / 1000 * 1.24; set.add(m); }
+        }
+        layerFilaments[z] = [...set];
+        toolChanges += Math.max(0, set.size - 1);
+      }
     }
 
     return {

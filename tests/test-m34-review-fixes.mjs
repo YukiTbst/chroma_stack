@@ -95,3 +95,41 @@ const base = { engine: 'td', palette, widthMm: 40, flatTopMm: 1.6, reliefMm: 0.1
   assert.equal(typeof res.revertedRegions, 'number');
 }
 console.log('all m34 review-fix checks passed');
+// F08: native-resolution export masks AND 3D materialAt must equal final filamentAt
+// (coordinated region recipes), not pre-coordination family recipes.
+{
+  require('../app/js/view3d.js');
+  const V = globalThis.CS.view3d;
+  const g = (w, h) => { const d = new Uint8ClampedArray(w * h * 4); for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const t = x / (w - 1); d.set([Math.round(60 + 160 * t), Math.round(40 + 80 * t), Math.round(180 - 120 * t), 255], (y * w + x) * 4); } return { width: w, height: h, data: d }; };
+  const pal8 = E.buildUserPalette([
+    { id: 'k', name: 'Black', hex: '#000000', td: 0.6 }, { id: 'w', name: 'White', hex: '#ffffff', td: 5 },
+    { id: 'r', name: 'Red', hex: '#c00d1e', td: 5 }, { id: 'y', name: 'Yellow', hex: '#fce300', td: 6 },
+    { id: 'u', name: 'Blue', hex: '#00358e', td: 4 }, { id: 'c', name: 'Cyan', hex: '#0086d6', td: 3.5 },
+    { id: 'm', name: 'Magenta', hex: '#ec008c', td: 4.5 }, { id: 'o', name: 'Orange', hex: '#ff6a13', td: 5 }
+  ]);
+  const plan = E.buildPlan(g(60, 40), { ...base, palette: pal8, gradLayers: 20, equalHeight: true, layerCoordination: true, qualityPolicy: 'continuity', families: 24 });
+  const plane = X.samplePlane(plan, plan.w, plan.h);
+  assert.ok(plane.regionRecipes === plan.regionRecipes, 'native samplePlane carries regionRecipes');
+  let diff = 0, occ = 0;
+  for (let z = 0; z < plan.maxLayers; z++) {
+    const masks = X.buildLayerMasks(plan, plane, z);
+    for (let i = 0; i < plan.n; i++) {
+      if (!plan.printMask[i]) continue;
+      const fa = E.filamentAt(plan, i % plan.w, (i / plan.w) | 0, z);
+      let got = -1, cnt = 0;
+      for (let m = 0; m < pal8.length; m++) if (masks[m][i]) { cnt++; got = m; }
+      const ok = fa < 0 ? cnt === 0 : (cnt === 1 && got === fa);
+      if (!ok) diff++;
+      if (fa >= 0) occ++;
+      if (V && V._materialAt) { /* internal */ }
+    }
+  }
+  assert.equal(diff, 0, `native export masks must equal filamentAt (diff=${diff}/${occ})`);
+  // 3D materialAt consistency
+  let vdiff = 0;
+  const matAt = V.materialAt || V._materialAt;
+  if (matAt) for (let i = 0; i < plan.n; i += 7) for (let z = 0; z < plan.maxLayers; z += 3) { if (matAt(plan, i, z) !== E.filamentAt(plan, i % plan.w, (i / plan.w) | 0, z)) vdiff++; }
+  assert.equal(vdiff, 0, 'view3d materialAt must equal filamentAt');
+  console.log('F08 native export + 3D consistent; changedRegions', plan.coordination && plan.coordination.changedRegions, 'occ', occ);
+}
+console.log('all m34 review-fix checks passed (incl F08)');

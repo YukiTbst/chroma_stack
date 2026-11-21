@@ -1344,20 +1344,8 @@
     const out = new Uint8ClampedArray(p.w * p.h * 4);
     for (let i = 0; i < p.w * p.h; i++) {
       if (p.printMask && !p.printMask[i]) continue;
-      let fi = -1;
-      if (mask[i]) {
-        if (z < (p.flatBaseLayers || 0)) fi = p.foundationIndex;
-        else if (z < p.flatLayers) fi = p.flatFilament[i] !== 0xffff ? p.flatFilament[i] : p.nearest[i];
-      } else {
-        if (z < p.gradStartLayer) fi = p.foundationIndex;
-        else {
-          const f = p.familyId[i];
-          if (f >= 0) {
-            const li = z - p.gradStartLayer;
-            if (li >= 0 && li < p.families[f].recipe.length) fi = p.families[f].recipe[li];
-          }
-        }
-      }
+      // F08: single material source (coordinated regions / equal-height support).
+      const fi = CS.engine.filamentAt(p, i % p.w, (i / p.w) | 0, z);
       if (fi >= 0) {
         const c = C.hexToRgb(p.palette[fi].hex);
         out[i * 4] = c.r; out[i * 4 + 1] = c.g; out[i * 4 + 2] = c.b; out[i * 4 + 3] = 255;

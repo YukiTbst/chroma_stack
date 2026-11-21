@@ -214,14 +214,22 @@ void main() {
   }
 
   function materialAt(plan, i, z) {
+    // F08: single material source — delegate to engine filamentAt (coordinated
+    // regions / equal-height support). Self-contained identical fallback when the
+    // engine module isn't loaded (isolated view3d tests).
+    if (CS.engine && CS.engine.filamentAt) return CS.engine.filamentAt(plan, i % plan.w, (i / plan.w) | 0, z);
     if (plan.printMask && !plan.printMask[i]) return -1;
+    if (plan.regionRecipes && plan.regionOf) {
+      const rr = plan.regionRecipes[plan.regionOf[i]];
+      if (rr) { if (z < plan.gradStartLayer) return plan.foundationIndex; const li = z - plan.gradStartLayer; return li < rr.length ? rr[li] : -1; }
+    }
     if (plan.flatMask[i]) {
       if (z < (plan.flatBaseLayers || 0)) return plan.foundationIndex;
       return z < plan.flatLayers ? plan.flatFilament[i] : -1;
     }
     if (z < plan.gradStartLayer) return plan.foundationIndex;
     const f = plan.familyId[i];
-    if (f < 0) return -1;
+    if (f < 0) { if (plan.equalHeight && z < plan.commonTopLayer) return plan.foundationIndex; return -1; }
     const li = z - plan.gradStartLayer;
     const seq = plan.families[f].recipe;
     return li >= 0 && li < seq.length ? seq[li] : -1;

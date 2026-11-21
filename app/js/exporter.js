@@ -22,6 +22,10 @@
         flatFilament: new Uint16Array(plan.flatFilament),
         familyId: new Int16Array(plan.familyId),
         printMask: plan.printMask ? new Uint8Array(plan.printMask) : null,
+        // F08: native export must carry the coordinated region recipes too, else
+        // buildLayerMasks falls back to pre-coordination family recipes.
+        regionOf: plan.regionOf ? new Int32Array(plan.regionOf) : null,
+        regionRecipes: plan.regionRecipes || null,
         structureCleanup: null,
         changeStats: { sourcePixels: 0, changedPixels: 0, changedPercent: 0 }
       };
