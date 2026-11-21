@@ -133,3 +133,35 @@ console.log('all m34 review-fix checks passed');
   console.log('F08 native export + 3D consistent; changedRegions', plan.coordination && plan.coordination.changedRegions, 'occ', occ);
 }
 console.log('all m34 review-fix checks passed (incl F08)');
+
+// m44: 3D top surface follows equal-height common top; stats cover equal-height
+// envelope WITHOUT coordination; color-error stats reflect coordination.
+{
+  const V = globalThis.CS.view3d;
+  const g2 = (w, h) => { const d = new Uint8ClampedArray(w * h * 4); for (let i = 0; i < w * h; i++) d.set([255, 255, 255, 255], i * 4); for (let y = 10; y < 40; y++) for (let x = 10; x < 40; x++) d.set([192, 13, 30, 255], (y * w + x) * 4); return { width: w, height: h, data: d }; };
+  const env = E.buildPlan(g2(60, 50), { ...base, equalHeight: true, backgroundMode: 'auto', backgroundColor: '#ffffff', backgroundTolerance: 8, backgroundEnvelope: true });
+  assert.ok(env.stats.toolChanges > 0, 'equal-height envelope without coordination counts tool changes');
+  assert.ok(env.stats.grams.reduce((a, b) => a + b, 0) > 0, 'envelope material grams counted');
+  let supportTopOk = true, found = 0;
+  for (let i = 0; i < env.n; i++) {
+    if (!env.printMask[i] || env.flatMask[i] || env.familyId[i] >= 0) continue;
+    const t = V._samplePlan(env, i % env.w, (i / env.w) | 0).top;
+    if (t !== env.commonTopLayer) supportTopOk = false;
+    found++;
+  }
+  assert.ok(found > 0 && supportTopOk, '3D top of envelope support == commonTopLayer');
+  // coordinated color stats match recomputed predicted
+  const pal8b = E.buildUserPalette([{ id: 'k', name: 'Black', hex: '#000000', td: 0.6 }, { id: 'w', name: 'White', hex: '#ffffff', td: 5 }, { id: 'r', name: 'Red', hex: '#c00d1e', td: 5 }, { id: 'y', name: 'Yellow', hex: '#fce300', td: 6 }, { id: 'u', name: 'Blue', hex: '#00358e', td: 4 }, { id: 'c', name: 'Cyan', hex: '#0086d6', td: 3.5 }, { id: 'm', name: 'Magenta', hex: '#ec008c', td: 4.5 }, { id: 'o', name: 'Orange', hex: '#ff6a13', td: 5 }]);
+  const gg = (w, h) => { const d = new Uint8ClampedArray(w * h * 4); for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const t = x / (w - 1); d.set([Math.round(60 + 160 * t), Math.round(40 + 80 * t), Math.round(180 - 120 * t), 255], (y * w + x) * 4); } return { width: w, height: h, data: d }; };
+  const cp = E.buildPlan(gg(60, 40), { ...base, palette: pal8b, gradLayers: 20, equalHeight: true, layerCoordination: true, qualityPolicy: 'continuity', families: 24 });
+  if (cp.coordination && cp.coordination.changedRegions > 0) {
+    let s = 0, c = 0;
+    for (let i = 0; i < cp.n; i++) { if (!cp.printMask[i]) continue; s += C.deltaE2000({ L: cp.lab ? 0 : 0, a: 0, b: 0 }, cp.predicted[i].lab) , c++; }
+    // recompute meanDE from source lab via engine imageToLab
+    const srcLab = E.imageToLab(gg(60, 40)).lab;
+    let ss = 0, cc = 0;
+    for (let i = 0; i < cp.n; i++) { if (!cp.printMask[i]) continue; ss += C.deltaE2000({ L: srcLab[i * 3], a: srcLab[i * 3 + 1], b: srcLab[i * 3 + 2] }, cp.predicted[i].lab); cc++; }
+    assert.ok(Math.abs(cp.stats.meanDE - ss / cc) < 0.01, `coordinated meanDE reflects predicted (${cp.stats.meanDE} vs ${ss / cc})`);
+  }
+}
+console.log('all m34+m44 review-fix checks passed');

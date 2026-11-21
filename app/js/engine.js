@@ -3366,6 +3366,34 @@
         toolChanges += Math.max(0, set.size - 1);
       }
     }
+    // F08: equal-height envelope WITHOUT coordination also needs final-material stats.
+    if (equalHeight && !regionRecipes) {
+      const tmpPlan = { w, h, printMask, flatMask, flatFilament, familyId, families, regionOf, regionRecipes, gradStartLayer, flatBaseLayers, flatLayers, commonTopLayer: gradTopLayer, equalHeight, foundationIndex: baseIndex };
+      grams.fill(0); toolChanges = 0;
+      for (let z = 0; z < maxLayers; z++) {
+        const set = new Set();
+        for (let i = 0; i < n; i++) {
+          if (!printMask[i]) continue;
+          const m = filamentAt(tmpPlan, i % w, (i / w) | 0, z);
+          if (m >= 0) { grams[m] += pixelArea * layerHeight / 1000 * 1.24; set.add(m); }
+        }
+        layerFilaments[z] = [...set];
+        toolChanges += Math.max(0, set.size - 1);
+      }
+    }
+    // F08: color-error stats must reflect the coordinated predicted colors.
+    if (regionRecipes) {
+      sumDE = 0; sumDE2 = 0; maxDE = 0;
+      const gs = groupStats.gradient; gs.pixels = 0; gs.sum = 0; gs.max = 0; gs.hist = new Uint32Array(101);
+      let cnt = 0;
+      for (let i = 0; i < n; i++) {
+        if (!printMask[i]) continue;
+        const de = C.deltaE2000(labAt(lab, i), predicted[i].lab);
+        sumDE += de; sumDE2 += de * de; if (de > maxDE) maxDE = de; cnt++;
+        if (!flatMask[i]) { gs.pixels++; gs.sum += de; if (de > gs.max) gs.max = de; gs.hist[Math.min(100, Math.round(de))]++; }
+      }
+      void cnt;
+    }
 
     return {
       engine, w, h, n, pixelSize, widthMm: w * pixelSize, heightMm: h * pixelSize,

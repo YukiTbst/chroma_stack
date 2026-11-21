@@ -250,9 +250,11 @@
       Object.assign(p, CS.settings.uniformTd(base ? base.td : p.td));
     }
     state.lutTdOverrides = {}; state.lutHexOverrides = {}; state.filamentCalibrations = {};
+    state.calibrationV2 = null; // lifecycle: reset clears the v2 model too (m44 item 4)
+    state.plan = null;
     CS.settings.clear();
     syncControlsFromState();
-    markDirty(false);
+    markDirty(true);
     toast(backup ? '已重置当前 profile 的标定；其他参数未改动（已保留可恢复备份）' : '已重置当前 profile 的标定；其他参数未改动');
   }
 
@@ -2122,8 +2124,11 @@
       }
       state.calibrationV2 = pub;
       CS.settings.save(state);
-      $('comboCalibStatus').textContent = `已发布模型 ${fitted.model.modelId}（train ${fitted.trainLoss.toFixed(3)} / dev ${fitted.devDE == null ? '—' : fitted.devDE.toFixed(1)} / test ${fitted.testDE.toFixed(1)} ΔE），activeModelId 已原子切换。`;
-      toast('组合标定模型已发布');
+      // Lifecycle: a newly published model invalidates any stale plan so the next
+      // compute uses the new activeModel (review m44 item 4).
+      state.plan = null; markDirty(true);
+      $('comboCalibStatus').textContent = `已发布模型 ${fitted.model.modelId}（train ${fitted.trainLoss.toFixed(3)} / dev ${fitted.devDE == null ? '—' : fitted.devDE.toFixed(1)} / test ${fitted.testDE.toFixed(1)} ΔE），activeModelId 已原子切换；旧计划已失效，请重新计算。`;
+      toast('组合标定模型已发布，旧计划已失效');
     } catch (e) { toast('发布失败：' + (e.message || e)); }
   }
 

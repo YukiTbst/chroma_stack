@@ -204,11 +204,20 @@ void main() {
     const sy = Math.min(plan.h - 1, Math.max(0, Math.round(y)));
     const i = sy * plan.w + sx;
     if (plan.printMask && !plan.printMask[i]) return { top: 0, i };
-    let top;
-    if (plan.flatMask[i]) top = plan.flatLayers;
-    else {
-      const f = plan.familyId[i];
-      top = plan.gradStartLayer + (f >= 0 ? plan.families[f].recipe.length : 0);
+    let top = null;
+    // F08: top surface must follow the final material source — coordinated region
+    // recipe length, or the equal-height common top (incl. envelope support).
+    if (plan.regionRecipes && plan.regionOf) {
+      const rr = plan.regionRecipes[plan.regionOf[i]];
+      if (rr) top = plan.gradStartLayer + rr.length;
+    }
+    if (top == null) {
+      if (plan.equalHeight) top = plan.commonTopLayer;
+      else if (plan.flatMask[i]) top = plan.flatLayers;
+      else {
+        const f = plan.familyId[i];
+        top = plan.gradStartLayer + (f >= 0 ? plan.families[f].recipe.length : 0);
+      }
     }
     return { top, i };
   }
