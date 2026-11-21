@@ -2144,7 +2144,10 @@
       try {
         const obj = JSON.parse(String(reader.result));
         if (!obj.manifest || !Array.isArray(obj.observations)) throw new Error('需要 {manifest, observations}');
-        const v = CS.calibrationData.validateV2(obj.model ? { schemaVersion: 2, models: [obj.model] } : null);
+        // F07: reject mismatched/tampered board info and non-finite model params on import.
+        const mv = CS.calibrationData.validateManifest(obj.manifest);
+        if (!mv.ok) throw new Error('标定板 manifest 校验失败：' + mv.error);
+        if (obj.model) { const v = CS.calibrationData.validateV2({ schemaVersion: 2, models: [obj.model] }); if (!v.ok) throw new Error('模型校验失败：' + v.error); }
         state.comboObs = { manifest: obj.manifest, observations: obj.observations, relative: !!obj.relative, photoHash: obj.photoHash || '' };
         $('comboCalibStatus').textContent = `已导入 ${obj.observations.length} 条组合观测（manifest ${obj.manifest.manifestHash || '?'}${obj.relative ? '，相对标定' : ''}）。点击"联合拟合并发布模型"。`;
         toast('组合观测已导入');
