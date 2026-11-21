@@ -351,15 +351,31 @@
     const dark = new Uint8Array(w * h), bright = new Uint8Array(w * h);
     for (let i = 0; i < w * h; i++) { const y = lum(i); dark[i] = y < 70 ? 1 : 0; bright[i] = y > 120 ? 1 : 0; }
     // Auto-detect the 4 corner pads as small isolated squares (area window excludes
-    // the large colour cells). Not hardcoded to any one photo.
+    // the large colour cells). Not hardcoded to any one photo. Stray dark/bright blobs
+    // can out-extreme the real pads, so choose the TL/TR/BL/BR combination that best
+    // forms the marker rectangle (alignment + board aspect), not merely min/max cx.
     const top = components(dark, w, h, 60, 2000).filter(c => c.cy < h * 0.5 && c.fill > 0.6);
     const bot = components(bright, w, h, 60, 2000).filter(c => c.cy > h * 0.5 && c.fill > 0.6);
     let TL, TR, BL, BR;
     if (opts.markers) { ({ TL, TR, BL, BR } = opts.markers); }
     else {
       if (top.length < 2 || bot.length < 2) throw new Error('找不到四个角定位点（上黑下白）');
-      TL = top.reduce((a, b) => a.cx < b.cx ? a : b); TR = top.reduce((a, b) => a.cx > b.cx ? a : b);
-      BL = bot.reduce((a, b) => a.cx < b.cx ? a : b); BR = bot.reduce((a, b) => a.cx > b.cx ? a : b);
+      const mxs = manifest.markers.map(m => m.x), mys = manifest.markers.map(m => m.y);
+      const aspect = (Math.max(...mxs) - Math.min(...mxs)) / Math.max(1e-6, Math.max(...mys) - Math.min(...mys));
+      let best = null, bestScore = Infinity;
+      for (let a = 0; a < top.length; a++) for (let b = a + 1; b < top.length; b++) {
+        const tl = top[a].cx < top[b].cx ? top[a] : top[b], tr = top[a].cx < top[b].cx ? top[b] : top[a];
+        for (let c = 0; c < bot.length; c++) for (let e = c + 1; e < bot.length; e++) {
+          const bl = bot[c].cx < bot[e].cx ? bot[c] : bot[e], br = bot[c].cx < bot[e].cx ? bot[e] : bot[c];
+          const rw = tr.cx - tl.cx, rh = bl.cy - tl.cy; if (rw <= 0 || rh <= 0) continue;
+          const align = (Math.abs(tl.cy - tr.cy) + Math.abs(bl.cy - br.cy) + Math.abs(tl.cx - bl.cx) + Math.abs(tr.cx - br.cx)) / rw;
+          const aspErr = Math.abs(rw / rh - aspect) / aspect;
+          const score = align + aspErr;
+          if (score < bestScore) { bestScore = score; best = { tl, tr, bl, br }; }
+        }
+      }
+      if (!best) throw new Error('找不到四个角定位点（上黑下白）');
+      TL = best.tl; TR = best.tr; BL = best.bl; BR = best.br;
     }
     const imgCorners = [TL, TR, BR, BL];
     const pxPerMm = Math.hypot(TR.cx - TL.cx, TR.cy - TL.cy) / (manifest.boardW - 4);
@@ -369,11 +385,15 @@
     const M = manifest.markers;
     const perms = { identity: [M[0], M[1], M[2], M[3]], mirrorX: [M[1], M[0], M[3], M[2]], mirrorY: [M[3], M[2], M[1], M[0]], rot180: [M[2], M[3], M[0], M[1]] };
     const thick = manifest.cells.filter(c => c.type === 'single' && c.stack[0].layerCount >= 4);
+    // Expected colour class comes from the material HEX, never from the id string:
+    // real material IDs ('bambu-...-magenta', numeric slots) are not colour letters.
+    const hexOf = id => { const p = palette.find(p => (p.id || '') === id || p.name === id || (p.hex || '').toLowerCase() === String(id).toLowerCase()); return p ? p.hex : null; };
+    const classOf = id => { const hx = hexOf(id); if (!hx) return null; const rgb = C.hexToRgb(hx); return hueClass([rgb.r, rgb.g, rgb.b]); };
     let bestOrient = 'identity', bestScore = -1, map = null;
     for (const [name, bc] of Object.entries(perms)) {
       const mp = CS.batchCalibration.homography(bc, imgCorners);
       let score = 0;
-      for (const c of thick) { const s = CS.batchCalibration.sampleMedian(imageData, mp, c.cx, c.cy, r); if (hueClass(s.rgb) === c.stack[0].materialId) score++; }
+      for (const c of thick) { const s = CS.batchCalibration.sampleMedian(imageData, mp, c.cx, c.cy, r); const expect = classOf(c.stack[0].materialId); if (expect && hueClass(s.rgb) === expect) score++; }
       if (score > bestScore) { bestScore = score; bestOrient = name; map = mp; }
     }
     const observations = manifest.cells.map(cell => {
@@ -416,11 +436,23 @@
      camera gain, then divide it out of every observation/substrate so the fit runs in
      consistent scene space. This is an explicit assumption (white-as-neutral), valid
      for relative calibration only. Returns gain to re-apply when rendering. */
-  function normalizeWhite(observations, manifest) {
-    const ref = observations.find(o => {
+  function normalizeWhite(observations, manifest, palette) {
+    // Identify the white material by HEX (brightest near-neutral) when a palette is
+    // given — never hardcode the id 'w'. Without a palette, fall back to the brightest
+    // white-half single 8-layer anchor (white-on-white reflects the most).
+    let whiteId = null;
+    if (palette && palette.length) {
+      let bestL = -1;
+      for (const p of palette) { const lab = C.hexToLab(p.hex); if (lab.L > 80 && Math.hypot(lab.a, lab.b) < 12 && lab.L > bestL) { bestL = lab.L; whiteId = p.id || p.name; } }
+    }
+    let ref = null, bestLum = -1;
+    for (const o of observations) {
       const c = manifest.cells.find(x => x.cellId === o.cellId);
-      return c && c.base === 'W' && c.stack.length === 1 && c.stack[0].materialId === 'w' && c.stack[0].layerCount === 8;
-    });
+      if (!c || c.base !== 'W' || c.stack.length !== 1 || c.stack[0].layerCount !== 8) continue;
+      if (whiteId && c.stack[0].materialId !== whiteId) continue;
+      const lum = 0.2126 * o.observedLinear[0] + 0.7152 * o.observedLinear[1] + 0.0722 * o.observedLinear[2];
+      if (lum > bestLum) { bestLum = lum; ref = o; }
+    }
     const gain = ref ? ref.observedLinear.map(v => Math.max(0.2, v)) : [1, 1, 1];
     // Do NOT silently clip: keep raw normalized values and mark channels that exceed
     // the white reference as censored (channelsOk=false) so the fit treats them as
