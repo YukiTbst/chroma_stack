@@ -3360,7 +3360,13 @@
         const mean = { L: sL / r.members.length, a: sA / r.members.length, b: sB / r.members.length };
         const neutralSrc = Math.hypot(mean.a, mean.b) < 8;
         const cands = [cur];
-        if (!locked) for (const c of matchGamutCandidates(mean, gamut, 6, budget, neutralSrc)) cands.push(c.g.seq.slice());
+        // F05: offer candidates up to max(budget, baseline error). Filtering by the
+        // absolute budget alone hides candidates that are better than an over-budget
+        // baseline (and cut boundary cost) — they never reach the optimizer. The
+        // optimizer's relaxed feasibility (F07) then accepts only non-worsening moves.
+        const baseLab = compositeLab(foundation.lin, cur, palette, layerHeight).lab;
+        const candBudget = Math.max(budget, C.deltaE2000(mean, baseLab));
+        if (!locked) for (const c of matchGamutCandidates(mean, gamut, 6, candBudget, neutralSrc)) cands.push(c.g.seq.slice());
         return { id: r.id, lab: mean, area: r.area, locked, stack: cur, candidates: cands, edges: r.edges, members: r.members };
       });
       const model = { materials: {} };
