@@ -396,19 +396,26 @@
       for (const c of thick) { const s = CS.batchCalibration.sampleMedian(imageData, mp, c.cx, c.cy, r); const expect = classOf(c.stack[0].materialId); if (expect && hueClass(s.rgb) === expect) score++; }
       if (score > bestScore) { bestScore = score; bestOrient = name; map = mp; }
     }
+    // Substrate ROI = the foundation half polygon MINUS every cell footprint. Probe
+    // the inter-cell gap on all four sides and keep only points that are on this
+    // cell's substrate half and outside ALL cell rects, so a skewed homography or an
+    // edge cell never samples a neighbouring colour cell or the off-half margin.
+    const inHalf = (bx, by, base) => { const half = manifest.halves[base]; return half && by >= half.y0 && by <= half.y1 && bx >= 0 && bx <= manifest.boardW; };
+    const inAnyCell = (bx, by) => manifest.cells.some(c => bx >= c.cx - c.size / 2 && bx <= c.cx + c.size / 2 && by >= c.cy - c.size / 2 && by <= c.cy + c.size / 2);
     const observations = manifest.cells.map(cell => {
       const s = CS.batchCalibration.sampleMedian(imageData, map, cell.cx, cell.cy, r);
-      // Substrate ROI must be NARROWER than the ~16px inter-cell gap so the window
-      // never reaches into a neighbouring colour cell (review F3/三.1).
       const rSub = Math.max(2, Math.round(pxPerMm * 0.5));
       const gap = cell.size / 2 + 1;
-      const sL = CS.batchCalibration.sampleMedian(imageData, map, cell.cx - gap, cell.cy, rSub);
-      const sR = CS.batchCalibration.sampleMedian(imageData, map, cell.cx + gap, cell.cy, rSub);
-      const sub = [0, 1, 2].map(c => Math.round((sL.rgb[c] + sR.rgb[c]) / 2));
+      const cand = [[cell.cx - gap, cell.cy], [cell.cx + gap, cell.cy], [cell.cx, cell.cy - gap], [cell.cx, cell.cy + gap]];
+      let pts = cand.filter(([bx, by]) => inHalf(bx, by, cell.base) && !inAnyCell(bx, by));
+      if (!pts.length) pts = cand.slice(0, 2); // degenerate fallback: left/right gap
+      const samples = pts.map(([bx, by]) => CS.batchCalibration.sampleMedian(imageData, map, bx, by, rSub).rgb);
+      const sub = [0, 1, 2].map(c => Math.round(samples.reduce((a, sm) => a + sm[c], 0) / samples.length));
       return {
         cellId: cell.cellId,
         observedLinear: s.rgb.map(v => C.srgbToLinear(v / 255)),
         substrateLinear: sub.map(v => C.srgbToLinear(v / 255)),
+        substratePoints: pts,
         channelsOk: s.rgb.map(v => v > 2 && v < 254)
       };
     });
