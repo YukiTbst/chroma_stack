@@ -1006,13 +1006,13 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
 
   function build3MFBytes(plan, options) {
     const out = build3MFParts(plan, options);
-    return { bytes: CS.zip.createZip(out.files), meta: out.meta, objects: out.objects, ew: out.ew, eh: out.eh, pixelSize: out.pixelSize, exportDownscaled: out.exportDownscaled, exportChange: out.exportChange };
+    return { bytes: CS.zip.createZip(out.files), files: out.files, meta: out.meta, objects: out.objects, ew: out.ew, eh: out.eh, pixelSize: out.pixelSize, exportDownscaled: out.exportDownscaled, exportChange: out.exportChange };
   }
 
   async function build3MFBytesAsync(plan, options) {
     const out = build3MFParts(plan, options);
     const bytes = CS.zip.createZipAsync ? await CS.zip.createZipAsync(out.files) : CS.zip.createZip(out.files);
-    return { bytes, meta: out.meta, objects: out.objects, ew: out.ew, eh: out.eh, pixelSize: out.pixelSize, exportDownscaled: out.exportDownscaled, exportChange: out.exportChange };
+    return { bytes, files: out.files, meta: out.meta, objects: out.objects, ew: out.ew, eh: out.eh, pixelSize: out.pixelSize, exportDownscaled: out.exportDownscaled, exportChange: out.exportChange };
   }
 
   function build3MFBlob(plan, options) {

@@ -44,7 +44,17 @@ for (const chunk of chunks) {
 const out = X.assemble3MFParts(plan, rawObjects, grid, plane, ew, eh, pixelSize);
 const parBytes = Z.createZip(out.files);
 
-assert.equal(Buffer.compare(Buffer.from(serial.bytes), Buffer.from(parBytes)), 0, 'parallel export bytes must equal serial bytes');
+// R6: compare the 3MF file CONTENTS, not the ZIP container bytes — zip.js stamps
+// each entry with the current time, so two real-time zips can differ by a second
+// even when the geometry/XML are identical (the old byte compare flaked).
+const fbytes = (f) => typeof f.data === 'string' ? Buffer.from(f.data, 'utf8') : Buffer.from(f.data);
+const sFiles = serial.files.slice().sort((a, b) => (a.name < b.name ? -1 : 1));
+const pFiles = out.files.slice().sort((a, b) => (a.name < b.name ? -1 : 1));
+assert.equal(sFiles.length, pFiles.length, '3MF file count matches');
+for (let i = 0; i < sFiles.length; i++) {
+  assert.equal(sFiles[i].name, pFiles[i].name, '3MF file name ' + i);
+  assert.equal(Buffer.compare(fbytes(sFiles[i]), fbytes(pFiles[i])), 0, '3MF file content identical: ' + sFiles[i].name);
+}
 assert.equal(out.objects.length, serial.objects.length, 'object count matches');
 assert.equal(out.meta.triangles, serial.meta.triangles, 'triangle count matches');
-console.log(`PERF3 passed: parallel export byte-identical (${(parBytes.length / 1e6).toFixed(2)}MB, ${out.objects.length} objects, ${out.meta.triangles} triangles, ${chunks.length} chunks)`);
+console.log(`PERF3 passed: parallel export content-identical (${(parBytes.length / 1e6).toFixed(2)}MB, ${out.objects.length} objects, ${out.meta.triangles} triangles, ${chunks.length} chunks, ${sFiles.length} files)`);

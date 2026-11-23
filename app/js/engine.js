@@ -2489,8 +2489,27 @@
     return { flatLayers, gradStartLayer, gradTopLayer, flatBaseLayers, flatTopLayers, colorLayers: cl };
   }
 
-  async function buildPlan(imageData, options) {
+  // R4: activeMatchCache is module-global. buildPlan is async (it awaits the worker
+  // pool), so two overlapping plans could overwrite each other's cache and cross-use
+  // recipes from a different gamut. Serialize buildPlan per realm (the UI computes one
+  // plan at a time anyway) and clear the cache in finally so an exception cannot leave
+  // it dangling for the next plan.
+  let planQueue = Promise.resolve();
+  function buildPlan(imageData, options) {
+    const run = planQueue.then(() => buildPlanGuarded(imageData, options));
+    planQueue = run.then(() => {}, () => {});
+    return run;
+  }
+  async function buildPlanGuarded(imageData, options) {
     activeMatchCache = options.matchCache || null;
+    try {
+      return await buildPlanBody(imageData, options);
+    } finally {
+      activeMatchCache = null;
+    }
+  }
+
+  async function buildPlanBody(imageData, options) {
     const w = imageData.width, h = imageData.height, n = w * h;
     // GPU7 profiling (gated by options.__profile; no effect on normal plans).
     const __prof = options.__profile ? { marks: [], last: performance.now() } : null;
@@ -3634,7 +3653,6 @@
     }
 
     __mark('coordination+finalStats');
-    activeMatchCache = null;
     return {
       _profile: __prof ? __prof.marks : undefined,
       engine, w, h, n, pixelSize, widthMm: w * pixelSize, heightMm: h * pixelSize,

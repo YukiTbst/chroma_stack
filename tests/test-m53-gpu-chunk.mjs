@@ -44,6 +44,9 @@ function makeDevice(maxBind, maxWG) {
     },
     createShaderModule() { return {}; },
     createComputePipeline() { return { getBindGroupLayout: () => ({}) }; },
+    async createComputePipelineAsync() { return { getBindGroupLayout: () => ({}) }; },
+    pushErrorScope() {}, async popErrorScope() { return null; },
+    lost: new Promise(() => {}),
     createBindGroup({ entries }) { const m = {}; for (const e of entries) m[e.binding] = e.resource.buffer; return { _m: m }; },
     createCommandEncoder() {
       const ops = [];
