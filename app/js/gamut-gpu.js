@@ -116,9 +116,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     function isNeutralEntry(g) { return !(g.chromaFrac > 0); }
 
-    // GPU scores the whole gamut for each target; CPU argmin. Returns raw best
-    // {index, entry} per target (no neutral lock, no f64 ΔE report yet).
-    async function rawBest(targets) {
+    // GPU6: bound each dispatch so the score buffer fits a storage binding and the
+    // workgroup count fits one dimension. Large images (4x) produce ~56k near-neutral
+    // targets; an unchunked batch needs a ~700MB buffer the device rejects, which used
+    // to throw and silently fall back to CPU. Chunking keeps results identical (each
+    // target's argmin is independent) while staying within device limits.
+    const lim = device.limits || {};
+    const maxBind = Math.min(lim.maxStorageBufferBindingSize || 134217728, lim.maxBufferSize || 268435456);
+    const maxWG = lim.maxComputeWorkgroupsPerDimension || 65535;
+    const WG = 256; // matches @workgroup_size(256)
+    const chunkCap = Math.max(1, Math.min(Math.floor(maxBind / (n * 4)), Math.floor((maxWG * WG) / n)));
+
+    // GPU scores the whole gamut for one chunk of targets; CPU argmin. Returns raw
+    // best {index, entry} per target (no neutral lock, no f64 ΔE report yet).
+    async function rawBestChunk(targets) {
       const batch = targets.length;
       if (!batch) return [];
       const tData = new Float32Array(batch * 4);
@@ -150,6 +161,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let bi = 0, bs = Infinity; const off = b * n;
         for (let i = 0; i < n; i++) { const s = scores[off + i]; if (s < bs) { bs = s; bi = i; } }
         out.push({ index: bi, entry: gamut[bi] });
+      }
+      return out;
+    }
+
+    // Split oversized batches into device-sized chunks and concatenate. Small
+    // batches take the single-dispatch path unchanged.
+    async function rawBest(targets) {
+      const batch = targets.length;
+      if (!batch) return [];
+      if (batch <= chunkCap) return rawBestChunk(targets);
+      const out = [];
+      for (let s = 0; s < batch; s += chunkCap) {
+        const part = await rawBestChunk(targets.slice(s, s + chunkCap));
+        for (let i = 0; i < part.length; i++) out.push(part[i]);
       }
       return out;
     }
