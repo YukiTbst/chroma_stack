@@ -49,7 +49,7 @@ for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
   const v = Math.round(40 + 160 * x / w);
   grad.set([v, Math.round(v * 0.7), Math.round(v * 0.5), 255], (y * w + x) * 4);
 }
-const stickerPlan = E.buildPlan({ width: w, height: h, data: grad }, { ...base, ...sticker, edgeClean: 0, smoothMm: 0 });
+const stickerPlan = await E.buildPlan({ width: w, height: h, data: grad }, { ...base, ...sticker, edgeClean: 0, smoothMm: 0 });
 const lens = stickerPlan.families.filter(f => f.pixelCount > 0).map(f => f.recipe.length);
 console.log('sticker lengths', lens, 'maxGrad', stickerPlan.maxGradLayers);
 assert.ok(lens.length > 0 && lens.every(l => l === stickerPlan.maxGradLayers), 'sticker mode plans equal-height recipes');
@@ -60,8 +60,8 @@ for (let i = 0; i < w * h; i++) line.set([255, 255, 255, 255], i * 4);
 rect(20, 100, 80, 3, [0, 0, 0]);
 rect(100, 100, 2, 3, [200, 199, 225]);
 rect(102, 100, 80, 3, [0, 0, 0]);
-const repaired = E.buildPlan({ width: w, height: h, data: line }, { ...base, lineRepair: true, edgeSnap: true });
-const unrepaired = E.buildPlan({ width: w, height: h, data: line }, { ...base, lineRepair: false, edgeSnap: false });
+const repaired = await E.buildPlan({ width: w, height: h, data: line }, { ...base, lineRepair: true, edgeSnap: true });
+const unrepaired = await E.buildPlan({ width: w, height: h, data: line }, { ...base, lineRepair: false, edgeSnap: false });
 console.log('gap flat', repaired.flatMask[101 * w + 101], unrepaired.flatMask[101 * w + 101],
   'snap flags', repaired.edgeSnap, unrepaired.edgeSnap);
 assert.equal(repaired.lineRepair, true);

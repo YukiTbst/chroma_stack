@@ -34,7 +34,7 @@ const defaults = {
   families: 192, backgroundMode: 'off', backgroundTolerance: 8,
   backgroundEnvelope: true, backgroundEnvelopeMm: 1.5
 };
-const plan = E.buildPlan({ width: w, height: h, data }, defaults);
+const plan = await E.buildPlan({ width: w, height: h, data }, defaults);
 const neutralIdx = new Set(palette.map((p, i) => [p, i])
   .filter(([p]) => Math.hypot(C.hexToLab(p.hex).a, C.hexToLab(p.hex).b) < 8)
   .map(([, i]) => i));
@@ -75,7 +75,7 @@ for (const ex of examples) {
 }
 
 /* The lock must survive the shared-base / height-merge passes as well. */
-const noMerge = E.buildPlan({ width: w, height: h, data }, { ...defaults, mergeDeltaE: 0, heightMergeDeltaE: 0 });
+const noMerge = await E.buildPlan({ width: w, height: h, data }, { ...defaults, mergeDeltaE: 0, heightMergeDeltaE: 0 });
 for (const f of noMerge.families) {
   if (!f.neutralLocked || !f.pixelCount) continue;
   assert.ok(f.recipe.every(i => neutralIdx.has(i)), 'no-merge plan must keep locked recipes neutral');

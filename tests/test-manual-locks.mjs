@@ -98,17 +98,17 @@ const countDiff = (a, b) => { let d = 0; for (let i = 0; i < n; i++) if (a.flatM
 {
   const st = freshState();
   const buildOptions = makeBuildOptions(st);
-  const p0 = E.buildPlan(img, buildOptions());
+  const p0 = await E.buildPlan(img, buildOptions());
   assert.equal(p0.flatMask[squareIdx], 0, 'precondition: 400px square is gradient at 0.6%');
   // Open the brush: the UI snapshots the current plan as the display canvas.
   st.overrideMask = new Uint8Array(p0.flatMask);
   st.minFlatPercent = 0.02;
   const saved = [st.overrideMask, st.lockMask, st.lockValue];
   st.overrideMask = st.lockMask = st.lockValue = null;
-  const auto = E.buildPlan(img, buildOptions());
+  const auto = await E.buildPlan(img, buildOptions());
   [st.overrideMask, st.lockMask, st.lockValue] = saved;
   assert.equal(auto.flatMask[squareIdx], 1, 'precondition: parameter change really moves the square to flat');
-  const withBrush = E.buildPlan(img, buildOptions());
+  const withBrush = await E.buildPlan(img, buildOptions());
   const frozen = countDiff(withBrush, auto);
   console.log(`A brush-open-no-paint: ${frozen} pixels differ from same-parameter auto`);
   assert.equal(frozen, 0, 'opening the brush without painting must not freeze the old segmentation');
@@ -118,23 +118,23 @@ const countDiff = (a, b) => { let d = 0; for (let i = 0; i < n; i++) if (a.flatM
 {
   const st = freshState();
   const buildOptions = makeBuildOptions(st);
-  const p0 = E.buildPlan(img, buildOptions());
+  const p0 = await E.buildPlan(img, buildOptions());
   assert.equal(p0.flatMask[bgIdx], 1, 'precondition: background pixel is flat');
   // Paint one pixel to gradient (both the display canvas and the sparse lock).
   st.overrideMask = new Uint8Array(p0.flatMask);
   st.overrideMask[bgIdx] = 0;
   st.lockMask = new Uint8Array(n); st.lockValue = new Uint8Array(n);
   st.lockMask[bgIdx] = 1; st.lockValue[bgIdx] = 0;
-  const p1 = E.buildPlan(img, buildOptions());
+  const p1 = await E.buildPlan(img, buildOptions());
   console.log(`B erase-one-pixel: flatMask=${p1.flatMask[bgIdx]} manualPixels=${p1.diagnostics.manualPixels}`);
   assert.equal(p1.flatMask[bgIdx], 0, 'painted pixel ends up gradient in the final plan');
   assert.equal(p1.diagnostics.manualPixels, 1, 'exactly one manual pixel');
   // Change partition parameters: the lock survives, all other pixels re-auto.
   st.minFlatPercent = 0.02;
-  const p2 = E.buildPlan(img, buildOptions());
+  const p2 = await E.buildPlan(img, buildOptions());
   const saved = [st.overrideMask, st.lockMask, st.lockValue];
   st.overrideMask = st.lockMask = st.lockValue = null;
-  const auto = E.buildPlan(img, buildOptions());
+  const auto = await E.buildPlan(img, buildOptions());
   [st.overrideMask, st.lockMask, st.lockValue] = saved;
   assert.equal(p2.flatMask[bgIdx], 0, 'lock survives the parameter change');
   assert.equal(p2.diagnostics.manualPixels, 1);
@@ -150,7 +150,7 @@ const countDiff = (a, b) => { let d = 0; for (let i = 0; i < n; i++) if (a.flatM
   const st = freshState();
   st.minFlatPercent = 0.02;
   const buildOptions = makeBuildOptions(st);
-  const p0 = E.buildPlan(img, buildOptions());
+  const p0 = await E.buildPlan(img, buildOptions());
   assert.equal(p0.flatMask[islandIdx], 1, 'precondition: 20px island is auto-flat at 0.02%');
   // Paint the whole island flat — the same value it already has.
   st.overrideMask = new Uint8Array(p0.flatMask);
@@ -160,7 +160,7 @@ const countDiff = (a, b) => { let d = 0; for (let i = 0; i < n; i++) if (a.flatM
     st.overrideMask[i] = 1; st.lockMask[i] = 1; st.lockValue[i] = 1;
   }
   st.smoothMm = 0.8; // cleanup would absorb the 20px island (minAreaPx 32)
-  const p1 = E.buildPlan(img, buildOptions());
+  const p1 = await E.buildPlan(img, buildOptions());
   console.log(`C same-value lock: island flat=${p1.flatMask[islandIdx]} filament=${p1.flatFilament[islandIdx]} manualPixels=${p1.diagnostics.manualPixels}`);
   assert.equal(p1.diagnostics.manualPixels, 20, 'all 20 painted pixels are locked');
   assert.equal(p1.flatMask[islandIdx], 1, 'same-value paint still protects the island from cleanup');
@@ -172,14 +172,14 @@ const countDiff = (a, b) => { let d = 0; for (let i = 0; i < n; i++) if (a.flatM
   }
   // Without the lock the same geometry IS absorbed: prove the test bites.
   st.lockMask = null; st.lockValue = null; st.overrideMask = null;
-  const unlocked = E.buildPlan(img, buildOptions());
+  const unlocked = await E.buildPlan(img, buildOptions());
   assert.equal(unlocked.flatMask[islandIdx], 0, 'control: unlocked island is absorbed by cleanup');
 
   /* Export readout shares the lock: native export is exact, and downsampled
      export cleanup must not absorb the painted island either. */
   st.lockMask = new Uint8Array(n); st.lockValue = new Uint8Array(n);
   for (let y = 120; y < 125; y++) for (let x = 150; x < 154; x++) { const i = y * w + x; st.lockMask[i] = 1; st.lockValue[i] = 1; }
-  const locked = E.buildPlan(img, buildOptions());
+  const locked = await E.buildPlan(img, buildOptions());
   const native = X.samplePlane(locked, w, h);
   assert.equal(native.flatMask[islandIdx], 1, 'native export keeps the lock');
   assert.equal(native.flatFilament[islandIdx], WHITE);
@@ -201,7 +201,7 @@ const countDiff = (a, b) => { let d = 0; for (let i = 0; i < n; i++) if (a.flatM
   assert.equal(opts.engine, 'td');
   assert.equal(opts.edgeSnap, false, 'TD options echo edgeSnap=false');
   assert.equal(opts.lineRepair, false, 'TD options echo lineRepair=false');
-  const plan = E.buildPlan(img, opts);
+  const plan = await E.buildPlan(img, opts);
   assert.equal(plan.edgeSnap, false, 'TD plan echoes edgeSnap=false');
   assert.equal(plan.lineRepair, false, 'TD plan echoes lineRepair=false');
 }
@@ -212,14 +212,14 @@ const countDiff = (a, b) => { let d = 0; for (let i = 0; i < n; i++) if (a.flatM
   assert.ok(dbg && typeof dbg.buildOptions === 'function', 'appDebug exposes the real functions');
   const st = dbg.state;
   Object.assign(st, freshState());
-  st.plan = E.buildPlan(img, dbg.buildOptions());
+  st.plan = await E.buildPlan(img, dbg.buildOptions());
   dbg.ensureBrushCanvas();
   assert.ok(st.overrideMask && !st.lockMask, 'opening the brush creates no locks');
   dbg.snapshotUndo();
   dbg.applyPaint(st.plan, 10.5, 10.5, 0.4, 0);
   assert.equal(st.lockMask[bgIdx], 1, 'applyPaint records the position');
   assert.equal(st.lockValue[bgIdx], 0, 'applyPaint records the value');
-  const p1 = E.buildPlan(img, dbg.buildOptions());
+  const p1 = await E.buildPlan(img, dbg.buildOptions());
   assert.equal(p1.flatMask[bgIdx], 0, 'real brush path erases the pixel');
   dbg.rebaseBrushCanvas(p1);
   assert.equal(st.overrideMask[bgIdx], p1.flatMask[bgIdx], '2D readout equals the final plan');
@@ -229,14 +229,14 @@ const countDiff = (a, b) => { let d = 0; for (let i = 0; i < n; i++) if (a.flatM
   // Undo restores the previous lock set, not just the display canvas.
   dbg.undoBrush();
   assert.ok(!st.lockMask || st.lockMask[bgIdx] === 0, 'undo removes the lock');
-  const p2 = E.buildPlan(img, dbg.buildOptions());
+  const p2 = await E.buildPlan(img, dbg.buildOptions());
   assert.equal(p2.flatMask[bgIdx], 1, 'after undo the pixel is automatic again');
   // A second paint + clear removes every lock.
   dbg.applyPaint(st.plan, 30.5, 30.5, 0.4, 0);
   dbg.clearBrush();
   assert.equal(st.lockMask, null, 'clear removes locks');
   assert.equal(st.overrideMask, null, 'clear removes the canvas');
-  const p3 = E.buildPlan(img, dbg.buildOptions());
+  const p3 = await E.buildPlan(img, dbg.buildOptions());
   assert.equal(p3.diagnostics.manualPixels, 0, 'clear returns to pure automatic');
 }
 

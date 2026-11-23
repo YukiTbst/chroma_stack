@@ -65,7 +65,7 @@ const check = (ok, msg) => {
 const art = makeLineArt(240, 180);
 const plans = {};
 for (const mode of ['off', 'auto', 'strong']) {
-  plans[mode] = engine.buildPlan(art, { ...base, lineProtect: mode });
+  plans[mode] = await engine.buildPlan(art, { ...base, lineProtect: mode });
   const p = plans[mode];
   console.log(mode, { dE: +p.stats.meanDE.toFixed(2), p90: p.stats.p90, flat: +p.stats.flatPercent.toFixed(1), direct: +p.lineInfo.directPercent.toFixed(1), applied: p.lineApplied });
 }
@@ -93,7 +93,7 @@ for (let i = 0; i < art.width * art.height; i++) {
 check(strokePixels > 0 && lifted === 0, 'protected strokes are never lifted more than 30 L by a light recipe');
 
 const photo = makePhotoLike(240, 160);
-const photoPlan = engine.buildPlan(photo, { ...base, lineProtect: 'auto' });
+const photoPlan = await engine.buildPlan(photo, { ...base, lineProtect: 'auto' });
 console.log('photo', { active: photoPlan.lineInfo.active, applied: photoPlan.lineApplied, dE: +photoPlan.stats.meanDE.toFixed(2) });
 check(photoPlan.lineInfo.active === false, 'smooth gradient/photo-like image is not classified as line art');
 check(photoPlan.lineApplied === false, 'auto mode does not change photo-like image');

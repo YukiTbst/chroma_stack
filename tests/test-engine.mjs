@@ -36,7 +36,7 @@ for (const mode of ['lut8','lut4','td']) {
         {name:'Blue',hex:'#00358e',td:4,brand:'BambuLab Basic',material:'PLA'}],
         foundationIndex:1, widthMm:150, flatTopMm:1.6, reliefMm:0.16, gradLayers:6, families:48, layerHeight:0.08 }
     : { engine:'lut', lutKey: mode==='lut8'?'bambu_8':'bambu_cmyw', widthMm:150, flatTopMm:1.6, reliefMm:0.16, families:64 };
-  const plan = engine.buildPlan(image, opts);
+  const plan = await engine.buildPlan(image, opts);
   const dt = performance.now()-t0;
   console.log(`\n=== ${mode} ${dt.toFixed(0)}ms ===`);
   console.log('palette', plan.palette.map(p=>p.name).join(', '));

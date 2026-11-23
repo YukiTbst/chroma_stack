@@ -41,7 +41,7 @@ rect(skin, 240, 40, 20, 3, 200, [8, 8, 10]);
 rect(skin, 240, 140, 20, 3, 200, [8, 8, 10]);
 rect(skin, 240, 36, 105, 11, 4, [242, 214, 190]);
 rect(skin, 240, 180, 105, 11, 4, [242, 214, 190]);
-const skinPlan = E.buildPlan({ width: 240, height: 240, data: skin }, base);
+const skinPlan = await E.buildPlan({ width: 240, height: 240, data: skin }, base);
 const skinLab = C.rgb255ToLab({ r: 242, g: 214, b: 190 });
 let dark = 0, sum = 0, n = 0;
 for (let y = 105; y < 109; y++) for (let x = 40; x < 43; x++) {
@@ -62,7 +62,7 @@ const gapRgb = C.hexToRgb(C.labToHex(gapLab));
 rect(blue, 240, 20, 100, 80, 3, [lineRgb.r, lineRgb.g, lineRgb.b]);
 rect(blue, 240, 100, 100, 2, 3, [gapRgb.r, gapRgb.g, gapRgb.b]);
 rect(blue, 240, 102, 100, 80, 3, [lineRgb.r, lineRgb.g, lineRgb.b]);
-const bluePlan = E.buildPlan({ width: 240, height: 240, data: blue }, base);
+const bluePlan = await E.buildPlan({ width: 240, height: 240, data: blue }, base);
 const gapA = bluePlan.predicted[101 * 240 + 100];
 const gapB = bluePlan.predicted[101 * 240 + 101];
 const stroke = bluePlan.predicted[101 * 240 + 98];

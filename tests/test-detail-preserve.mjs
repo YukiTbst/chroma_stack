@@ -58,7 +58,7 @@ function patchMetrics(plan) {
     return { name: chip.name, sizePx: chip.size, sizeMm: chip.size * 150 / W, innerPixels: n, flatInnerPixels: flat, meanDeltaE: sum / n };
   });
 }
-const plan = E.buildPlan({ width: W, height: H, data }, { ...defaults, lineProtect: 'off', smoothMm: 0, edgeClean: 0, minFlatPercent: 0.6 });
+const plan = await E.buildPlan({ width: W, height: H, data }, { ...defaults, lineProtect: 'off', smoothMm: 0, edgeClean: 0, minFlatPercent: 0.6 });
 const chipsOut = patchMetrics(plan);
 const pick = (name, size) => chipsOut.find(c => c.name === name && c.sizePx === size);
 const gray = pick('gray', 32), skin = pick('skin', 32);
@@ -76,7 +76,7 @@ for (let y = 57; y < 63; y++) for (let x = 57; x < 63; x++) {
   const v = ((x + y) % 2) ? 246 : 250; // tiny near-white texture, ΔE < residual threshold
   noise.set([v, v, v, 255], (y * nw + x) * 4);
 }
-const noisePlan = E.buildPlan({ width: nw, height: nh, data: noise }, {
+const noisePlan = await E.buildPlan({ width: nw, height: nh, data: noise }, {
   ...defaults, widthMm: 60, flatTopMm: 1.0, reliefMm: 0.16, layerHeight: 0.08,
   minFlatPercent: 0.6, lineProtect: 'off', smoothMm: 0, edgeClean: 0
 });

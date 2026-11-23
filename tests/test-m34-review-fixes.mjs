@@ -54,7 +54,7 @@ const base = { engine: 'td', palette, widthMm: 40, flatTopMm: 1.6, reliefMm: 0.1
 // F02: opticalModel overrides palette TD/opaque in production buildPlan.
 {
   const model = { params: { k: { logHd: [Math.log(0.05), Math.log(0.05), Math.log(0.05)], opaque: [0.02, 0.02, 0.02] }, w: { logHd: [Math.log(1), Math.log(1), Math.log(1)], opaque: [1, 1, 1] }, r: { logHd: [Math.log(0.4), Math.log(0.1), Math.log(0.1)], opaque: [0.7, 0.05, 0.05] } } };
-  const plan = E.buildPlan(img(80, 60), { ...base, opticalModel: model });
+  const plan = await E.buildPlan(img(80, 60), { ...base, opticalModel: model });
   const pk = plan.palette.find(p => p.id === 'k');
   assert.ok(Math.abs(pk.hdR - 0.05) < 1e-6, 'model hdR applied to production palette');
   assert.ok(pk.fromModel, 'palette flagged fromModel');
@@ -62,7 +62,7 @@ const base = { engine: 'td', palette, widthMm: 40, flatTopMm: 1.6, reliefMm: 0.1
 
 // F04: equal-height + envelope support columns export solid to common top.
 {
-  const plan = E.buildPlan(img(80, 60), { ...base, equalHeight: true, backgroundMode: 'auto', backgroundColor: '#ffffff', backgroundTolerance: 8, backgroundEnvelope: true });
+  const plan = await E.buildPlan(img(80, 60), { ...base, equalHeight: true, backgroundMode: 'auto', backgroundColor: '#ffffff', backgroundTolerance: 8, backgroundEnvelope: true });
   const plane = X.samplePlane(plan, plan.w, plan.h);
   const top = plan.commonTopLayer;
   let supportChecked = 0;
@@ -107,7 +107,7 @@ console.log('all m34 review-fix checks passed');
     { id: 'u', name: 'Blue', hex: '#00358e', td: 4 }, { id: 'c', name: 'Cyan', hex: '#0086d6', td: 3.5 },
     { id: 'm', name: 'Magenta', hex: '#ec008c', td: 4.5 }, { id: 'o', name: 'Orange', hex: '#ff6a13', td: 5 }
   ]);
-  const plan = E.buildPlan(g(60, 40), { ...base, palette: pal8, gradLayers: 20, equalHeight: true, layerCoordination: true, qualityPolicy: 'continuity', families: 24 });
+  const plan = await E.buildPlan(g(60, 40), { ...base, palette: pal8, gradLayers: 20, equalHeight: true, layerCoordination: true, qualityPolicy: 'continuity', families: 24 });
   const plane = X.samplePlane(plan, plan.w, plan.h);
   assert.ok(plane.regionRecipes === plan.regionRecipes, 'native samplePlane carries regionRecipes');
   let diff = 0, occ = 0;
@@ -139,7 +139,7 @@ console.log('all m34 review-fix checks passed (incl F08)');
 {
   const V = globalThis.CS.view3d;
   const g2 = (w, h) => { const d = new Uint8ClampedArray(w * h * 4); for (let i = 0; i < w * h; i++) d.set([255, 255, 255, 255], i * 4); for (let y = 10; y < 40; y++) for (let x = 10; x < 40; x++) d.set([192, 13, 30, 255], (y * w + x) * 4); return { width: w, height: h, data: d }; };
-  const env = E.buildPlan(g2(60, 50), { ...base, equalHeight: true, backgroundMode: 'auto', backgroundColor: '#ffffff', backgroundTolerance: 8, backgroundEnvelope: true });
+  const env = await E.buildPlan(g2(60, 50), { ...base, equalHeight: true, backgroundMode: 'auto', backgroundColor: '#ffffff', backgroundTolerance: 8, backgroundEnvelope: true });
   assert.ok(env.stats.toolChanges > 0, 'equal-height envelope without coordination counts tool changes');
   assert.ok(env.stats.grams.reduce((a, b) => a + b, 0) > 0, 'envelope material grams counted');
   let supportTopOk = true, found = 0;
@@ -153,7 +153,7 @@ console.log('all m34 review-fix checks passed (incl F08)');
   // coordinated color stats match recomputed predicted
   const pal8b = E.buildUserPalette([{ id: 'k', name: 'Black', hex: '#000000', td: 0.6 }, { id: 'w', name: 'White', hex: '#ffffff', td: 5 }, { id: 'r', name: 'Red', hex: '#c00d1e', td: 5 }, { id: 'y', name: 'Yellow', hex: '#fce300', td: 6 }, { id: 'u', name: 'Blue', hex: '#00358e', td: 4 }, { id: 'c', name: 'Cyan', hex: '#0086d6', td: 3.5 }, { id: 'm', name: 'Magenta', hex: '#ec008c', td: 4.5 }, { id: 'o', name: 'Orange', hex: '#ff6a13', td: 5 }]);
   const gg = (w, h) => { const d = new Uint8ClampedArray(w * h * 4); for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const t = x / (w - 1); d.set([Math.round(60 + 160 * t), Math.round(40 + 80 * t), Math.round(180 - 120 * t), 255], (y * w + x) * 4); } return { width: w, height: h, data: d }; };
-  const cp = E.buildPlan(gg(60, 40), { ...base, palette: pal8b, gradLayers: 20, equalHeight: true, layerCoordination: true, qualityPolicy: 'continuity', families: 24 });
+  const cp = await E.buildPlan(gg(60, 40), { ...base, palette: pal8b, gradLayers: 20, equalHeight: true, layerCoordination: true, qualityPolicy: 'continuity', families: 24 });
   if (cp.coordination && cp.coordination.changedRegions > 0) {
     let s = 0, c = 0;
     for (let i = 0; i < cp.n; i++) { if (!cp.printMask[i]) continue; s += C.deltaE2000({ L: cp.lab ? 0 : 0, a: 0, b: 0 }, cp.predicted[i].lab) , c++; }

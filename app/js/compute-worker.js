@@ -8,19 +8,31 @@
    cached worker/importScripts and the GPU path never activates. */
 const __vq = (self.location && self.location.search || '').match(/[?&]v=([^&]+)/);
 const __q = __vq ? '?v=' + __vq[1] : '';
-importScripts('color.js' + __q, 'data-filaments.js' + __q, 'data-lut.js' + __q, 'earcut.js' + __q, 'optics.js' + __q, 'height-curve.js' + __q, 'gamut-gpu.js' + __q, 'calibration-data.js' + __q, 'layer-optimizer.js' + __q, 'engine.js' + __q);
+importScripts('color.js' + __q, 'data-filaments.js' + __q, 'data-lut.js' + __q, 'earcut.js' + __q, 'optics.js' + __q, 'height-curve.js' + __q, 'gamut-gpu.js' + __q, 'calibration-data.js' + __q, 'layer-optimizer.js' + __q, 'engine.js' + __q, 'parallel.js' + __q);
 
 self.onmessage = async function (e) {
   const msg = e.data || {};
+  let pool = null;
   try {
     const image = {
       width: msg.width,
       height: msg.height,
       data: new Uint8ClampedArray(msg.data)
     };
-    const plan = await CS.engine.buildPlanAsync(image, msg.options);
+    // GPU7: spawn a nested plan-worker pool for the per-pixel/row-band phases on
+    // large images (small images keep the sync path to avoid worker overhead).
+    const n = msg.width * msg.height;
+    const cores = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4;
+    if (n > 200000 && cores > 2 && CS.parallel) {
+      const size = Math.min(8, Math.max(2, cores - 1));
+      pool = CS.parallel.makePool((f) => f + __q, size);
+    }
+    const options = pool ? Object.assign({}, msg.options, { pool }) : msg.options;
+    const plan = await CS.engine.buildPlanAsync(image, options);
+    if (pool) pool.destroy();
     self.postMessage({ id: msg.id, ok: true, plan });
   } catch (err) {
+    if (pool) { try { pool.destroy(); } catch (_) {} }
     self.postMessage({ id: msg.id, ok: false, error: String(err && err.message || err) });
   }
 };

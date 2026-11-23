@@ -30,7 +30,7 @@ function img(w, h) {
   return { width: w, height: h, data };
 }
 const base = { engine: 'td', palette, widthMm: 40, flatTopMm: 1.6, reliefMm: 0.16, layerHeight: 0.08, gradLayers: 5, foundationIndex: 1, stdThreshold: 0, residualThreshold: 5, minFlatPercent: 0.1, smoothMm: 0, lineWidthMm: 0.42, mergeDeltaE: 0, heightMergeDeltaE: 1.5, edgeClean: 0, vectorFlat: false, lineProtect: 'off', families: 24, backgroundMode: 'off' };
-const plan = E.buildPlan(img(100, 70), { ...base, equalHeight: true, layerCoordination: true, qualityPolicy: 'continuity' });
+const plan = await E.buildPlan(img(100, 70), { ...base, equalHeight: true, layerCoordination: true, qualityPolicy: 'continuity' });
 const plane = X.samplePlane(plan, plan.w, plan.h);
 // E01: native masks == filamentAt
 for (let z = 0; z < plan.commonTopLayer; z++) {

@@ -31,7 +31,7 @@ for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
   const t = x / (w - 1);
   data.set([Math.round(255 - 60 * t), Math.round(255 - 220 * t), Math.round(255 - 220 * t), 255], (y * w + x) * 4);
 }
-const plan = E.buildPlan({ width: w, height: h, data }, {
+const plan = await E.buildPlan({ width: w, height: h, data }, {
   engine: 'td', palette, widthMm: 60, flatTopMm: 1.6, reliefMm: 0.16,
   variableHeight: true, layerHeight: 0.08, gradLayers: 6, foundationIndex: 1,
   stdThreshold: 0, residualThreshold: 5, minFlatPercent: 0.6,

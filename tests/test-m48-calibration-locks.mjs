@@ -22,8 +22,8 @@ const palette = E.buildUserPalette([{ id: 'k', name: 'Black', hex: '#000000', td
 function img(w, h) { const d = new Uint8ClampedArray(w * h * 4); for (let i = 0; i < w * h; i++) d.set([255, 255, 255, 255], i * 4); for (let y = 8; y < 22; y++) for (let x = 8; x < 30; x++) d.set([192, 13, 30, 255], (y * w + x) * 4); return { width: w, height: h, data: d }; }
 const baseOpts = { engine: 'td', palette, widthMm: 40, flatTopMm: 1.6, layerHeight: 0.08, gradLayers: 5, foundationIndex: 1, stdThreshold: 0, residualThreshold: 5, minFlatPercent: 0.1, smoothMm: 0, lineWidthMm: 0.42, mergeDeltaE: 0, heightMergeDeltaE: 1.5, edgeClean: 0, vectorFlat: false, lineProtect: 'off', families: 16, backgroundMode: 'off' };
 
-function seedLocks() {
-  const plan = E.buildPlan(img(40, 30), baseOpts);
+async function seedLocks() {
+  const plan = await E.buildPlan(img(40, 30), baseOpts);
   dbg.state.plan = plan;
   dbg.state.tdPalette = palette;
   const n = plan.n;
@@ -43,7 +43,7 @@ function locksIntact(n) {
 
 // resetSettings must preserve manual locks + undo.
 {
-  const n = seedLocks();
+  const n = await seedLocks();
   dbg.resetSettings();
   locksIntact(n);
   assert.equal(dbg.state.plan, null, 'reset still invalidates the stale plan');
@@ -51,7 +51,7 @@ function locksIntact(n) {
 
 // publishComboModel must preserve manual locks + undo (publishable clean fit).
 {
-  const n = seedLocks();
+  const n = await seedLocks();
   const pal3 = [{ id: 'k', name: 'K', hex: '#000000' }, { id: 'w', name: 'W', hex: '#ffffff' }, { id: 'r', name: 'R', hex: '#c00d1e' }];
   const KNOWN = { k: { logHd: [Math.log(0.04), Math.log(0.04), Math.log(0.04)], opaque: [0.02, 0.02, 0.02] }, w: { logHd: [Math.log(1.1), Math.log(0.75), Math.log(0.77)], opaque: [0.95, 0.97, 0.96] }, r: { logHd: [Math.log(1.2), Math.log(0.10), Math.log(0.06)], opaque: [0.70, 0.05, 0.02] } };
   const km = J.modelFromTheta(KNOWN, 0.08);

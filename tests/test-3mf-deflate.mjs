@@ -18,7 +18,7 @@ for(let y=0;y<h;y++)for(let x=0;x<w;x++){
   if(y>50){r=0;g=0;b=0;}
   data[p]=r;data[p+1]=g;data[p+2]=b;data[p+3]=255;
 }
-const plan=engine.buildPlan({width:w,height:h,data},{engine:'td',palette:[
+const plan=await engine.buildPlan({width:w,height:h,data},{engine:'td',palette:[
  {name:'Black',hex:'#000000',td:0.6},{name:'Jade White',hex:'#ffffff',td:5},{name:'Red',hex:'#c00d1e',td:5},{name:'Yellow',hex:'#fce300',td:6},{name:'Blue',hex:'#00358e',td:4}
 ],foundationIndex:1,widthMm:60,flatTopMm:1.6,reliefMm:0.16,gradLayers:6,families:32,layerHeight:0.08,smoothLevel:2,mergeDeltaE:4,lineProtect:'auto'});
 const store=exporter.build3MFBytes(plan,{exportMax:96});

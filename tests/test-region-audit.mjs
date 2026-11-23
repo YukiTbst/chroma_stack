@@ -36,7 +36,7 @@ function put(data, x, y, rgb) { data.set([...rgb, 255], (y * w + x) * 4); }
 const dots = white();
 put(dots, 20, 20, [211, 58, 74]);
 put(dots, 70, 70, [211, 58, 74]);
-const dotPlan = E.buildPlan({ width: w, height: h, data: dots }, base);
+const dotPlan = await E.buildPlan({ width: w, height: h, data: dots }, base);
 let regions = new Set();
 for (let i = 0; i < w * h; i++) if (dotPlan.regionId[i] >= 0) regions.add(dotPlan.regionId[i]);
 console.log('regions', dotPlan.regionCount, 'set', regions.size, 'audit', dotPlan.diagnostics.printAudit);
@@ -47,7 +47,7 @@ assert.equal(dotPlan.regionId[50 * w + 50], -1, 'flat background has no gradient
 /* A solid patch produces no sub-minimum islands. */
 const block = white();
 for (let y = 30; y < 70; y++) for (let x = 30; x < 70; x++) put(block, x, y, [192, 13, 30]);
-const blockPlan = E.buildPlan({ width: w, height: h, data: block }, { ...base, residualThreshold: 5 });
+const blockPlan = await E.buildPlan({ width: w, height: h, data: block }, { ...base, residualThreshold: 5 });
 console.log('solid audit', blockPlan.diagnostics.printAudit);
 assert.equal(blockPlan.diagnostics.printAudit.belowMinIslands, 0, 'a solid patch has no tiny per-layer islands');
 

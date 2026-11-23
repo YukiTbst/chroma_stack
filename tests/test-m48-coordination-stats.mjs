@@ -15,7 +15,7 @@ const w = 80, h = 60, d = new Uint8ClampedArray(w * h * 4);
 for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const k = Math.floor(x / (w - 1) * 4) + Math.floor(y / (h - 1) * 4) * 4; const c = cols[k % 16]; d.set([c[0], c[1], c[2], 255], (y * w + x) * 4); }
 const img = { width: w, height: h, data: d };
 const base = { engine: 'td', palette: pal8, widthMm: 40, flatTopMm: 1.6, reliefMm: 0.16, layerHeight: 0.08, gradLayers: 20, foundationIndex: 1, stdThreshold: 0, residualThreshold: 5, minFlatPercent: 0.1, smoothMm: 0, lineWidthMm: 0.42, mergeDeltaE: 0, heightMergeDeltaE: 1.5, edgeClean: 0, vectorFlat: false, lineProtect: 'off', families: 24, backgroundMode: 'off' };
-const p = E.buildPlan(img, { ...base, equalHeight: true, layerCoordination: true, qualityPolicy: 'continuity' });
+const p = await E.buildPlan(img, { ...base, equalHeight: true, layerCoordination: true, qualityPolicy: 'continuity' });
 assert.ok(p.coordination && p.coordination.changedRegions > 0, 'fixture coordinates regions');
 
 // Recompute the truth from the FINAL predicted colours.

@@ -33,7 +33,7 @@ const base = {
   smoothMm: 0, lineWidthMm: 0.42, mergeDeltaE: 0, heightMergeDeltaE: 1.5, edgeClean: 0,
   vectorFlat: false, lineProtect: 'strong', families: 24, backgroundMode: 'off'
 };
-const plan = E.buildPlan(mixed(160, 120), { ...base, equalHeight: true });
+const plan = await E.buildPlan(mixed(160, 120), { ...base, equalHeight: true });
 assert.equal(plan.equalHeight, true);
 const top = plan.commonTopLayer;
 assert.ok(top > 0, 'common top defined');

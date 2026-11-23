@@ -75,9 +75,9 @@ function checkLineMaterial(plan, img, label) {
 }
 
 let runs = 0;
-function run(img, opts, label) {
+async function run(img, opts, label) {
   const t0 = Date.now();
-  const plan = E.buildPlan(img, { ...base, ...opts });
+  const plan = await E.buildPlan(img, { ...base, ...opts });
   runs++;
   console.log(`${label}: ok in ${Date.now() - t0}ms, maxLayers=${plan.maxLayers}, manualPixels=${plan.diagnostics.manualPixels}`);
   return plan;
@@ -87,7 +87,7 @@ function run(img, opts, label) {
 const red640 = solid(640, 480);
 for (const lineProtect of ['strong', 'off']) {
   for (const smoothMm of [0.8, 0]) {
-    const plan = run(red640, { lineProtect, smoothMm, maskOverride: flatOverride(640, 480) },
+    const plan = await run(red640, { lineProtect, smoothMm, maskOverride: flatOverride(640, 480) },
       `all-flat red 640 ${lineProtect} smooth=${smoothMm}`);
     checkLineMaterial(plan, red640, 'red640');
     for (let i = 0; i < 640 * 480; i++) assert.equal(plan.flatMask[i], 1, 'red640 stays all flat');
@@ -101,7 +101,7 @@ const lineIdx = Math.round((art640.line.y0 + art640.line.y1) / 2) * 640 + art640
 for (const lineProtect of ['strong', 'off']) {
   for (const smoothMm of [0.8, 0]) {
     const label = `all-flat art640 ${lineProtect} smooth=${smoothMm}`;
-    const plan = run(art640, { lineProtect, smoothMm, maskOverride: flatOverride(640, 480) }, label);
+    const plan = await run(art640, { lineProtect, smoothMm, maskOverride: flatOverride(640, 480) }, label);
     const direct = checkLineMaterial(plan, art640, label);
     if (lineProtect === 'strong') {
       // The long stroke survives cleanup and keeps its protected material.
@@ -129,7 +129,7 @@ for (const lineProtect of ['strong', 'off']) {
   const manualMask = new Uint8Array(640 * 480);
   manualMask[dotIdx] = 1; // paint the dot flat: it must survive cleanup
   const label = 'all-flat art640 strong smooth=0.8 manual-lock';
-  const plan = run(art640, { lineProtect: 'strong', smoothMm: 0.8, maskOverride: flatOverride(640, 480), manualMask }, label);
+  const plan = await run(art640, { lineProtect: 'strong', smoothMm: 0.8, maskOverride: flatOverride(640, 480), manualMask }, label);
   checkLineMaterial(plan, art640, label);
   assert.equal(plan.diagnostics.manualPixels, 1, label + ': one painted pixel');
   assert.equal(plan.flatMask[dotIdx], 1, label + ': locked dot stays flat');
@@ -140,7 +140,7 @@ for (const lineProtect of ['strong', 'off']) {
 /* ---- 4. larger working resolutions with the crashing combination ---- */
 for (const [w, h] of [[1280, 960], [2560, 1920]]) {
   const img = solid(w, h);
-  const plan = run(img, { lineProtect: 'strong', smoothMm: 0.8, maskOverride: flatOverride(w, h) },
+  const plan = await run(img, { lineProtect: 'strong', smoothMm: 0.8, maskOverride: flatOverride(w, h) },
     `all-flat red ${w} strong smooth=0.8`);
   checkLineMaterial(plan, img, `red${w}`);
 }
@@ -151,7 +151,7 @@ const patchIdx = Math.round((mix640.patch.y0 + mix640.patch.y1) / 2) * 640 + Mat
 for (const lineProtect of ['strong', 'off']) {
   for (const smoothMm of [0.8, 0]) {
     const label = `mixed640 ${lineProtect} smooth=${smoothMm}`;
-    const plan = run(mix640, { lineProtect, smoothMm }, label);
+    const plan = await run(mix640, { lineProtect, smoothMm }, label);
     checkLineMaterial(plan, mix640, label);
     assert.equal(plan.flatMask[patchIdx], 0, label + ': gradient patch stays gradient');
     if (lineProtect === 'strong') {
@@ -164,7 +164,7 @@ for (const lineProtect of ['strong', 'off']) {
   const manualMask = new Uint8Array(640 * 480);
   manualMask[patchIdx] = 1; // paint one gradient pixel flat
   const label = 'mixed640 strong smooth=0.8 manual-lock';
-  const plan = run(mix640, { lineProtect: 'strong', smoothMm: 0.8, manualMask }, label);
+  const plan = await run(mix640, { lineProtect: 'strong', smoothMm: 0.8, manualMask }, label);
   checkLineMaterial(plan, mix640, label);
   assert.equal(plan.diagnostics.manualPixels, 1, label + ': one painted pixel');
   assert.equal(plan.flatMask[patchIdx], 1, label + ': painted gradient pixel becomes flat');

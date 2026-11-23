@@ -16,7 +16,7 @@ const w = 40, h = 30, d = new Uint8ClampedArray(w * h * 4);
 for (let i = 0; i < w * h; i++) d.set([255, 255, 255, 255], i * 4);
 for (let y = 5; y < 25; y++) d.set([0, 0, 0, 255], (y * w + 20) * 4);
 const pal = E.buildUserPalette([{ id: 'k', name: 'Black', hex: '#000000', td: 0.6 }, { id: 'w', name: 'White', hex: '#ffffff', td: 5 }, { id: 'r', name: 'Red', hex: '#c00d1e', td: 5 }]);
-const p = E.buildPlan({ width: w, height: h, data: d }, { engine: 'td', palette: pal, widthMm: 40, flatTopMm: 0.8, reliefMm: 0.8, layerHeight: 0.08, gradLayers: 4, foundationIndex: 1, stdThreshold: 0, residualThreshold: 5, minFlatPercent: 0.1, smoothMm: 0, lineWidthMm: 0.42, mergeDeltaE: 0, heightMergeDeltaE: 1.5, edgeClean: 0, vectorFlat: false, lineProtect: 'off', families: 16, backgroundMode: 'off', luminanceHeight: true, luminanceCurve: HC.invertCurve() });
+const p = await E.buildPlan({ width: w, height: h, data: d }, { engine: 'td', palette: pal, widthMm: 40, flatTopMm: 0.8, reliefMm: 0.8, layerHeight: 0.08, gradLayers: 4, foundationIndex: 1, stdThreshold: 0, residualThreshold: 5, minFlatPercent: 0.1, smoothMm: 0, lineWidthMm: 0.42, mergeDeltaE: 0, heightMergeDeltaE: 1.5, edgeClean: 0, vectorFlat: false, lineProtect: 'off', families: 16, backgroundMode: 'off', luminanceHeight: true, luminanceCurve: HC.invertCurve() });
 
 // Native export (height field preserved).
 const grid = X.exportGridFor(p);

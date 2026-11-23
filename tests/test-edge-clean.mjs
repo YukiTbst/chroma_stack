@@ -44,8 +44,8 @@ const check = (ok, msg) => {
   else console.log('ok  ', msg);
 };
 
-const off = engine.buildPlan(image, { ...base, edgeClean: 0 });
-const on = engine.buildPlan(image, { ...base, edgeClean: 2 });
+const off = await engine.buildPlan(image, { ...base, edgeClean: 0 });
+const on = await engine.buildPlan(image, { ...base, edgeClean: 2 });
 console.log('off', { dE: +off.stats.meanDE.toFixed(2), families: off.stats.familyCount });
 console.log('on ', { dE: +on.stats.meanDE.toFixed(2), families: on.stats.familyCount, edge: +on.edgePixelPercent.toFixed(1), clean: on.edgeClean });
 check(off.edgeClean === 0, 'edge cleanup can be switched off');
@@ -55,7 +55,7 @@ check(on.stats.meanDE <= off.stats.meanDE + 2.5, 'edge cleanup does not destroy 
 check(on.predicted && on.familyId.length === w * h, 'edge cleanup produces a valid plan');
 check(off.stats.supportAddedPixels === 0 && on.stats.supportAddedPixels === 0, 'support audit finds no floating islands above layer 0');
 
-const vector = engine.buildPlan(image, { ...base, edgeClean: 0, vectorFlat: true });
+const vector = await engine.buildPlan(image, { ...base, edgeClean: 0, vectorFlat: true });
 console.log('vec', { dE: +vector.stats.meanDE.toFixed(2), flat: +vector.stats.flatPercent.toFixed(1), families: vector.vectorFlatFamilies, pixels: vector.vectorFlatPixels });
 check(vector.vectorFlatFamilies > 0 && vector.vectorFlatPixels > 0, 'vector direct-colour mode converts at least one family');
 check(vector.stats.flatPercent >= off.stats.flatPercent, 'vector mode does not reduce direct-colour area');

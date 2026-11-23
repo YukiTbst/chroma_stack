@@ -112,8 +112,8 @@ const base = {
   lineWidthMm: 0.42, mergeDeltaE: 0, heightMergeDeltaE: 0, edgeClean: 0,
   vectorFlat: false, lineProtect: 'off'
 };
-const off = engine.buildPlan(image, { ...base, backgroundMode: 'off' });
-const plan = engine.buildPlan(image, { ...base, backgroundMode: 'auto', backgroundTolerance: 8 });
+const off = await engine.buildPlan(image, { ...base, backgroundMode: 'off' });
+const plan = await engine.buildPlan(image, { ...base, backgroundMode: 'auto', backgroundTolerance: 8 });
 assert.ok(off.printMask.every(v => v === 1), 'disabled background removal keeps the full rectangle');
 assert.ok(plan.background.enabled && plan.stats.printPixels < n, 'plan exposes its printable silhouette');
 assert.equal(plan.stats.flatPixels + plan.stats.gradPixels + plan.stats.supportPixels, plan.stats.printPixels, 'material statistics cover direct, gradient and support pixels exactly once');
@@ -190,7 +190,7 @@ for (let y = 16; y < 48; y++) for (let x = 16; x < 48; x++) {
 const bridgeImage = { width: w, height: h, data: bridgeData };
 const bridgeSource = engine.buildPrintMask(engine.imageToLab(bridgeImage).lab, w, h,
   { backgroundMode: 'auto', backgroundTolerance: 8, backgroundEnvelope: true, backgroundEnvelopeMm: 2, widthMm: 64, lineWidthMm: 0.42 });
-const bridgePlan = engine.buildPlan(bridgeImage, { ...base, residualThreshold: 0.5, backgroundMode: 'auto', backgroundTolerance: 8, backgroundEnvelope: true, backgroundEnvelopeMm: 2 });
+const bridgePlan = await engine.buildPlan(bridgeImage, { ...base, residualThreshold: 0.5, backgroundMode: 'auto', backgroundTolerance: 8, backgroundEnvelope: true, backgroundEnvelopeMm: 2 });
 let added = 0, directWhiteAdded = 0, tallSupportAdded = 0;
 for (let i = 0; i < n; i++) {
   if (bridgePlan.printMask[i] && !bridgeSource.sourcePrintMask[i]) {

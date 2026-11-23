@@ -28,7 +28,7 @@ const palette = [
   pal('Black', '#2a2829', 0.5), pal('Jade White', '#ffffff', 8),
   pal('Red', '#ef342f', 1.5), pal('Yellow', '#fce300', 6), pal('Blue', '#003eba', 1.8)
 ];
-const plan = E.buildPlan({ width: w, height: h, data }, {
+const plan = await E.buildPlan({ width: w, height: h, data }, {
   engine: 'td', palette, widthMm: 60, flatTopMm: 1.0, reliefMm: 0.16,
   layerHeight: 0.08, variableHeight: true, families: 24, stdThreshold: 0,
   residualThreshold: 100, minFlatPercent: 0.1, smoothMm: 0.0, lineWidthMm: 0.42,

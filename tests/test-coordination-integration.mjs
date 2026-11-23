@@ -37,14 +37,14 @@ const base = {
 const image = img(150, 110);
 const locked = new Uint8Array(image.width * image.height); locked[50 * image.width + 40] = 1;
 
-const plain = E.buildPlan(image, { ...base, equalHeight: true });
-const coord = E.buildPlan(image, { ...base, equalHeight: true, layerCoordination: true, qualityPolicy: 'continuity', manualMask: locked });
+const plain = await E.buildPlan(image, { ...base, equalHeight: true });
+const coord = await E.buildPlan(image, { ...base, equalHeight: true, layerCoordination: true, qualityPolicy: 'continuity', manualMask: locked });
 assert.ok(coord.coordination, 'coordination audit present');
 assert.ok(coord.coordination.boundaryAfter <= coord.coordination.boundaryBefore + 1e-9, 'boundary must not increase');
 assert.equal(plain.coordination, null, 'no coordination without the policy');
 assert.equal(plain.regionRecipes, null);
 // relief default untouched
-const relief = E.buildPlan(image, base);
+const relief = await E.buildPlan(image, base);
 assert.equal(relief.equalHeight, false);
 assert.equal(relief.coordination, null);
 // locked pixel keeps its material vs the non-coordinated equal-height plan

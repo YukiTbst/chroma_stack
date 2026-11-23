@@ -93,7 +93,7 @@ function auditPlan(plan, image, opts, label) {
 /* 1. variable-height grayscale gradient (review's independent sample shape) */
 {
   const image = grayGradient(160, 120, 60, 130);
-  const plan = E.buildPlan(image, base);
+  const plan = await E.buildPlan(image, base);
   const r = auditPlan(plan, image, base, 'vh-gradient');
   check('vh-gradient sample exercises the member gap', r.demanded > 0, `demanded=${r.demanded}`);
   if (r.ex575757 && r.ex575757.locked) {
@@ -105,7 +105,7 @@ function auditPlan(plan, image, opts, label) {
 {
   const image = grayGradient(160, 120, 60, 130);
   const opts = { ...base, variableHeight: false };
-  const plan = E.buildPlan(image, opts);
+  const plan = await E.buildPlan(image, opts);
   auditPlan(plan, image, opts, 'equal-height');
 }
 
@@ -116,7 +116,7 @@ function auditPlan(plan, image, opts, label) {
   const image = grayGradient(w, h, 60, 130);
   for (let y = 0; y < h; y++) for (let x = 110; x < w; x++) image.data.set([200, 30, 30, 255], (y * w + x) * 4);
   const opts = { ...base, smoothMm: 0.8, smoothLevel: 2, edgeClean: 2 };
-  const plan = E.buildPlan(image, opts);
+  const plan = await E.buildPlan(image, opts);
   auditPlan(plan, image, opts, 'smooth+edge');
 }
 

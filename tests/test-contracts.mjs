@@ -36,7 +36,7 @@ function chart(w, h) {
   }
   return { width: w, height: h, data };
 }
-const plan = E.buildPlan(chart(160, 100), base);
+const plan = await E.buildPlan(chart(160, 100), base);
 
 /* T07: heights and colours derive from the same recipe. */
 let maxLen = 0;
@@ -78,7 +78,7 @@ for (let y = 20; y < 100; y++) {
   for (let x = 40; x < 100; x++) edge.set([8, 8, 10, 255], (y * w2 + x) * 4);
   edge.set([128, 128, 128, 255], (y * w2 + 100) * 4);
 }
-const edgePlan = E.buildPlan({ width: w2, height: h2, data: edge }, { ...base, widthMm: 60, lineProtect: 'auto' });
+const edgePlan = await E.buildPlan({ width: w2, height: h2, data: edge }, { ...base, widthMm: 60, lineProtect: 'auto' });
 for (const f of edgePlan.families) {
   if (!f.pixelCount || Math.hypot(f.targetLab.a, f.targetLab.b) >= 8) continue;
   const chromatic = f.recipe.filter(i => Math.hypot(edgePlan.palette[i].lab.a, edgePlan.palette[i].lab.b) >= 8).length;
@@ -99,7 +99,7 @@ function detailChart(w) {
 const target = C.hexToLab('#c82838');
 for (const w of [480, 960]) {
   const img = detailChart(w);
-  const p = E.buildPlan({ width: img.width, height: img.height, data: img.data }, { ...base, minFlatPercent: 0.02 });
+  const p = await E.buildPlan({ width: img.width, height: img.height, data: img.data }, { ...base, minFlatPercent: 0.02 });
   const i = img.cy * p.w + img.cx;
   const de = C.deltaE2000(target, p.predicted[i].lab);
   console.log('resolution', w, 'pixel', p.pixelSize.toFixed(3), 'flat', p.flatMask[i], 'ΔE', de.toFixed(2));
@@ -109,8 +109,8 @@ for (const w of [480, 960]) {
 
 /* T15: identical input produces identical plans. */
 const img = chart(120, 80);
-const p1 = E.buildPlan(img, base);
-const p2 = E.buildPlan(img, base);
+const p1 = await E.buildPlan(img, base);
+const p2 = await E.buildPlan(img, base);
 assert.equal(p1.families.length, p2.families.length);
 for (let i = 0; i < p1.families.length; i++) {
   assert.deepEqual(p1.families[i].recipe, p2.families[i].recipe, 'recipes are deterministic');

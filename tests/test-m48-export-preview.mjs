@@ -18,7 +18,7 @@ const pal = E.buildUserPalette([{ id: 'k', name: 'Black', hex: '#000000', td: 0.
 const w = 1600, h = 100, d = new Uint8ClampedArray(w * h * 4);
 for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const t = x / (w - 1); d.set([Math.round(40 + 180 * t), Math.round(60 + 80 * t), Math.round(200 - 140 * t), 255], (y * w + x) * 4); }
 const base = { engine: 'td', palette: pal, widthMm: 160, flatTopMm: 1.6, reliefMm: 0.16, layerHeight: 0.08, gradLayers: 6, foundationIndex: 1, stdThreshold: 0, residualThreshold: 5, minFlatPercent: 0.1, smoothMm: 0, lineWidthMm: 0.42, mergeDeltaE: 0, heightMergeDeltaE: 1.5, edgeClean: 0, vectorFlat: false, lineProtect: 'off', families: 16, backgroundMode: 'off' };
-const p = E.buildPlan({ width: w, height: h, data: d }, base);
+const p = await E.buildPlan({ width: w, height: h, data: d }, base);
 const grid = X.exportGridFor(p);
 assert.ok(grid.downscaled, 'organic large plan downscales by default');
 
@@ -52,6 +52,6 @@ const msg = dbg.exportConfirmMessage(p);
 assert.ok(typeof msg === 'string' && msg.includes(String(grid.width)), 'downscaled export offers a confirmation naming the export grid');
 assert.ok(/重新归类|变化|细线|确认/.test(msg), 'confirmation warns about downsample changes');
 // A line-art plan exports native -> no downsample confirmation needed.
-const art = E.buildPlan({ width: 40, height: 30, data: (() => { const a = new Uint8ClampedArray(40 * 30 * 4); for (let i = 0; i < 40 * 30; i++) a.set([255, 255, 255, 255], i * 4); for (let y = 5; y < 25; y++) a.set([0, 0, 0, 255], (y * 40 + 20) * 4); return a; })() }, { ...base, widthMm: 40, lineProtect: 'strong' });
+const art = await E.buildPlan({ width: 40, height: 30, data: (() => { const a = new Uint8ClampedArray(40 * 30 * 4); for (let i = 0; i < 40 * 30; i++) a.set([255, 255, 255, 255], i * 4); for (let y = 5; y < 25; y++) a.set([0, 0, 0, 255], (y * 40 + 20) * 4); return a; })() }, { ...base, widthMm: 40, lineProtect: 'strong' });
 assert.equal(dbg.exportConfirmMessage(art), null, 'native (line-art) export needs no downsample confirmation');
 console.log('F-OUTLINE-02 remainder passed: export preview renders the export grid + pre-export confirmation');

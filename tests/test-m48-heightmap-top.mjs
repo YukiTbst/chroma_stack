@@ -20,7 +20,7 @@ const pal = E.buildUserPalette([{ id: 'k', name: 'Black', hex: '#000000', td: 0.
 
 // Equal-height + envelope: support columns must reach commonTopLayer in the heightmap.
 {
-  const p = E.buildPlan(g2(60, 50), { ...base, palette: pal, equalHeight: true, backgroundMode: 'auto', backgroundColor: '#ffffff', backgroundTolerance: 8, backgroundEnvelope: true });
+  const p = await E.buildPlan(g2(60, 50), { ...base, palette: pal, equalHeight: true, backgroundMode: 'auto', backgroundColor: '#ffffff', backgroundTolerance: 8, backgroundEnvelope: true });
   let found = 0;
   for (let i = 0; i < p.n; i++) {
     if (!p.printMask[i] || p.flatMask[i] || p.familyId[i] >= 0) continue;
@@ -36,7 +36,7 @@ const pal = E.buildUserPalette([{ id: 'k', name: 'Black', hex: '#000000', td: 0.
 {
   const pal8 = E.buildUserPalette([{ id: 'k', name: 'Black', hex: '#000000', td: 0.6 }, { id: 'w', name: 'White', hex: '#ffffff', td: 5 }, { id: 'r', name: 'Red', hex: '#c00d1e', td: 5 }, { id: 'y', name: 'Yellow', hex: '#fce300', td: 6 }, { id: 'u', name: 'Blue', hex: '#00358e', td: 4 }, { id: 'c', name: 'Cyan', hex: '#0086d6', td: 3.5 }, { id: 'm', name: 'Magenta', hex: '#ec008c', td: 4.5 }, { id: 'o', name: 'Orange', hex: '#ff6a13', td: 5 }]);
   const gg = (w, h) => { const d = new Uint8ClampedArray(w * h * 4); for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const t = x / (w - 1); d.set([Math.round(60 + 160 * t), Math.round(40 + 80 * t), Math.round(180 - 120 * t), 255], (y * w + x) * 4); } return { width: w, height: h, data: d }; };
-  const p = E.buildPlan(gg(60, 40), { ...base, palette: pal8, gradLayers: 20, equalHeight: true, layerCoordination: true, qualityPolicy: 'continuity', families: 24 });
+  const p = await E.buildPlan(gg(60, 40), { ...base, palette: pal8, gradLayers: 20, equalHeight: true, layerCoordination: true, qualityPolicy: 'continuity', families: 24 });
   if (p.regionRecipes && p.coordination && p.coordination.changedRegions > 0) {
     let checked = 0;
     for (let i = 0; i < p.n; i++) {

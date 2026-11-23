@@ -20,7 +20,7 @@ for(let y=0;y<h;y++)for(let x=0;x<w;x++){
   data[p]=r;data[p+1]=g;data[p+2]=b;data[p+3]=255;
 }
 const image={width:w,height:h,data};
-const plan=engine.buildPlan(image,{engine:'lut',lutKey:'bambu_8',widthMm:60,flatTopMm:1.6,reliefMm:0.16,families:24});
+const plan=await engine.buildPlan(image,{engine:'lut',lutKey:'bambu_8',widthMm:60,flatTopMm:1.6,reliefMm:0.16,families:24});
 console.log('plan',plan.stats.meanDE, plan.flatLayers, plan.gradStartLayer, plan.gradTopLayer, plan.maxLayers);
 const out=exporter.build3MFBytes(plan,{exportMax:96});
 fs.writeFileSync('tests/sample.3mf',Buffer.from(out.bytes));

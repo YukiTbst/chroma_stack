@@ -1617,31 +1617,41 @@
     return best ? { name: best.name, hex: best.hex, brand: best.brand, material: best.material, deltaE: C.deltaE2000(targetLab, C.hexToLab(best.hex)) } : null;
   }
 
-  function assignFamilies(lab, mask, predictedLabs, w, h, strokeMask) {
-    const n = w * h;
-    const familyId = new Int16Array(n).fill(-1);
-    const counts = new Uint32Array(predictedLabs.length);
-    for (let i = 0; i < n; i++) {
+  /* GPU7: pure per-pixel nearest-family assignment over [i0,i1). pred is a flat
+     Float64Array (F*3). Shared by the sync wrapper and the parallel pool; the
+     strict-< tie-break in ascending f order makes it bit-identical per pixel. */
+  function assignFamiliesRange(lab, mask, pred, F, w, i0, i1, stroke) {
+    const familyId = new Int16Array(i1 - i0).fill(-1);
+    const counts = new Uint32Array(F);
+    for (let i = i0; i < i1; i++) {
       if (mask[i]) continue;
-      const l = labAt(lab, i);
-      const onStroke = !!(strokeMask && strokeMask[i]);
+      const L = lab[i * 3], a = lab[i * 3 + 1], b = lab[i * 3 + 2];
+      const onStroke = !!(stroke && stroke[i]);
       let best = -1, bestD = Infinity;
-      for (let f = 0; f < predictedLabs.length; f++) {
-        const p = predictedLabs[f];
-        const dl = l.L - p.L, da = l.a - p.a, db = l.b - p.b;
+      for (let f = 0; f < F; f++) {
+        const pL = pred[f * 3], pa = pred[f * 3 + 1], pb = pred[f * 3 + 2];
+        const dl = L - pL, da = a - pa, db = b - pb;
         let d = dl * dl + da * da + db * db;
         // A dark stroke may be reproduced by a light recipe only if there is
         // no dark alternative. The quadratic lift makes that very expensive.
         if (onStroke) {
-          const lift = Math.max(0, p.L - l.L - 10);
+          const lift = Math.max(0, pL - L - 10);
           d += 3.0 * lift * lift;
         }
         if (d < bestD) { bestD = d; best = f; }
       }
-      familyId[i] = best;
+      familyId[i - i0] = best;
       if (best >= 0) counts[best]++;
     }
     return { familyId, counts };
+  }
+
+  function assignFamilies(lab, mask, predictedLabs, w, h, strokeMask) {
+    const n = w * h;
+    const F = predictedLabs.length;
+    const pred = new Float64Array(F * 3);
+    for (let f = 0; f < F; f++) { pred[f * 3] = predictedLabs[f].L; pred[f * 3 + 1] = predictedLabs[f].a; pred[f * 3 + 2] = predictedLabs[f].b; }
+    return assignFamiliesRange(lab, mask, pred, F, w, 0, n, strokeMask);
   }
 
   function meanLabForFamilies(lab, mask, familyId, familyCount) {
@@ -2260,53 +2270,114 @@
     return src;
   }
 
-  function smoothFamilyMap(mask, familyId, familyCount, families, w, h, radius, passes, lab, colorTol, protect, neutralGuard) {
-    let src = new Int16Array(familyId);
+  /* GPU7: one synchronous majority-vote pass over rows [y0,y1), reading the src
+     snapshot. Shared by the sync wrapper and the parallel worker pool so the vote
+     (and its strict-> tie-break in ascending y/x order) is bit-identical regardless
+     of which core computes a row. famPredL[f] = families[f].predictedLab.L. */
+  function smoothFamilyMapBand(src, out, mask, protect, lab, familyCount, famPredL, neutralNeed, famNeutral, w, h, radius, y0, y1, colorTol) {
     const counts = new Uint32Array(familyCount);
     const tol2 = colorTol ? colorTol * colorTol : 0;
+    const touched = [];
+    for (let y = y0; y < y1; y++) {
+      const yy0 = Math.max(0, y - radius), yy1 = Math.min(h - 1, y + radius);
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (mask[i] || src[i] < 0) { out[i] = src[i]; continue; }
+        const protectedCenter = !!(protect && protect[i]);
+        const constrainedCenter = !!(neutralNeed && neutralNeed[i]);
+        const x0 = Math.max(0, x - radius), x1 = Math.min(w - 1, x + radius);
+        touched.length = 0;
+        let best = src[i], bestCount = 0;
+        for (let yy = yy0; yy <= yy1; yy++) {
+          for (let xx = x0; xx <= x1; xx++) {
+            const j = yy * w + xx;
+            if (mask[j]) continue;
+            if (protectedCenter && !(protect && protect[j])) continue;
+            if (!protectedCenter && lab && tol2 && j !== i && labDistSq(lab, i, j) > tol2) continue;
+            const f = src[j];
+            if (f < 0) continue;
+            if (constrainedCenter && famNeutral && !famNeutral[f]) continue;
+            if (protectedCenter && lab && famPredL && famPredL[f] > lab[i * 3] + 10) continue;
+            const wgt = (yy === y && xx === x) ? 2 : 1;
+            const c = counts[f];
+            if (c === 0) touched.push(f);
+            counts[f] = c + wgt;
+            if (c + wgt > bestCount) { bestCount = c + wgt; best = f; }
+          }
+        }
+        for (const f of touched) counts[f] = 0;
+        out[i] = bestCount ? best : src[i];
+      }
+    }
+  }
+
+  function smoothFamilyMap(mask, familyId, familyCount, families, w, h, radius, passes, lab, colorTol, protect, neutralGuard) {
+    let src = new Int16Array(familyId);
     const neutralNeed = neutralGuard ? neutralGuard.need : null;
     const famNeutral = neutralGuard ? neutralGuard.famNeutral : null;
-    const touched = [];
+    const famPredL = families.map(f => (f.predictedLab ? f.predictedLab.L : 0));
     for (let pass = 0; pass < passes; pass++) {
       const out = new Int16Array(src);
-      for (let y = 0; y < h; y++) {
-        const y0 = Math.max(0, y - radius), y1 = Math.min(h - 1, y + radius);
-        for (let x = 0; x < w; x++) {
-          const i = y * w + x;
-          if (mask[i] || src[i] < 0) continue;
-          // Protect the stroke's coverage, not every noisy recipe inside it.
-          // A protected pixel votes only with other protected stroke pixels:
-          // the surrounding paper still cannot erase the line, while a long
-          // outline converges to a continuous family instead of dotted stacks.
-          const protectedCenter = !!(protect && protect[i]);
-          const constrainedCenter = !!(neutralNeed && neutralNeed[i]);
-          const x0 = Math.max(0, x - radius), x1 = Math.min(w - 1, x + radius);
-          touched.length = 0;
-          let best = src[i], bestCount = 0;
-          for (let yy = y0; yy <= y1; yy++) {
-            for (let xx = x0; xx <= x1; xx++) {
-              const j = yy * w + xx;
-              if (mask[j]) continue;
-              if (protectedCenter && !(protect && protect[j])) continue;
-              if (!protectedCenter && lab && tol2 && j !== i && labDistSq(lab, i, j) > tol2) continue;
-              const f = src[j];
-              if (f < 0) continue;
-              if (constrainedCenter && famNeutral && !famNeutral[f]) continue;
-              if (protectedCenter && lab && families && families[f] && families[f].predictedLab.L > lab[i * 3] + 10) continue;
-              const wgt = (yy === y && xx === x) ? 2 : 1;
-              const c = counts[f];
-              if (c === 0) touched.push(f);
-              counts[f] = c + wgt;
-              if (c + wgt > bestCount) { bestCount = c + wgt; best = f; }
-            }
-          }
-          for (const f of touched) counts[f] = 0;
-          out[i] = bestCount ? best : src[i];
-        }
-      }
+      smoothFamilyMapBand(src, out, mask, protect, lab, familyCount, famPredL, neutralNeed, famNeutral, w, h, radius, 0, h, colorTol);
       src = out;
     }
     return src;
+  }
+
+  /* GPU7 parallel orchestrators. pool = { size, call(i, msg, transfer)->Promise }.
+     Each phase splits into independent row/pixel bands run on the worker pool with
+     the SAME kernels as the sync path, so the assembled result is bit-identical. */
+  async function smoothFamilyMapParallel(pool, mask, familyId, familyCount, families, w, h, radius, passes, lab, colorTol, protect, neutralGuard) {
+    const neutralNeed = neutralGuard ? neutralGuard.need : null;
+    const famNeutral = neutralGuard ? neutralGuard.famNeutral : null;
+    const famPredL = new Float64Array(families.map(f => (f.predictedLab ? f.predictedLab.L : 0)));
+    const P = pool.size;
+    const useLab = !!(colorTol && lab);
+    await Promise.all(Array.from({ length: P }, (_, i) => pool.call(i, {
+      op: 'init', mask: mask.slice().buffer, protect: protect ? protect.slice().buffer : null,
+      lab: useLab ? lab.slice().buffer : null, neutralNeed: neutralNeed ? neutralNeed.slice().buffer : null,
+      famNeutral: famNeutral ? famNeutral.slice().buffer : null, famPredL: famPredL.slice().buffer,
+      w, h, familyCount, radius, colorTol: colorTol || 0
+    })));
+    let src = new Int16Array(familyId);
+    const rowsPer = Math.ceil(h / P);
+    for (let pass = 0; pass < passes; pass++) {
+      const out = new Int16Array(src);
+      const jobs = [];
+      for (let i = 0; i < P; i++) {
+        const y0 = i * rowsPer, y1 = Math.min(h, (i + 1) * rowsPer);
+        if (y0 >= y1) continue;
+        jobs.push(pool.call(i, { op: 'smooth', src: src.slice().buffer, y0, y1 }).then(d => { out.set(new Int16Array(d.out), d.y0 * w); }));
+      }
+      await Promise.all(jobs);
+      src = out;
+    }
+    return src;
+  }
+
+  async function assignFamiliesParallel(pool, lab, mask, predictedLabs, w, h, strokeMask) {
+    const n = w * h, F = predictedLabs.length;
+    const pred = new Float64Array(F * 3);
+    for (let f = 0; f < F; f++) { pred[f * 3] = predictedLabs[f].L; pred[f * 3 + 1] = predictedLabs[f].a; pred[f * 3 + 2] = predictedLabs[f].b; }
+    const P = pool.size;
+    // Upload the shared lab/mask/stroke once; each assign call then sends only pred + range.
+    await Promise.all(Array.from({ length: P }, (_, i) => pool.call(i, {
+      op: 'setData', lab: lab.slice().buffer, mask: mask.slice().buffer, stroke: strokeMask ? strokeMask.slice().buffer : null, w
+    })));
+    const familyId = new Int16Array(n).fill(-1);
+    const counts = new Uint32Array(F);
+    const per = Math.ceil(n / P);
+    const jobs = [];
+    for (let i = 0; i < P; i++) {
+      const i0 = i * per, i1 = Math.min(n, (i + 1) * per);
+      if (i0 >= i1) continue;
+      jobs.push(pool.call(i, { op: 'assign', pred: pred.slice().buffer, F, i0, i1 }).then(d => {
+        familyId.set(new Int16Array(d.familyId), i0);
+        const c = new Uint32Array(d.counts); for (let f = 0; f < F; f++) counts[f] += c[f];
+      }));
+    }
+    await Promise.all(jobs);
+    return { familyId, counts };
   }
 
   /* Sampled per-layer print audit: how many same-material islands are below a
@@ -2409,9 +2480,12 @@
     return { flatLayers, gradStartLayer, gradTopLayer, flatBaseLayers, flatTopLayers, colorLayers: cl };
   }
 
-  function buildPlan(imageData, options) {
+  async function buildPlan(imageData, options) {
     activeMatchCache = options.matchCache || null;
     const w = imageData.width, h = imageData.height, n = w * h;
+    // GPU7 profiling (gated by options.__profile; no effect on normal plans).
+    const __prof = options.__profile ? { marks: [], last: performance.now() } : null;
+    const __mark = (label) => { if (__prof) { const now = performance.now(); __prof.marks.push([label, Math.round(now - __prof.last)]); __prof.last = now; } };
     const engine = options.engine === 'td' ? 'td' : 'lut';
     const layerHeight = engine === 'lut' ? (options.lutLayerHeight || 0.08) : (Number(options.layerHeight) || 0.08);
     const flatTopMm = Number(options.flatTopMm) || (engine === 'lut' ? 1.6 : 2.0);
@@ -2419,6 +2493,7 @@
     const pixelSize = (Number(options.widthMm) || 150) / w;
     const { lab, alpha } = imageToLab(imageData);
     const { printMask, sourcePrintMask, background, holeMap } = buildPrintMask(lab, w, h, options, pixelSize);
+    __mark('lab+printMask');
 
     let lut = null, palette = null, foundation = null, colorLayers, baseLayers, baseIndex;
     if (engine === 'lut') {
@@ -2483,6 +2558,7 @@
     let flatMask, stds, residual, nearest, stdT, resT;
     const auto = buildFlatMask(lab, w, h, palette, options);
     stds = auto.stds; residual = auto.residual; nearest = auto.nearest; stdT = auto.stdT; resT = auto.resT;
+    __mark('flatMask');
     const flatFillStats = auto.fillStats || { filled: 0, rejected: 0 };
     // With sparse manual locks, always start from this run's automatic
     // segmentation: the override only supplies values at painted pixels, so
@@ -2497,6 +2573,7 @@
     // Detection is cheap and runs every time: the UI can explain why a
     // sticker got line protection and a photo did not.
     const lineInfo = buildStrokeInfo(lab, alpha, w, h, { pixelSize, lineWidthMm: Number(options.lineWidthMm) || 0.42 });
+    __mark('strokeInfo');
     const lineActive = lineMode !== 'off' && (lineMode === 'strong' || lineInfo.active);
     lineInfo.applied = lineActive;
     lineInfo.mode = lineMode;
@@ -2656,6 +2733,7 @@
       const K = clamp(Math.round(Number(options.families) || 96), 2, 256);
       const samples = sampleGradientLab(lab, flatMask, 12000, edgeMask);
       const familyCenters = kmeansLab(samples, Math.min(K, Math.max(2, Math.floor(samples.length / 6))), 1234567, 10);
+      __mark('edge+gamut+sample+kmeans');
 
       const buildFamilies = (centers) => {
         const fams = [];
@@ -2692,20 +2770,26 @@
       };
 
       let built = buildFamilies(familyCenters);
-      let assigned = assignFamilies(lab, flatMask, built.predLabs, w, h, lineProtectMask);
+      let assigned = options.pool
+        ? await assignFamiliesParallel(options.pool, lab, flatMask, built.predLabs, w, h, lineProtectMask)
+        : assignFamilies(lab, flatMask, built.predLabs, w, h, lineProtectMask);
       familyId = assigned.familyId;
       familyPixels = assigned.counts;
+      __mark('buildFamilies1+assign1');
 
       const refinedCenters = meanLabForFamilies(lab, flatMask, familyId, built.fams.length);
       if (refinedCenters.length >= 2) {
         const built2 = buildFamilies(refinedCenters.map(c => ({ L: c.L, a: c.a, b: c.b })));
-        const assigned2 = assignFamilies(lab, flatMask, built2.predLabs, w, h, lineProtectMask);
+        const assigned2 = options.pool
+          ? await assignFamiliesParallel(options.pool, lab, flatMask, built2.predLabs, w, h, lineProtectMask)
+          : assignFamilies(lab, flatMask, built2.predLabs, w, h, lineProtectMask);
         families = built2.fams;
         familyId = assigned2.familyId;
         familyPixels = assigned2.counts;
       } else {
         families = built.fams;
       }
+      __mark('refined+assign2');
       // R3: constrain real source members before any spatial pass can migrate
       // them. Family centers alone miss grey-ramp members that individually
       // satisfy the neutral lock.
@@ -2722,11 +2806,14 @@
         }
         neutralGuard = { need: neutralNeed, famNeutral: Uint8Array.from(families, f => recipeIsNeutral(f.recipe, palette) ? 1 : 0) };
       }
+      __mark('neutralEarly');
       const familySmooth = smoothMm != null
         ? (physSmooth.familyR > 0 ? { r: physSmooth.familyR, passes: physSmooth.passes } : null)
         : familySmoothLevel;
       if (familySmooth) {
-        familyId = smoothFamilyMap(flatMask, familyId, families.length, families, w, h, familySmooth.r, familySmooth.passes,
+        familyId = options.pool
+          ? await smoothFamilyMapParallel(options.pool, flatMask, familyId, families.length, families, w, h, familySmooth.r, familySmooth.passes, lineActive ? lab : null, lineActive ? 11 : 0, lineActive ? lineProtectMask : null, neutralGuard)
+          : smoothFamilyMap(flatMask, familyId, families.length, families, w, h, familySmooth.r, familySmooth.passes,
           lineActive ? lab : null, lineActive ? 11 : 0, lineActive ? lineProtectMask : null, neutralGuard);
         familyPixels = new Uint32Array(families.length);
         for (let i = 0; i < n; i++) if (!flatMask[i] && familyId[i] >= 0) familyPixels[familyId[i]]++;
@@ -2744,6 +2831,7 @@
       if (engine === 'td' && gamut && families.length > 1) {
         refineFamilyRecipes(families, familyId, w, h, gamut, gradStartLayer, layerHeight);
       }
+      __mark('smooth1+lineRepair+snapEdge+refine');
       let vectorConverted = { families: 0, pixels: 0 };
       vectorInfo = vectorConverted;
       if (options.vectorFlat && gradCount > 0) {
@@ -2877,7 +2965,9 @@
       // protected strokes still vote only within the stroke, never with paper.
       if (familySmooth && (edgeMask || options.vectorFlat)) {
         if (neutralGuard) neutralGuard.famNeutral = Uint8Array.from(families, f => recipeIsNeutral(f.recipe, palette) ? 1 : 0);
-        familyId = smoothFamilyMap(flatMask, familyId, families.length, families, w, h, familySmooth.r, familySmooth.passes,
+        familyId = options.pool
+          ? await smoothFamilyMapParallel(options.pool, flatMask, familyId, families.length, families, w, h, familySmooth.r, familySmooth.passes, lineActive ? lab : null, lineActive ? 11 : 0, lineActive ? lineProtectMask : null, neutralGuard)
+          : smoothFamilyMap(flatMask, familyId, families.length, families, w, h, familySmooth.r, familySmooth.passes,
           lineActive ? lab : null, lineActive ? 11 : 0, lineActive ? lineProtectMask : null, neutralGuard);
         familyPixels = new Uint32Array(families.length);
         for (let i = 0; i < n; i++) if (!flatMask[i] && familyId[i] >= 0) familyPixels[familyId[i]]++;
@@ -2931,6 +3021,7 @@
           }
         }
       }
+      __mark('vectorFlat+smooth2+mergeSmall1');
       if (engine === 'td' && gamut && Number(options.mergeDeltaE) > 0) {
         const familyAdj = buildFamilyAdjacency(familyId, w, h, families.length);
         mergeResult = mergeCommonBases(families, gamut, Number(options.mergeDeltaE), colorLayers, familyAdj);
@@ -2940,6 +3031,7 @@
           f.topMm = (gradStartLayer + f.recipe.length) * layerHeight;
         }
       }
+      __mark('mergeBases');
       // User height is an upper bound. A family is never lifted just to touch
       // the requested top: colour, coverage and layer structure stay as chosen
       // by the constrained matcher.
@@ -2957,6 +3049,7 @@
           mergeResult.sharedPixels = shared;
         }
       }
+      __mark('heightMerge');
       // R3 safety net: shared bases, small-region merging, vector conversion and
       // height dedup can still migrate a constrained member onto another recipe.
       // Re-mark against the final families and snap every demanded source pixel
@@ -3076,6 +3169,7 @@
         }
       }
     }
+    __mark('neutralLate+predicted+regionGraph');
     let supportOnlyPixels = 0;
     for (let i = 0; i < n; i++) if (isEnvelopeSupport(i)) supportOnlyPixels++;
 
@@ -3241,6 +3335,7 @@
       }
     }
 
+    __mark('stats+grams+layers+supportAudit');
     const foundationOpacity = stackTransmission(gradStartLayer * layerHeight, foundation.hd);
     let outGamutPixels = 0;
     for (let i = 0; i < n; i++) {
@@ -3529,8 +3624,10 @@
       diagnostics.groups.gradient = groupSummary(groupStats.gradient);
     }
 
+    __mark('coordination+finalStats');
     activeMatchCache = null;
     return {
+      _profile: __prof ? __prof.marks : undefined,
       engine, w, h, n, pixelSize, widthMm: w * pixelSize, heightMm: h * pixelSize,
       layerHeight, flatLayers, flatBaseLayers, gradStartLayer, gradTopLayer, actualGradTopLayer, maxGradLayers: colorLayers, maxLayers, flatTopMm: flatLayers * layerHeight,
       gradTopMm: gradTopLayer * layerHeight, actualGradTopMm: actualGradTopLayer * layerHeight, reliefMm: actualRelief, variableHeight,
@@ -3657,13 +3754,13 @@
       const cells = [...cellMap.values()], exacts = [...exactMap.values()];
       if (cells.length) { const sr = await matcher.scanBestBatch(cells); cells.forEach((c, i) => cache.scan.set(key(c), sr[i])); }
       if (exacts.length) { const er = await matcher.matchBatch(exacts); exacts.forEach((c, i) => cache.match.set(key(c), er[i])); }
-      const plan = buildPlan(imageData, { ...options, matchCache: cache });
+      const plan = await buildPlan(imageData, { ...options, matchCache: cache });
       plan.computeEngine = 'gpu';
       matcher.destroy();
       return plan;
     } catch (e) {
       if (matcher) { try { matcher.destroy(); } catch (_) {} }
-      const plan = buildPlan(imageData, options);
+      const plan = await buildPlan(imageData, options);
       plan.computeEngine = 'cpu';
       return plan;
     }
@@ -3779,6 +3876,7 @@
     autoStdThreshold, nearestLut, kmeansLab, mergeIneffectiveHeights, physicalSmoothParams,
     mergeSmallRegions, buildPrintMask, buildStrokeInfo, buildTdGamut, gamutPenalty, gamutScore, matchGamut, mergeCommonBases, buildFamilyAdjacency, recipeSensitivity,
     scanGamutBest, topGamutEntries, nearestGamutEntries, nearestGamutEntries94,
-    buildFlatMask, sampleGradientLab, buildEdgeMask
+    buildFlatMask, sampleGradientLab, buildEdgeMask,
+    smoothFamilyMap, smoothFamilyMapBand, smoothFamilyMapParallel, assignFamilies, assignFamiliesRange, assignFamiliesParallel
   };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

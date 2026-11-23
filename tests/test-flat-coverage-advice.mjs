@@ -41,8 +41,8 @@ let failures = 0;
 const check = (name, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ' — ' + detail : ''}`); if (!ok) failures++; };
 
 /* ===== 1. the review's 1.6 -> 3.2 combination: geometry coupling ===== */
-const p16 = E.buildPlan(redBlock(), { ...base, flatTopMm: 1.6 });
-const p32 = E.buildPlan(redBlock(), { ...base, flatTopMm: 3.2 });
+const p16 = await E.buildPlan(redBlock(), { ...base, flatTopMm: 1.6 });
+const p32 = await E.buildPlan(redBlock(), { ...base, flatTopMm: 3.2 });
 const de16 = C.deltaE2000(p16.predicted[center].lab, redLab);
 const de32 = C.deltaE2000(p32.predicted[center].lab, redLab);
 console.log('1.6mm:', p16.predicted[center].hex, 'cap', p16.flatLayers - p16.flatBaseLayers, 'base', p16.flatBaseLayers, 'ΔE', de16.toFixed(2));
@@ -66,7 +66,7 @@ check('2 warning does NOT offer raising flatTopMm as an effective tip', !w16.inc
 
 /* ===== 3. an offered operation must actually change the material stack ===== */
 check('3 warning offers increasing gradient layers', w16.includes('增加渐变层数'), 'effective tip present');
-const pMore = E.buildPlan(redBlock(), { ...base, flatTopMm: 1.6, gradLayers: 8 });
+const pMore = await E.buildPlan(redBlock(), { ...base, flatTopMm: 1.6, gradLayers: 8 });
 const capMore = pMore.flatLayers - pMore.flatBaseLayers;
 const deMore = C.deltaE2000(pMore.predicted[center].lab, redLab);
 console.log('gradLayers 8:', pMore.predicted[center].hex, 'cap', capMore, 'ΔE', deMore.toFixed(2));
@@ -77,13 +77,13 @@ check('3 the warned cap thickness matches the real rebuilt stack', !!claimed && 
 
 /* ===== 4. a geometry where raising flatTopMm IS effective must offer it ===== */
 const thinBase = { ...base, reliefMm: 0 };
-const t0 = E.buildPlan(redBlock(), { ...thinBase, flatTopMm: 0.08 });
+const t0 = await E.buildPlan(redBlock(), { ...thinBase, flatTopMm: 0.08 });
 const wt = coverageWarning(t0);
 const cap0 = t0.flatLayers - t0.flatBaseLayers;
 console.log('thin(0.08, relief 0):', t0.predicted[center].hex, 'cap', cap0, 'warning:', wt);
 check('4 thin cap warning present', !!wt);
 check('4 when raising the top really thicken the cap, it is offered', wt.includes('提高纯色区顶高（盖色'), wt);
-const t1 = E.buildPlan(redBlock(), { ...thinBase, flatTopMm: 1.68 });
+const t1 = await E.buildPlan(redBlock(), { ...thinBase, flatTopMm: 1.68 });
 const cap1 = t1.flatLayers - t1.flatBaseLayers;
 check('4 applying that tip thickens the cap', cap1 > cap0, `cap ${cap0} -> ${cap1}`);
 check('4 applying that tip improves colour', C.deltaE2000(t1.predicted[center].lab, redLab) < C.deltaE2000(t0.predicted[center].lab, redLab));

@@ -33,7 +33,7 @@ const libRG = C.srgbToLinear(C.hexToRgb('#c00d1e').g / 255); // library red opaq
       r: { logHd: [Math.log(0.4), Math.log(0.1), Math.log(0.1)], opaque: [0.7, 0.05, 0.05], state: ['estimated', 'bounded', 'unresolved'] }
     }
   };
-  const plan = E.buildPlan(img(80, 60), { ...base, opticalModel: model });
+  const plan = await E.buildPlan(img(80, 60), { ...base, opticalModel: model });
   const pr = plan.palette.find(p => p.id === 'r');
   assert.ok(Math.abs(pr.hdR - 0.4) < 1e-6, 'estimated R channel applied');
   assert.ok(Math.abs(pr.hdG - 0.5) < 1e-6, `bounded G channel must keep library hdG=0.5, got ${pr.hdG}`);
@@ -49,7 +49,7 @@ const libRG = C.srgbToLinear(C.hexToRgb('#c00d1e').g / 255); // library red opaq
 // Legacy state-less model: every channel treated as estimated (backward compatible).
 {
   const model = { params: { r: { logHd: [Math.log(0.4), Math.log(0.1), Math.log(0.1)], opaque: [0.7, 0.05, 0.05] } } };
-  const plan = E.buildPlan(img(80, 60), { ...base, opticalModel: model });
+  const plan = await E.buildPlan(img(80, 60), { ...base, opticalModel: model });
   const pr = plan.palette.find(p => p.id === 'r');
   assert.ok(Math.abs(pr.hdG - 0.1) < 1e-6, 'legacy state-less model applies G channel');
   assert.ok(Math.abs(pr.lin.g - 0.05) < 1e-6, 'legacy state-less model applies G opaque');

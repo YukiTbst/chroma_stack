@@ -120,12 +120,12 @@ function checkConsistent(p, name) {
 }
 
 const art = makeNoisyLineArt(240, 240);
-const raw = engine.buildPlan(art, { ...base, smoothMm: 0, edgeClean: 0, vectorFlat: false });
+const raw = await engine.buildPlan(art, { ...base, smoothMm: 0, edgeClean: 0, vectorFlat: false });
 const variants = {
-  smooth: engine.buildPlan(art, { ...base, smoothMm: 3, edgeClean: 0, vectorFlat: false }),
-  vector: engine.buildPlan(art, { ...base, smoothMm: 0, edgeClean: 0, vectorFlat: true }),
-  edge: engine.buildPlan(art, { ...base, smoothMm: 0, edgeClean: 3, vectorFlat: false }),
-  all: engine.buildPlan(art, { ...base, smoothMm: 3, edgeClean: 3, vectorFlat: true })
+  smooth: await engine.buildPlan(art, { ...base, smoothMm: 3, edgeClean: 0, vectorFlat: false }),
+  vector: await engine.buildPlan(art, { ...base, smoothMm: 0, edgeClean: 0, vectorFlat: true }),
+  edge: await engine.buildPlan(art, { ...base, smoothMm: 0, edgeClean: 3, vectorFlat: false }),
+  all: await engine.buildPlan(art, { ...base, smoothMm: 3, edgeClean: 3, vectorFlat: true })
 };
 const rawStats = componentStats(raw);
 console.log('raw', rawStats);
@@ -150,7 +150,7 @@ for (let t = 0; t < 110; t++) {
 }
 check(lifted === 0, 'physical cleanup does not lift the continuous dark stroke to a light recipe');
 
-const strong = engine.buildPlan(art, { ...base, smoothMm: 3, edgeClean: 3, vectorFlat: true, lineProtect: 'strong' });
+const strong = await engine.buildPlan(art, { ...base, smoothMm: 3, edgeClean: 3, vectorFlat: true, lineProtect: 'strong' });
 let diagonalDark = 0;
 for (let t = 0; t < 110; t++) {
   const i = (210 - t) * art.width + 30 + t;
@@ -169,21 +169,21 @@ const center = (20 * w + 20) * 4;
 flatData[center] = 192; flatData[center + 1] = 13; flatData[center + 2] = 30;
 const flatImage = { width: w, height: h, data: flatData };
 const maskOverride = new Uint8Array(w * h).fill(1);
-const flatClean = engine.buildPlan(flatImage, { ...base, widthMm: 75, maskOverride, smoothMm: 3, edgeClean: 0, vectorFlat: false });
+const flatClean = await engine.buildPlan(flatImage, { ...base, widthMm: 75, maskOverride, smoothMm: 3, edgeClean: 0, vectorFlat: false });
 check(flatClean.flatMask[20 * w + 20] === 1 && flatClean.flatFilament[20 * w + 20] === 1,
   'all-flat mask override still absorbs an isolated red pixel into white');
 
 // Below one pixel of majority radius, smoothing itself must be a true no-op.
-const subpixel = engine.buildPlan(flatImage, { ...base, widthMm: 400, maskOverride, smoothMm: 0.8, edgeClean: 0, vectorFlat: false });
+const subpixel = await engine.buildPlan(flatImage, { ...base, widthMm: 400, maskOverride, smoothMm: 0.8, edgeClean: 0, vectorFlat: false });
 check(subpixel.smoothRadiusPx === 0 && subpixel.structureCleanup.mergedPixels === 0 && subpixel.flatFilament[20 * w + 20] === 2,
   'subpixel smoothing does not secretly run island cleanup');
-const subpixelEdge = engine.buildPlan(art, { ...base, widthMm: 400, smoothMm: 0.8, edgeClean: 1, vectorFlat: false });
+const subpixelEdge = await engine.buildPlan(art, { ...base, widthMm: 400, smoothMm: 0.8, edgeClean: 1, vectorFlat: false });
 check(subpixelEdge.smoothRadiusPx === 0 && subpixelEdge.structureCleanup.edgeOnly,
   'subpixel physical smoothing does not widen edge-only cleanup to the whole image');
 
 const dotData = new Uint8ClampedArray(flatData);
 dotData[center] = dotData[center + 1] = dotData[center + 2] = 0;
-const directDot = engine.buildPlan({ width: w, height: h, data: dotData },
+const directDot = await engine.buildPlan({ width: w, height: h, data: dotData },
   { ...base, widthMm: 75, smoothMm: 3, edgeClean: 0, vectorFlat: false, lineProtect: 'strong' });
 check(directDot.predicted[20 * w + 20].lab.L > 90 && directDot.lineDirectMask && directDot.lineDirectMask[20 * w + 20] === 0,
   'an isolated strong-line dot cleared to white also loses its direct-stroke marker');

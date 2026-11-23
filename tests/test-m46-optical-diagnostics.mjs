@@ -25,14 +25,14 @@ const th = (hd, op, state) => ({ logHd: hd.map(Math.log), opaque: op, state });
 
 // No model => no opticalModel diagnostics (nothing silently claimed).
 {
-  const plan = E.buildPlan(img(80, 60), { ...base });
+  const plan = await E.buildPlan(img(80, 60), { ...base });
   assert.ok(!plan.diagnostics.opticalModel, 'no model => no opticalModel diagnostics');
 }
 
 // Partial coverage: model hits k and r, misses w.
 {
   const model = { params: { k: th([0.05, 0.05, 0.05], [0.02, 0.02, 0.02], ['estimated', 'estimated', 'estimated']), r: th([0.4, 0.1, 0.1], [0.7, 0.05, 0.05], ['estimated', 'estimated', 'estimated']) }, compatibilityDomain: { layerHeightMm: 0.08 } };
-  const plan = E.buildPlan(img(80, 60), { ...base, opticalModel: model });
+  const plan = await E.buildPlan(img(80, 60), { ...base, opticalModel: model });
   const om = plan.diagnostics.opticalModel;
   assert.ok(om && om.applied, 'opticalModel diagnostics present when applied');
   assert.equal(om.source, 'calibrationV2', 'effective source reported');
@@ -44,7 +44,7 @@ const th = (hd, op, state) => ({ logHd: hd.map(Math.log), opaque: op, state });
 // Cross-domain: model fitted at 0.06 but production runs 0.08.
 {
   const model = { params: { k: th([0.05, 0.05, 0.05], [0.02, 0.02, 0.02], ['estimated', 'estimated', 'estimated']) }, compatibilityDomain: { layerHeightMm: 0.06 } };
-  const plan = E.buildPlan(img(80, 60), { ...base, opticalModel: model });
+  const plan = await E.buildPlan(img(80, 60), { ...base, opticalModel: model });
   const om = plan.diagnostics.opticalModel;
   assert.ok(om.crossDomain && Math.abs(om.crossDomain.modelLayerHeightMm - 0.06) < 1e-9 && Math.abs(om.crossDomain.productionLayerHeightMm - 0.08) < 1e-9, 'cross-domain layer heights recorded');
   assert.ok(plan.warnings.some(w => /跨域|层高/.test(w)), 'warns about cross-domain use');
@@ -53,7 +53,7 @@ const th = (hd, op, state) => ({ logHd: hd.map(Math.log), opaque: op, state });
 // Partial channels: bounded/unresolved kept library => reported, not silent.
 {
   const model = { params: { r: th([0.4, 0.1, 0.1], [0.7, 0.05, 0.05], ['estimated', 'bounded', 'unresolved']) }, compatibilityDomain: { layerHeightMm: 0.08 } };
-  const plan = E.buildPlan(img(80, 60), { ...base, opticalModel: model });
+  const plan = await E.buildPlan(img(80, 60), { ...base, opticalModel: model });
   const om = plan.diagnostics.opticalModel;
   const rc = om.covered.find(c => c.id === 'r');
   assert.deepEqual(rc.state, ['estimated', 'bounded', 'unresolved'], 'per-channel state recorded');

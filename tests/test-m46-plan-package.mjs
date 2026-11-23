@@ -17,7 +17,7 @@ const pal8 = E.buildUserPalette([
 ]);
 const g = (w, h) => { const d = new Uint8ClampedArray(w * h * 4); for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const t = x / (w - 1); d.set([Math.round(60 + 160 * t), Math.round(40 + 80 * t), Math.round(180 - 120 * t), 255], (y * w + x) * 4); } return { width: w, height: h, data: d }; };
 const base = { engine: 'td', palette: pal8, widthMm: 40, flatTopMm: 1.6, reliefMm: 0.16, layerHeight: 0.08, gradLayers: 20, foundationIndex: 1, stdThreshold: 0, residualThreshold: 5, minFlatPercent: 0.1, smoothMm: 0, lineWidthMm: 0.42, mergeDeltaE: 0, heightMergeDeltaE: 1.5, edgeClean: 0, vectorFlat: false, lineProtect: 'off', families: 24, backgroundMode: 'off' };
-const plan = E.buildPlan(g(60, 40), { ...base, equalHeight: true, layerCoordination: true, qualityPolicy: 'continuity' });
+const plan = await E.buildPlan(g(60, 40), { ...base, equalHeight: true, layerCoordination: true, qualityPolicy: 'continuity' });
 assert.ok(plan.coordination && plan.coordination.changedRegions > 0, 'fixture actually coordinates regions');
 assert.ok(plan.regionRecipes && plan.regionOf, 'plan carries coordinated region recipes');
 

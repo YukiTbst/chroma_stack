@@ -32,13 +32,13 @@ const base = {
   smoothMm: 0, lineWidthMm: 0.42, smoothLevel: 0, mergeDeltaE: 0,
   heightMergeDeltaE: 1.5, edgeClean: 0, lineProtect: 'off', families: 4, backgroundMode: 'off'
 };
-const off = E.buildPlan({ width: w, height: h, data }, { ...base, vectorFlat: false });
+const off = await E.buildPlan({ width: w, height: h, data }, { ...base, vectorFlat: false });
 const bigIdx = 50 * w + 50, smallIdx = 154 * w + 154;
 assert.equal(off.flatMask[bigIdx], 0, 'large patch starts as gradient');
 assert.equal(off.flatMask[smallIdx], 0, 'small island starts as gradient');
 assert.equal(off.familyId[bigIdx], off.familyId[smallIdx], 'both patches share one colour family');
 
-const on = E.buildPlan({ width: w, height: h, data }, { ...base, vectorFlat: true });
+const on = await E.buildPlan({ width: w, height: h, data }, { ...base, vectorFlat: true });
 console.log('vector', { families: on.vectorFlatFamilies, pixels: on.vectorFlatPixels, components: on.vectorInfo && on.vectorInfo.components });
 assert.equal(on.flatMask[bigIdx], 1, 'large component is converted to direct colour');
 assert.equal(on.flatFilament[bigIdx], 2, 'large component uses the Red filament');

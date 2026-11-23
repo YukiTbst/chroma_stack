@@ -37,7 +37,7 @@ const expected = (layers) => C.rgb01ToLab((() => {
 })());
 
 /* Thin flat top: one red layer above the white foundation. */
-const thin = E.buildPlan(chart(true), { ...base, flatTopMm: 0.08 });
+const thin = await E.buildPlan(chart(true), { ...base, flatTopMm: 0.08 });
 const i = 120 * 240 + 120;
 assert.ok(thin.flatMask[i], 'red patch is flat');
 assert.equal(thin.flatFilament[i], 2, 'flat top filament is Red');
@@ -49,7 +49,7 @@ assert.ok(C.deltaE2000(thin.predicted[i].lab, expected(1)) < 0.01, 'prediction e
 assert.ok(thin.warnings.some(w => w.includes('纯色区顶色只有')), 'thin flat coverage is reported to the user');
 
 /* Normal flat top: six red layers above the base (gradLayers). */
-const normal = E.buildPlan(chart(true), { ...base, flatTopMm: 1.6 });
+const normal = await E.buildPlan(chart(true), { ...base, flatTopMm: 1.6 });
 const normalLayers = normal.flatLayers - normal.flatBaseLayers;
 assert.equal(normalLayers, 6, 'normal flat top keeps six colour layers');
 const normalDE = C.deltaE2000(normal.predicted[i].lab, redLab);
@@ -59,7 +59,7 @@ assert.ok(C.deltaE2000(normal.predicted[i].lab, expected(normalLayers)) < 0.01, 
 assert.equal(normal.flatTopMm, 1.6, 'flat top height is unchanged');
 
 /* The all-flat branch must use the same finite model. */
-const allFlat = E.buildPlan(chart(false), { ...base, flatTopMm: 1.6 });
+const allFlat = await E.buildPlan(chart(false), { ...base, flatTopMm: 1.6 });
 const j = 120 * 240 + 120;
 assert.ok(allFlat.flatMask[j] && allFlat.flatFilament[j] === 2, 'all-flat image is direct Red');
 const allLayerCount = allFlat.flatLayers - allFlat.flatBaseLayers;

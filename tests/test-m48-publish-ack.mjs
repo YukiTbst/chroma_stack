@@ -41,10 +41,10 @@ globalThis.CS.profiles = {
   revision: () => ackRevision,
   cachedData: () => savedSnapshot
 };
-function seed() {
+async function seed() {
   const palette = E.buildUserPalette([{ id: 'k', name: 'Black', hex: '#000000', td: 0.6 }, { id: 'w', name: 'Jade White', hex: '#ffffff', td: 5 }, { id: 'r', name: 'Red', hex: '#c00d1e', td: 5 }]);
   const d = new Uint8ClampedArray(40 * 30 * 4); for (let i = 0; i < 40 * 30; i++) d.set([255, 255, 255, 255], i * 4); for (let y = 8; y < 22; y++) for (let x = 8; x < 30; x++) d.set([192, 13, 30, 255], (y * 40 + x) * 4);
-  dbg.state.plan = E.buildPlan({ width: 40, height: 30, data: d }, { engine: 'td', palette, widthMm: 40, flatTopMm: 1.6, layerHeight: 0.08, gradLayers: 5, foundationIndex: 1, stdThreshold: 0, residualThreshold: 5, minFlatPercent: 0.1, smoothMm: 0, lineWidthMm: 0.42, mergeDeltaE: 0, heightMergeDeltaE: 1.5, edgeClean: 0, vectorFlat: false, lineProtect: 'off', families: 16, backgroundMode: 'off' });
+  dbg.state.plan = await E.buildPlan({ width: 40, height: 30, data: d }, { engine: 'td', palette, widthMm: 40, flatTopMm: 1.6, layerHeight: 0.08, gradLayers: 5, foundationIndex: 1, stdThreshold: 0, residualThreshold: 5, minFlatPercent: 0.1, smoothMm: 0, lineWidthMm: 0.42, mergeDeltaE: 0, heightMergeDeltaE: 1.5, edgeClean: 0, vectorFlat: false, lineProtect: 'off', families: 16, backgroundMode: 'off' });
   dbg.state.tdPalette = palette;
   dbg.state.lockMask = new Uint8Array(dbg.state.plan.n); dbg.state.lockValue = new Uint8Array(dbg.state.plan.n);
   for (let i = 100; i < 160; i++) { dbg.state.lockMask[i] = 1; dbg.state.lockValue[i] = 1; }
@@ -53,7 +53,7 @@ function seed() {
 }
 
 // ACK present -> published.
-ackRevision = 5; seed();
+ackRevision = 5; await seed();
 dbg.state.calibrationV2 = CD.emptyV2();
 await dbg.publishComboModel();
 assert.equal(dbg.state.calibrationV2.activeModelId, modelId, 'published when server ACK present');
@@ -61,7 +61,7 @@ assert.equal(dbg.state.plan, null, 'stale plan invalidated');
 assert.ok(dbg.state.lockMask && dbg.state.lockMask[120] === 1, 'manual locks preserved');
 
 // ACK missing -> roll back, keep old model.
-ackRevision = null; seed();
+ackRevision = null; await seed();
 dbg.state.calibrationV2 = { ...CD.emptyV2(), models: [{ modelId: 'mOld', params: {}, status: 'published' }], activeModelId: 'mOld' };
 await dbg.publishComboModel();
 assert.equal(dbg.state.calibrationV2.activeModelId, 'mOld', 'without server ACK the publish must roll back to the old model');

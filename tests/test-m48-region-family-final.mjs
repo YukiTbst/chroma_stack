@@ -17,7 +17,7 @@ const cols = [[200, 40, 40], [40, 160, 80], [40, 80, 200], [220, 180, 40], [200,
 const w = 80, h = 60, d = new Uint8ClampedArray(w * h * 4);
 for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const k = Math.floor(x / (w - 1) * 4) + Math.floor(y / (h - 1) * 4) * 4; const c = cols[k % 16]; d.set([c[0], c[1], c[2], 255], (y * w + x) * 4); }
 const base = { engine: 'td', palette: pal8, widthMm: 40, flatTopMm: 1.6, reliefMm: 0.16, layerHeight: 0.08, gradLayers: 20, foundationIndex: 1, stdThreshold: 0, residualThreshold: 5, minFlatPercent: 0.1, smoothMm: 0, lineWidthMm: 0.42, mergeDeltaE: 0, heightMergeDeltaE: 1.5, edgeClean: 0, vectorFlat: false, lineProtect: 'off', families: 24, backgroundMode: 'off' };
-const p = E.buildPlan({ width: w, height: h, data: d }, { ...base, equalHeight: true, layerCoordination: true, qualityPolicy: 'continuity' });
+const p = await E.buildPlan({ width: w, height: h, data: d }, { ...base, equalHeight: true, layerCoordination: true, qualityPolicy: 'continuity' });
 assert.ok(p.coordination && p.coordination.changedRegions > 0, 'fixture coordinates regions');
 
 // (1) Region map: a coordinated gradient cell shows the FINAL predicted colour.

@@ -51,10 +51,10 @@ function hatch(period) {
   return { image: { width: w, height: h, data }, grayMask, w, h };
 }
 const grayLab = C.rgb255ToLab({ r: 120, g: 120, b: 126 });
-function auditHatch(period) {
+async function auditHatch(period) {
   const { image, grayMask, w, h } = hatch(period);
-  const control = E.buildPlan(image, { ...base, lineRepair: false });
-  const repaired = E.buildPlan(image, { ...base, lineRepair: true });
+  const control = await E.buildPlan(image, { ...base, lineRepair: false });
+  const repaired = await E.buildPlan(image, { ...base, lineRepair: true });
   let n = 0, cDirect = 0, rDirect = 0, cProtect = 0, rProtect = 0, cSum = 0, rSum = 0;
   for (let i = 0; i < w * h; i++) {
     if (!grayMask[i]) continue;
@@ -73,8 +73,8 @@ function auditHatch(period) {
   check(`hatch${period} repair adds no gray protected pixel`, rProtect <= cProtect, `repaired=${rProtect} control=${cProtect}`);
   check(`hatch${period} repair does not worsen gray ΔE`, rMean <= cMean + 0.5, `repaired=${rMean.toFixed(2)} control=${cMean.toFixed(2)}`);
 }
-auditHatch(8);   // review sample: 1 px black line every 8 px on gray fill
-auditHatch(6);   // denser hatch: stability window touches the lines, so the
+await auditHatch(8);   // review sample: 1 px black line every 8 px on gray fill
+await auditHatch(6);   // denser hatch: stability window touches the lines, so the
                  // direction-continuity gate must do the blocking here
 
 /* ---- positive: a real broken neutral line still bridges (repair path) ----
@@ -89,7 +89,7 @@ auditHatch(6);   // denser hatch: stability window touches the lines, so the
   rect(20, 100, 80, 3, strokeRgb);
   rect(100, 100, 2, 3, gapRgb);
   rect(102, 100, 80, 3, strokeRgb);
-  const plan = E.buildPlan({ width: w, height: h, data }, { ...base, widthMm: 30, families: 48 });
+  const plan = await E.buildPlan({ width: w, height: h, data }, { ...base, widthMm: 30, families: 48 });
   const gapA = 101 * w + 100, gapB = 101 * w + 101, ref = 101 * w + 98;
   const de = C.deltaE2000(plan.predicted[gapA].lab, plan.predicted[ref].lab);
   console.log(`broken neutral line: gap predicted ${plan.predicted[gapA].hex} / ${plan.predicted[gapB].hex}, stroke ${plan.predicted[ref].hex}, ΔE ${de.toFixed(2)}, protect ${plan.lineProtectMask[gapA]}/${plan.lineProtectMask[gapB]}, family ${plan.familyId[gapA]} vs ${plan.familyId[ref]}`);

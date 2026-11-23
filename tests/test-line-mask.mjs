@@ -29,13 +29,13 @@ const base = {
   heightMergeDeltaE: 1.5, edgeClean: 0, vectorFlat: false,
   lineProtect: 'strong', families: 8, backgroundMode: 'off'
 };
-const basePlan = E.buildPlan(img, base);
+const basePlan = await E.buildPlan(img, base);
 const i = 100 * w + 101;
 assert.ok(basePlan.lineDirectMask && basePlan.lineDirectMask[i], 'strong mode direct-prints the line core');
 
 /* A full mask snapshot alone must not switch line protection off. */
 const maskSnapshot = new Uint8Array(basePlan.flatMask);
-const withSnapshot = E.buildPlan(img, { ...base, maskOverride: maskSnapshot });
+const withSnapshot = await E.buildPlan(img, { ...base, maskOverride: maskSnapshot });
 assert.ok(withSnapshot.lineDirectMask && withSnapshot.lineDirectMask[i], 'mask snapshot no longer disables strong lines');
 
 /* Painting one line pixel to gradient only unlocks that pixel. */
@@ -43,7 +43,7 @@ const painted = new Uint8Array(basePlan.flatMask);
 painted[i] = 0;
 const manual = new Uint8Array(w * h);
 manual[i] = 1;
-const withManual = E.buildPlan(img, { ...base, maskOverride: painted, manualMask: manual });
+const withManual = await E.buildPlan(img, { ...base, maskOverride: painted, manualMask: manual });
 assert.equal(withManual.flatMask[i], 0, 'painted pixel is forced gradient');
 assert.ok(!withManual.lineProtectMask[i], 'painted pixel leaves the protected line core');
 assert.ok(!withManual.lineDirectMask || !withManual.lineDirectMask[i], 'painted pixel is not direct-printed');

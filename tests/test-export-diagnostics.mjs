@@ -20,7 +20,7 @@ const rect = (x, y, ww, hh, rgb) => {
 };
 rect(30, 30, 2, 2, [140, 140, 142]);   // real detail: must be rejected by the fill gate
 rect(80, 80, 2, 2, [244, 244, 244]);   // tiny near-white noise: still absorbed
-const plan = E.buildPlan({ width: w, height: h, data }, {
+const plan = await E.buildPlan({ width: w, height: h, data }, {
   engine: 'td', palette: [
     { name: 'Black', hex: '#000000', td: 0.6 },
     { name: 'Jade White', hex: '#ffffff', td: 5 },

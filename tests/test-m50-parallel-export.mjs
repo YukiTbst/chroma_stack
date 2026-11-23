@@ -13,7 +13,7 @@ const pal = E.buildUserPalette([{ id: 'k', name: 'Black', hex: '#000000', td: 0.
 const w = 320, h = 240, d = new Uint8ClampedArray(w * h * 4);
 for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const t = x / (w - 1), s = y / (h - 1); d.set([Math.round(40 + 180 * t + 30 * Math.sin(s * 6)), Math.round(50 + 120 * s + 40 * t), Math.round(200 - 150 * t + 30 * s), 255], (y * w + x) * 4); }
 const base = { engine: 'td', palette: pal, widthMm: 150, flatTopMm: 1.6, reliefMm: 0.16, layerHeight: 0.08, gradLayers: 8, foundationIndex: 1, stdThreshold: 0, residualThreshold: 5, minFlatPercent: 0.1, smoothMm: 0.8, lineWidthMm: 0.42, mergeDeltaE: 0, heightMergeDeltaE: 1.5, edgeClean: 1, lineProtect: 'auto', families: 48, backgroundMode: 'off' };
-const plan = E.buildPlan({ width: w, height: h, data: d }, base);
+const plan = await E.buildPlan({ width: w, height: h, data: d }, base);
 
 // Serial reference.
 const serial = X.build3MFBytes(plan);
