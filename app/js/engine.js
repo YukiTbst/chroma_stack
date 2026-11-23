@@ -1146,6 +1146,14 @@
       value: entries.filter(e => !e.chromaFrac),
       enumerable: false
     });
+    // PERF1: flat Float64 Lab columns (exact precision) for tight typed-array
+    // nearest-neighbour scans instead of per-entry object property lookups.
+    const N = entries.length;
+    const _L = new Float64Array(N), _A = new Float64Array(N), _B = new Float64Array(N);
+    for (let i = 0; i < N; i++) { const l = entries[i].lab; _L[i] = l.L; _A[i] = l.a; _B[i] = l.b; }
+    Object.defineProperty(entries, '_L', { value: _L, enumerable: false });
+    Object.defineProperty(entries, '_A', { value: _A, enumerable: false });
+    Object.defineProperty(entries, '_B', { value: _B, enumerable: false });
     return entries;
   }
 
@@ -1206,36 +1214,47 @@
         }
       }
     };
-    for (const g of gamut) {
-      const d = distOf(g.lab);
-      if (heap.length < keep) push({ g, d });
-      else if (d < heap[0].d) { pop(); push({ g, d }); }
+    const L = gamut._L, A = gamut._A, B = gamut._B;
+    if (L) {
+      for (let i = 0; i < gamut.length; i++) {
+        const d = distOf(L[i], A[i], B[i]);
+        if (heap.length < keep) push({ g: gamut[i], d });
+        else if (d < heap[0].d) { pop(); push({ g: gamut[i], d }); }
+      }
+    } else {
+      for (const g of gamut) {
+        const d = distOf(g.lab.L, g.lab.a, g.lab.b);
+        if (heap.length < keep) push({ g, d });
+        else if (d < heap[0].d) { pop(); push({ g, d }); }
+      }
     }
     return heap.map(n => n.g);
   }
 
-  const labDistOf = targetLab => lab => {
-    const dl = targetLab.L - lab.L, da = targetLab.a - lab.a, db = targetLab.b - lab.b;
+  const labDistOf = (tL, ta, tb) => (L, a, b) => {
+    const dl = tL - L, da = ta - a, db = tb - b;
     return dl * dl + da * da + db * db;
   };
   /* ΔE94 is a cheap surrogate that ranks ΔE2000 optima far better than raw
      Lab distance, especially for saturated/out-of-gamut targets. */
-  const de94Of = targetLab => lab => {
-    const c1 = Math.sqrt(targetLab.a * targetLab.a + targetLab.b * targetLab.b);
-    const c2 = Math.sqrt(lab.a * lab.a + lab.b * lab.b);
-    const dl = targetLab.L - lab.L, dc = c1 - c2;
-    const da = targetLab.a - lab.a, db = targetLab.b - lab.b;
-    const dh2 = Math.max(0, da * da + db * db - dc * dc);
+  const de94Of = (tL, ta, tb) => {
+    const c1 = Math.sqrt(ta * ta + tb * tb);
     const sc = 1 + 0.045 * c1, sh = 1 + 0.015 * c1;
-    const a2 = dc / sc, b2 = Math.sqrt(dh2) / sh;
-    return dl * dl + a2 * a2 + b2 * b2;
+    return (L, a, b) => {
+      const c2 = Math.sqrt(a * a + b * b);
+      const dl = tL - L, dc = c1 - c2;
+      const da = ta - a, db = tb - b;
+      const dh2 = Math.max(0, da * da + db * db - dc * dc);
+      const a2 = dc / sc, b2 = Math.sqrt(dh2) / sh;
+      return dl * dl + a2 * a2 + b2 * b2;
+    };
   };
 
   function nearestGamutEntries(targetLab, gamut, keep) {
-    return topGamutEntries(gamut, keep, labDistOf(targetLab));
+    return topGamutEntries(gamut, keep, labDistOf(targetLab.L, targetLab.a, targetLab.b));
   }
   function nearestGamutEntries94(targetLab, gamut, keep) {
-    return topGamutEntries(gamut, keep, de94Of(targetLab));
+    return topGamutEntries(gamut, keep, de94Of(targetLab.L, targetLab.a, targetLab.b));
   }
 
   function recipeIsNeutral(seq, palette) {
@@ -3674,6 +3693,7 @@
     buildPlan, recommendPalette, buildLutPalette, buildUserPalette,
     imageToLab, filamentAt, compositeLinear, stackTransmission, localStd,
     autoStdThreshold, nearestLut, kmeansLab, mergeIneffectiveHeights, physicalSmoothParams,
-    mergeSmallRegions, buildPrintMask, buildStrokeInfo, buildTdGamut, gamutPenalty, gamutScore, matchGamut, mergeCommonBases, buildFamilyAdjacency, recipeSensitivity
+    mergeSmallRegions, buildPrintMask, buildStrokeInfo, buildTdGamut, gamutPenalty, gamutScore, matchGamut, mergeCommonBases, buildFamilyAdjacency, recipeSensitivity,
+    scanGamutBest, topGamutEntries, nearestGamutEntries, nearestGamutEntries94
   };
 })(typeof globalThis !== 'undefined' ? globalThis : this);
