@@ -1154,6 +1154,13 @@
     Object.defineProperty(entries, '_L', { value: _L, enumerable: false });
     Object.defineProperty(entries, '_A', { value: _A, enumerable: false });
     Object.defineProperty(entries, '_B', { value: _B, enumerable: false });
+    // R1: gamut identity signature. The GPU pre-warm cache is only valid for the
+    // exact gamut it was built from; opticalModel changes palette TD/opaque and a
+    // topOverride changes maxLayers, so a Lab-only key could leak wrong recipes.
+    // Cache lookups prefix this signature so a mismatched gamut always misses.
+    const _sig = palette.map(p => `${p.id}:${p.hdR},${p.hdG},${p.hdB}:${p.lin.r},${p.lin.g},${p.lin.b}`).join('|')
+      + `#${foundation.id}#${layerHeight}#${maxLayers}#${variableHeight ? 1 : 0}#${opts && opts.allowRepeat ? 1 : 0}#${opts && opts.diverse ? 1 : 0}`;
+    Object.defineProperty(entries, '_sig', { value: _sig, enumerable: false });
     return entries;
   }
 
@@ -1393,11 +1400,13 @@
   // matchGamut/scanGamutBest consult it before computing; buildPlanAsync fills it via
   // WebGPU batch matching. Null outside a GPU-accelerated plan => pure-CPU path unchanged.
   let activeMatchCache = null;
-  const labCacheKey = t => t.L.toFixed(4) + '|' + t.a.toFixed(4) + '|' + t.b.toFixed(4);
+  // R1: key includes the gamut identity so a cache built from a different gamut
+  // (opticalModel / topOverride) can never supply a wrong recipe.
+  const labCacheKey = (gamut, t) => (gamut && gamut._sig || '') + '|' + t.L.toFixed(4) + '|' + t.a.toFixed(4) + '|' + t.b.toFixed(4);
 
   function scanGamutBest(targetLab, gamut) {
     if (activeMatchCache && activeMatchCache.scan) {
-      const hit = activeMatchCache.scan.get(labCacheKey(targetLab));
+      const hit = activeMatchCache.scan.get(labCacheKey(gamut, targetLab));
       if (hit !== undefined) return hit;
     }
     if (!gamut || !gamut.length) return null;
@@ -1419,7 +1428,7 @@
 
   function matchGamut(targetLab, gamut) {
     if (activeMatchCache && activeMatchCache.match) {
-      const hit = activeMatchCache.match.get(labCacheKey(targetLab));
+      const hit = activeMatchCache.match.get(labCacheKey(gamut, targetLab));
       if (hit !== undefined) return hit;
     }
     const raw = scanGamutBest(targetLab, gamut);
@@ -3706,6 +3715,14 @@
   async function buildPlanAsync(imageData, options) {
     const engine = options.engine === 'td' ? 'td' : 'lut';
     if (engine !== 'td' || !CS.gamutGpu || (options.palette || []).length === 0) return buildPlan(imageData, options);
+    // R1: the pre-warm gamut is built from the raw palette + requested gradLayers.
+    // opticalModel rewrites palette TD/opaque and a topOverride recomputes colour
+    // layers, so the formal gamut would differ. The gamut-signature cache key already
+    // prevents wrong recipes; skip the pre-warm entirely here to avoid wasted GPU work
+    // (these cases run the exact CPU path).
+    const hasOpticalModel = !!(options.opticalModel && options.opticalModel.params);
+    const hasTopOverride = (Number(options.gradTopMmOverride) || 0) > 0;
+    if (hasOpticalModel || hasTopOverride) return buildPlan(imageData, options);
     let matcher = null;
     try {
       const w = imageData.width, h = imageData.height, n = w * h;
@@ -3734,7 +3751,7 @@
       const K = clamp(Math.round(Number(options.families) || 96), 2, 256);
       const centers = kmeansLab(samples, Math.min(K, Math.max(2, Math.floor(samples.length / 6))), 1234567, 10);
       const cache = { match: new Map(), scan: new Map() };
-      const key = t => t.L.toFixed(4) + '|' + t.a.toFixed(4) + '|' + t.b.toFixed(4);
+      const key = t => gamut._sig + '|' + t.L.toFixed(4) + '|' + t.a.toFixed(4) + '|' + t.b.toFixed(4);
       // family centres -> matchGamut cache
       if (centers.length) {
         const mr = await matcher.matchBatch(centers);
