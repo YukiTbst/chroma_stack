@@ -3777,7 +3777,9 @@
       return plan;
     } catch (e) {
       if (matcher) { try { matcher.destroy(); } catch (_) {} }
-      const plan = await buildPlan(imageData, options);
+      // R3: drop the pool (it may be the failed component) and any stale cache so
+      // the fallback is the exact synchronous CPU path, not a retry on a bad pool.
+      const plan = await buildPlan(imageData, { ...options, pool: null, matchCache: null });
       plan.computeEngine = 'cpu';
       return plan;
     }
