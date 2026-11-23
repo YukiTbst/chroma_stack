@@ -44,10 +44,12 @@ fn deltaE2000(lab1: vec3<f32>, lab2: vec3<f32>) -> f32 {
   }
   let T = 1.0 - 0.17 * cos((hbarp - 30.0) * PI / 180.0) + 0.24 * cos((2.0 * hbarp) * PI / 180.0)
         + 0.32 * cos((3.0 * hbarp + 6.0) * PI / 180.0) - 0.20 * cos((4.0 * hbarp - 63.0) * PI / 180.0);
-  let dTheta = 30.0 * exp(-pow((hbarp - 275.0) / 25.0, 2.0));
+  let dh = (hbarp - 275.0) / 25.0;
+  let dTheta = 30.0 * exp(-(dh * dh));
   let Cbarp7 = pow(Cbarp, 7.0);
   let RC = 2.0 * sqrt(Cbarp7 / (Cbarp7 + 6103515625.0));
-  let SL = 1.0 + (0.015 * pow(Lbarp - 50.0, 2.0)) / sqrt(20.0 + pow(Lbarp - 50.0, 2.0));
+  let dl50 = Lbarp - 50.0; let dl50sq = dl50 * dl50;
+  let SL = 1.0 + (0.015 * dl50sq) / sqrt(20.0 + dl50sq);
   let SC = 1.0 + 0.045 * Cbarp;
   let SH = 1.0 + 0.015 * Cbarp * T;
   let RT = -sin(2.0 * dTheta * PI / 180.0) * RC;
@@ -104,9 +106,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     const gmetaBuf = device.createBuffer({ size: metaData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(gmetaBuf, 0, metaData);
     const module = device.createShaderModule({ code: SCORE_WGSL });
-    const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+    // R2: async pipeline creation surfaces shader compilation errors as a rejection
+    // (caught by buildPlanAsync -> CPU) instead of a silent invalid pipeline.
+    const pipeline = await device.createComputePipelineAsync({ layout: 'auto', compute: { module, entryPoint: 'main' } });
     const paramBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const neutral = gamut.neutral || [];
+    // R2: once the device is lost, every later call must fail fast so the engine
+    // falls back to CPU rather than hanging or returning garbage.
+    let deviceLost = false;
+    if (device.lost && typeof device.lost.then === 'function') {
+      device.lost.then(() => { deviceLost = true; }).catch(() => { deviceLost = true; });
+    }
 
     function bestNeutralFor(t) {
       if (Math.hypot(t.a, t.b) >= 8) return null;
@@ -132,6 +142,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     async function rawBestChunk(targets) {
       const batch = targets.length;
       if (!batch) return [];
+      if (deviceLost) throw new Error('GPU device lost');
+      device.pushErrorScope('validation');
       const tData = new Float32Array(batch * 4);
       for (let b = 0; b < batch; b++) { tData[b * 4] = targets[b].L; tData[b * 4 + 1] = targets[b].a; tData[b * 4 + 2] = targets[b].b; }
       const tBuf = device.createBuffer({ size: tData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
@@ -152,14 +164,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       pass.end();
       enc.copyBufferToBuffer(outBuf, 0, readBuf, 0, outSize);
       device.queue.submit([enc.finish()]);
+      const gpuErr = await device.popErrorScope();
+      if (gpuErr) { tBuf.destroy(); outBuf.destroy(); readBuf.destroy(); throw new Error('GPU validation error: ' + (gpuErr.message || gpuErr)); }
       await readBuf.mapAsync(GPUMapMode.READ);
       const scores = new Float32Array(readBuf.getMappedRange().slice(0));
       readBuf.unmap();
       tBuf.destroy(); outBuf.destroy(); readBuf.destroy();
       const out = [];
       for (let b = 0; b < batch; b++) {
-        let bi = 0, bs = Infinity; const off = b * n;
-        for (let i = 0; i < n; i++) { const s = scores[off + i]; if (s < bs) { bs = s; bi = i; } }
+        let bi = -1, bs = Infinity; const off = b * n;
+        // R2: only finite scores may win. If every score for a target is NaN/Inf
+        // (e.g. a driver/backend mishandles the shader), throw so buildPlanAsync
+        // falls back to CPU instead of silently returning gamut[0].
+        for (let i = 0; i < n; i++) { const s = scores[off + i]; if (Number.isFinite(s) && s < bs) { bs = s; bi = i; } }
+        if (bi < 0) throw new Error('GPU produced no finite score for target ' + b);
         out.push({ index: bi, entry: gamut[bi] });
       }
       return out;
