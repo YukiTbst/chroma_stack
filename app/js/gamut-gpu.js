@@ -101,8 +101,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     const labBuf = device.createBuffer({ size: labData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(labBuf, 0, labData);
-    const metaBuf = device.createBuffer({ size: metaData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    device.queue.writeBuffer(metaBuf, 0, metaData);
+    const gmetaBuf = device.createBuffer({ size: metaData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(gmetaBuf, 0, metaData);
     const module = device.createShaderModule({ code: SCORE_WGSL });
     const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
     const paramBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -116,9 +116,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     function isNeutralEntry(g) { return !(g.chromaFrac > 0); }
 
-    // Match a batch of targets. GPU scores the whole gamut; CPU argmin + exact f64 ΔE
-    // report + neutral lock. Returns an array of matchGamut-shaped results (or null).
-    async function matchBatch(targets) {
+    // GPU scores the whole gamut for each target; CPU argmin. Returns raw best
+    // {index, entry} per target (no neutral lock, no f64 ΔE report yet).
+    async function rawBest(targets) {
       const batch = targets.length;
       if (!batch) return [];
       const tData = new Float32Array(batch * 4);
@@ -130,7 +130,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       const readBuf = device.createBuffer({ size: outSize, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
       device.queue.writeBuffer(paramBuf, 0, new Uint32Array([n, batch, 0, 0]));
       const bind = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
-        { binding: 0, resource: { buffer: labBuf } }, { binding: 1, resource: { buffer: metaBuf } },
+        { binding: 0, resource: { buffer: labBuf } }, { binding: 1, resource: { buffer: gmetaBuf } },
         { binding: 2, resource: { buffer: tBuf } }, { binding: 3, resource: { buffer: outBuf } },
         { binding: 4, resource: { buffer: paramBuf } },
       ] });
@@ -145,13 +145,27 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       const scores = new Float32Array(readBuf.getMappedRange().slice(0));
       readBuf.unmap();
       tBuf.destroy(); outBuf.destroy(); readBuf.destroy();
-      const results = [];
+      const out = [];
       for (let b = 0; b < batch; b++) {
-        const t = targets[b];
-        let bi = 0, bs = Infinity;
-        const off = b * n;
+        let bi = 0, bs = Infinity; const off = b * n;
         for (let i = 0; i < n; i++) { const s = scores[off + i]; if (s < bs) { bs = s; bi = i; } }
-        const g = gamut[bi];
+        out.push({ index: bi, entry: gamut[bi] });
+      }
+      return out;
+    }
+
+    // scanGamutBest-shaped: raw best entry + exact f64 ΔE (no neutral lock).
+    async function scanBestBatch(targets) {
+      const raw = await rawBest(targets);
+      return raw.map((r, b) => ({ g: r.entry, bestDE: C.deltaE2000(targets[b], r.entry.lab) }));
+    }
+
+    // matchGamut-shaped: raw best + exact f64 ΔE report + neutral lock.
+    async function matchBatch(targets) {
+      const raw = await rawBest(targets);
+      const results = [];
+      for (let b = 0; b < targets.length; b++) {
+        const t = targets[b], g = raw[b].entry;
         let bestDE = C.deltaE2000(t, g.lab);
         let entry = g, neutralLocked = false;
         const nb = bestNeutralFor(t);
@@ -165,7 +179,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       return results;
     }
 
-    return { device, n, matchBatch, destroy() { labBuf.destroy(); metaBuf.destroy(); paramBuf.destroy(); device.destroy(); } };
+    return { device, n, matchBatch, scanBestBatch, destroy() { labBuf.destroy(); gmetaBuf.destroy(); paramBuf.destroy(); device.destroy(); } };
   }
 
   CS.gamutGpu = { init, createMatcher };

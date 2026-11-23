@@ -1389,7 +1389,17 @@
      gamuts are scanned exactly; larger ones use a union of Lab-nearest and
      ΔE94-nearest pools so saturated/out-of-gamut targets are not lost to the
      Euclidean ranking alone. The final choice still uses ΔE2000. */
+  // PERF2-GPU: optional pre-warmed match cache (set by buildPlan from options.matchCache).
+  // matchGamut/scanGamutBest consult it before computing; buildPlanAsync fills it via
+  // WebGPU batch matching. Null outside a GPU-accelerated plan => pure-CPU path unchanged.
+  let activeMatchCache = null;
+  const labCacheKey = t => t.L.toFixed(4) + '|' + t.a.toFixed(4) + '|' + t.b.toFixed(4);
+
   function scanGamutBest(targetLab, gamut) {
+    if (activeMatchCache && activeMatchCache.scan) {
+      const hit = activeMatchCache.scan.get(labCacheKey(targetLab));
+      if (hit !== undefined) return hit;
+    }
     if (!gamut || !gamut.length) return null;
     let pool;
     if (gamut.length <= EXACT_SCAN_LIMIT) pool = gamut;
@@ -1408,6 +1418,10 @@
   }
 
   function matchGamut(targetLab, gamut) {
+    if (activeMatchCache && activeMatchCache.match) {
+      const hit = activeMatchCache.match.get(labCacheKey(targetLab));
+      if (hit !== undefined) return hit;
+    }
     const raw = scanGamutBest(targetLab, gamut);
     if (!raw) return null;
     let g = raw.g, bestDE = raw.bestDE;
@@ -2396,6 +2410,7 @@
   }
 
   function buildPlan(imageData, options) {
+    activeMatchCache = options.matchCache || null;
     const w = imageData.width, h = imageData.height, n = w * h;
     const engine = options.engine === 'td' ? 'td' : 'lut';
     const layerHeight = engine === 'lut' ? (options.lutLayerHeight || 0.08) : (Number(options.layerHeight) || 0.08);
@@ -3514,6 +3529,7 @@
       diagnostics.groups.gradient = groupSummary(groupStats.gradient);
     }
 
+    activeMatchCache = null;
     return {
       engine, w, h, n, pixelSize, widthMm: w * pixelSize, heightMm: h * pixelSize,
       layerHeight, flatLayers, flatBaseLayers, gradStartLayer, gradTopLayer, actualGradTopLayer, maxGradLayers: colorLayers, maxLayers, flatTopMm: flatLayers * layerHeight,
@@ -3583,6 +3599,74 @@
       diagnostics,
       createdAt: Date.now()
     };
+  }
+
+  // PERF2-GPU: async wrapper that pre-warms a match cache via WebGPU batch matching,
+  // then runs the synchronous buildPlan against it. The pre-pass replicates buildPlan's
+  // deterministic early steps (kmeans centres + near-neutral gradient cells) so the
+  // cache keys match exactly; cache misses fall back to the CPU matcher inside buildPlan.
+  // When WebGPU is unavailable the matcher is null and this is just buildPlan (CPU).
+  async function buildPlanAsync(imageData, options) {
+    const engine = options.engine === 'td' ? 'td' : 'lut';
+    if (engine !== 'td' || !CS.gamutGpu || (options.palette || []).length === 0) return buildPlan(imageData, options);
+    let matcher = null;
+    try {
+      const w = imageData.width, h = imageData.height, n = w * h;
+      const layerHeight = Number(options.layerHeight) || 0.08;
+      const pixelSize = (Number(options.widthMm) || 150) / w;
+      const palette = buildUserPalette(options.palette || []);
+      const baseIndex = clamp(Math.round(Number(options.foundationIndex) || 0), 0, palette.length - 1);
+      const foundation = palette[baseIndex];
+      const colorLayers = clamp(Math.round(Number(options.gradLayers) || 6), 1, 24);
+      const uniformN = options.equalHeight === true || options.luminanceHeight === true;
+      const variableHeight = options.variableHeight !== false && !uniformN;
+      const { lab } = imageToLab(imageData);
+      const { printMask } = buildPrintMask(lab, w, h, options, pixelSize);
+      const auto = buildFlatMask(lab, w, h, palette, options);
+      const flatMask = auto.mask;
+      let flatCount = 0; for (let i = 0; i < n; i++) flatCount += flatMask[i];
+      const gradCount = n - flatCount;
+      if (gradCount <= 0) return buildPlan(imageData, options);
+      const gamut = buildTdGamut(palette, foundation, layerHeight, colorLayers, variableHeight, uniformN ? { allowRepeat: true, diverse: true } : undefined);
+      if (!gamut || !gamut.length) return buildPlan(imageData, options);
+      matcher = await CS.gamutGpu.createMatcher(gamut);
+      if (!matcher) return buildPlan(imageData, options);
+      const edgeCleanRequested = clamp(Math.round(Number(options.edgeClean == null ? 1 : options.edgeClean) || 0), 0, 3);
+      const edgeMask = (edgeCleanRequested > 0 && gradCount >= n * 0.20) ? buildEdgeMask(lab, w, h, edgeCleanRequested) : null;
+      const samples = sampleGradientLab(lab, flatMask, 12000, edgeMask);
+      const K = clamp(Math.round(Number(options.families) || 96), 2, 256);
+      const centers = kmeansLab(samples, Math.min(K, Math.max(2, Math.floor(samples.length / 6))), 1234567, 10);
+      const cache = { match: new Map(), scan: new Map() };
+      const key = t => t.L.toFixed(4) + '|' + t.a.toFixed(4) + '|' + t.b.toFixed(4);
+      // family centres -> matchGamut cache
+      if (centers.length) {
+        const mr = await matcher.matchBatch(centers);
+        centers.forEach((c, i) => cache.match.set(key(c), mr[i]));
+      }
+      // near-neutral gradient pixels -> scanGamutBest (rounded cells) + matchGamut (exact)
+      const cellMap = new Map(), exactMap = new Map();
+      for (let i = 0; i < n; i++) {
+        if (!printMask[i] || flatMask[i]) continue;
+        const L = lab[i * 3], a = lab[i * 3 + 1], b = lab[i * 3 + 2];
+        if (Math.hypot(a, b) >= 8) continue;
+        const cell = { L: Math.round(L), a: Math.round(a), b: Math.round(b) };
+        cellMap.set(key(cell), cell);
+        const ex = { L, a, b };
+        exactMap.set(key(ex), ex);
+      }
+      const cells = [...cellMap.values()], exacts = [...exactMap.values()];
+      if (cells.length) { const sr = await matcher.scanBestBatch(cells); cells.forEach((c, i) => cache.scan.set(key(c), sr[i])); }
+      if (exacts.length) { const er = await matcher.matchBatch(exacts); exacts.forEach((c, i) => cache.match.set(key(c), er[i])); }
+      const plan = buildPlan(imageData, { ...options, matchCache: cache });
+      plan.computeEngine = 'gpu';
+      matcher.destroy();
+      return plan;
+    } catch (e) {
+      if (matcher) { try { matcher.destroy(); } catch (_) {} }
+      const plan = buildPlan(imageData, options);
+      plan.computeEngine = 'cpu';
+      return plan;
+    }
   }
 
   // Palette suggestion for the TD engine from the filament library.
@@ -3690,10 +3774,11 @@
   }
 
   CS.engine = {
-    buildPlan, recommendPalette, buildLutPalette, buildUserPalette,
+    buildPlan, buildPlanAsync, recommendPalette, buildLutPalette, buildUserPalette,
     imageToLab, filamentAt, compositeLinear, stackTransmission, localStd,
     autoStdThreshold, nearestLut, kmeansLab, mergeIneffectiveHeights, physicalSmoothParams,
     mergeSmallRegions, buildPrintMask, buildStrokeInfo, buildTdGamut, gamutPenalty, gamutScore, matchGamut, mergeCommonBases, buildFamilyAdjacency, recipeSensitivity,
-    scanGamutBest, topGamutEntries, nearestGamutEntries, nearestGamutEntries94
+    scanGamutBest, topGamutEntries, nearestGamutEntries, nearestGamutEntries94,
+    buildFlatMask, sampleGradientLab, buildEdgeMask
   };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

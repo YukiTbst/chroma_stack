@@ -36,7 +36,7 @@ const options = {
   heightMergeDeltaE: 1.5, edgeClean: 0, vectorFlat: false,
   lineProtect: 'auto', families: 12, backgroundMode: 'off'
 };
-ctx.self.onmessage({ data: { id: 7, width: w, height: h, data: data.buffer, options } });
+await ctx.self.onmessage({ data: { id: 7, width: w, height: h, data: data.buffer, options } });
 assert.ok(received, 'worker posts a reply');
 assert.equal(received.id, 7);
 assert.equal(received.ok, true, received.error || 'plan built');
@@ -46,6 +46,6 @@ assert.ok(received.plan.predicted.length === w * h);
 
 /* A bad payload reports an error instead of throwing outside the worker. */
 received = null;
-ctx.self.onmessage({ data: { id: 8, width: 4, height: 4, data: new ArrayBuffer(4 * 4 * 4), options: { engine: 'td', palette: [] } } });
+await ctx.self.onmessage({ data: { id: 8, width: 4, height: 4, data: new ArrayBuffer(4 * 4 * 4), options: { engine: 'td', palette: [] } } });
 assert.ok(received && received.ok === false && received.id === 8, 'worker errors are returned as data');
 console.log('all worker checks passed');

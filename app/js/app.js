@@ -660,7 +660,7 @@
       }
     }
     if (request !== state.analysisRequest) return null;
-    return E.buildPlan(image, options);
+    return await E.buildPlanAsync(image, options);
   }
 
   function analyze() {
@@ -1031,6 +1031,7 @@
       $('supportAudit').textContent = '悬空检查：—';
       $('supportAudit').style.color = '';
       $('smoothValue').textContent = state.smoothMm <= 0 ? '关' : (state.dirty ? '待计算' : '—');
+      if ($('computeEngine')) $('computeEngine').hidden = true;
       updateLineStatus(null);
       updateEdgeStatus(null);
       return;
@@ -1048,6 +1049,14 @@
     $('metricFamilies').textContent = String(s.familyCount);
     $('metricSwaps').textContent = String(s.toolChanges);
     $('metricRelief').textContent = (p.reliefMm >= 0 ? '+' : '') + p.reliefMm.toFixed(2);
+    // PERF2-GPU: show whether this plan was computed on GPU or CPU.
+    if ($('computeEngine')) {
+      const eng = p.computeEngine === 'gpu' ? 'GPU' : 'CPU';
+      $('computeEngine').hidden = false;
+      $('computeEngineName').textContent = eng;
+      $('computeEngineName').className = eng === 'GPU' ? 'eng-gpu' : 'eng-cpu';
+      $('computeEngineMs').textContent = state.planMs ? ` · ${(state.planMs / 1000).toFixed(1)}s` : '';
+    }
     $('valUnder5').textContent = s.under5.toFixed(0) + '%';
     $('valUnder10').textContent = s.under10.toFixed(0) + '%';
     $('valGrad').textContent = s.gradPercent.toFixed(0) + '%';
