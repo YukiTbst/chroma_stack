@@ -791,6 +791,24 @@
     return { width: ew, height: eh, scale, downscaled: scale < 0.999 };
   }
 
+  // PERF3: mesh the prisms of the given materials into raw objects (filament,
+  // positions, indices, name; plate offset baked). Independent per material so a
+  // worker pool can mesh subsets in parallel; ids are assigned by the caller.
+  function meshPrismObjects(plan, prisms, ew, eh, pixelSize, materials) {
+    const out = [];
+    for (const f of materials) {
+      for (const prism of prisms[f]) {
+        const positions = [];
+        const indices = [];
+        meshPrism(prism.mask, ew, eh, pixelSize, prism.z0 * plan.layerHeight, prism.z1 * plan.layerHeight, positions, indices);
+        if (!indices.length) continue;
+        for (let i = 0; i < positions.length; i += 3) { positions[i] += 128; positions[i + 1] += 128; }
+        out.push({ filament: f, positions, indices, name: `${plan.palette[f].name} · L${prism.z0 + 1}-${prism.z1}` });
+      }
+    }
+    return out;
+  }
+
   function build3MFParts(plan, options = {}) {
     if (!plan) throw new Error('没有可导出的方案');
     // Native resolution is the correctness default: the web preview and 3MF
@@ -809,6 +827,17 @@
     const palette = plan.palette;
     for (let f = 0; f < palette.length; f++) if (prisms[f].length) used.push(f);
 
+    // PERF3: meshing is independent per material, so it can be split across a worker
+    // pool. meshPrismObjects returns raw objects (no ids); ids are assigned in order
+    // here so the serial and parallel paths produce byte-identical models.
+    const rawObjects = meshPrismObjects(plan, prisms, ew, eh, pixelSize, used);
+    return assemble3MFParts(plan, rawObjects, grid, plane, ew, eh, pixelSize);
+  }
+
+  // PERF3: shared assembly (ids + XML + config + files). Serial build3MFParts and the
+  // parallel worker-pool path both call this with the same rawObjects => identical bytes.
+  function assemble3MFParts(plan, rawObjects, grid, plane, ew, eh, pixelSize) {
+    const palette = plan.palette;
     const objects = [];
     const componentMeta = [];
     let nextId = 2;
@@ -817,24 +846,10 @@
     // between stacked prisms would be welded by some loaders and become
     // non-manifold. Separate objects are the format Bambu Studio/OrcaSlicer
     // accept without the slow assembly/component path.
-    for (const f of used) {
-      for (const prism of prisms[f]) {
-        const positions = [];
-        const indices = [];
-        meshPrism(prism.mask, ew, eh, pixelSize, prism.z0 * plan.layerHeight, prism.z1 * plan.layerHeight, positions, indices);
-        if (!indices.length) continue;
-        // Bake the plate offset into the mesh. Native Bambu Studio 3MFs keep
-        // build items transform-free and store objects in plate coordinates;
-        // this also survives loaders that ignore <assemble> in the config.
-        for (let i = 0; i < positions.length; i += 3) {
-          positions[i] += 128;
-          positions[i + 1] += 128;
-        }
-        const objectId = nextId++;
-        const name = `${palette[f].name} · L${prism.z0 + 1}-${prism.z1}`;
-        objects.push({ id: objectId, filament: f, positions, indices, name });
-        componentMeta.push({ id: objectId, name, colorIdx: f + 1, triangles: indices.length / 3, vertices: positions.length / 3 });
-      }
+    for (const o of rawObjects) {
+      const objectId = nextId++;
+      objects.push({ id: objectId, filament: o.filament, positions: o.positions, indices: o.indices, name: o.name });
+      componentMeta.push({ id: objectId, name: o.name, colorIdx: o.filament + 1, triangles: o.indices.length / 3, vertices: o.positions.length / 3 });
     }
     if (!objects.length) throw new Error('没有可导出的几何体（检查纯色区/渐变区层数）');
     const assemblyId = nextId++;
@@ -1175,6 +1190,7 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
 
   CS.exporter = {
     build3MFBytes, build3MFBytesAsync, build3MFBlob, build3MFBlobAsync, planSummary, buildPlanMarkdown, samplePlane, buildPrisms,
-    traceLoops, simplifyLoop, loopArea, pointInLoop, meshPrism, exportGridFor, exportReport, buildLayerMasks
+    traceLoops, simplifyLoop, loopArea, pointInLoop, meshPrism, exportGridFor, exportReport, buildLayerMasks,
+    meshPrismObjects, assemble3MFParts
   };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

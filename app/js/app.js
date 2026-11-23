@@ -2075,6 +2075,54 @@
     return `导出将把长边缩到 ${grid.width}×${grid.height}（工作网格 ${p.w}×${p.h}）${changed == null ? '' : `，约 ${changed}% 源像素被重新归类`}。未保护的细线可能变细/消失、窄白缝可能合并。建议先点“导出预览”核对最终导出网格，或开启线稿保护以原生分辨率导出。确认继续导出？`;
   }
 
+  /* PERF3: parallel 3MF export. Meshing is independent per prism, so a pool of
+     mesh-workers meshes contiguous chunks off the main thread; the shared
+     assemble3MFParts then builds byte-identical XML/config. Falls back to the serial
+     async export if workers are unavailable or fail. */
+  let meshPool = null, meshTaskId = 0;
+  function getMeshPool() {
+    if (meshPool) return meshPool;
+    const n = Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 4) - 1));
+    const workers = [];
+    for (let i = 0; i < n; i++) workers.push(new Worker('js/mesh-worker.js'));
+    meshPool = { workers, n };
+    return meshPool;
+  }
+  function runMeshChunk(pool, slot, payload) {
+    return new Promise((resolve, reject) => {
+      const worker = pool.workers[slot];
+      const id = ++meshTaskId;
+      const onMsg = (e) => { const d = e.data || {}; if (d.id !== id) return; worker.removeEventListener('message', onMsg); worker.removeEventListener('error', onErr); if (d.ok) resolve(d.objects); else reject(new Error(d.error || 'mesh failed')); };
+      const onErr = (e) => { worker.removeEventListener('message', onMsg); worker.removeEventListener('error', onErr); reject(new Error((e && e.message) || 'mesh worker error')); };
+      worker.addEventListener('message', onMsg);
+      worker.addEventListener('error', onErr);
+      const transfer = payload.tasks.map(t => t.mask.buffer);
+      worker.postMessage(Object.assign({ id }, payload), transfer);
+    });
+  }
+  async function build3MFParallel(p, options) {
+    const grid = X.exportGridFor(p, options && options.exportMax);
+    const ew = grid.width, eh = grid.height;
+    const plane = X.samplePlane(p, ew, eh);
+    const pixelSize = p.widthMm / ew;
+    const prisms = X.buildPrisms(p, plane);
+    const tasks = [];
+    for (let f = 0; f < p.palette.length; f++) for (const pr of prisms[f]) tasks.push({ f, mask: pr.mask, z0: pr.z0, z1: pr.z1 });
+    if (!tasks.length) throw new Error('没有可导出的几何体（检查纯色区/渐变区层数）');
+    const pool = getMeshPool();
+    const n = Math.min(pool.n, tasks.length);
+    const per = Math.ceil(tasks.length / n);
+    const chunks = [];
+    for (let i = 0; i < tasks.length; i += per) chunks.push(tasks.slice(i, i + per));
+    const paletteLite = p.palette.map(pp => ({ name: pp.name, hex: pp.hex }));
+    const results = await Promise.all(chunks.map((chunk, idx) => runMeshChunk(pool, idx, { palette: paletteLite, layerHeight: p.layerHeight, ew, eh, pixelSize, tasks: chunk })));
+    const rawObjects = [];
+    for (const r of results) for (const o of r) rawObjects.push(o);
+    const out = X.assemble3MFParts(p, rawObjects, grid, plane, ew, eh, pixelSize);
+    const bytes = CS.zip.createZipAsync ? await CS.zip.createZipAsync(out.files) : CS.zip.createZip(out.files);
+    return { blob: new Blob([bytes], { type: 'model/3mf' }), meta: out.meta, ew, eh, pixelSize, exportDownscaled: grid.downscaled, exportChange: plane.changeStats };
+  }
+
   function export3MF() {
     const p = state.plan;
     if (!p || state.dirty || state.analyzing) { toast('请先计算并应用当前修改'); return; }
@@ -2087,7 +2135,14 @@
       try {
         // The started export intentionally uses the clicked plan snapshot even
         // if the user keeps editing; later edits never change its content/name.
-        const out = await X.build3MFBlobAsync(p);
+        // PERF3: mesh across a worker pool (off the main thread); fall back to serial.
+        let out;
+        if (typeof Worker !== 'undefined' && location.protocol !== 'file:') {
+          try { out = await build3MFParallel(p); }
+          catch (e) { console.warn('并行导出失败，回退串行导出', e); out = await X.build3MFBlobAsync(p); }
+        } else {
+          out = await X.build3MFBlobAsync(p);
+        }
         downloadBlob(out.blob, filenameBase(p) + '.3mf');
         const g = X.exportGridFor(p);
         const changed = out.exportChange ? out.exportChange.changedPercent : null;
@@ -2569,7 +2624,7 @@
   // Automated-acceptance handle: the real state, option builder and brush
   // primitives so tests can run state -> buildOptions -> buildPlan end to end
   // without a browser. Internal diagnostics only, not a user-facing feature.
-  CS.appDebug = { state, buildOptions, ensureBrushCanvas, applyPaint, snapshotUndo, undoBrush, clearBrush, clearManualEdits, rebaseBrushCanvas, markDirty, resetSettings, publishComboModel, actualTopLayer, actualHeightStats, regionMapHex, runPlanInWorker, exportPreviewPlan, exportConfirmMessage };
+  CS.appDebug = { state, buildOptions, ensureBrushCanvas, applyPaint, snapshotUndo, undoBrush, clearBrush, clearManualEdits, rebaseBrushCanvas, markDirty, resetSettings, publishComboModel, actualTopLayer, actualHeightStats, regionMapHex, runPlanInWorker, exportPreviewPlan, exportConfirmMessage, build3MFParallel };
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
