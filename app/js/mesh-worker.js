@@ -2,7 +2,11 @@
    per colour + contiguous layer range) off the main thread. Returns transferable
    typed arrays so the pool can merge them into the shared assemble3MFParts path. */
 'use strict';
-importScripts('color.js', 'optics.js', 'earcut.js', 'height-curve.js', 'data-filaments.js', 'engine.js', 'layer-optimizer.js', 'zip.js', 'exporter.js');
+/* GPU5: cache-bust every dependency with the app asset version forwarded in the
+   worker URL (?v=…), so a deploy never leaves the pool on stale cached scripts. */
+const __vq = (self.location && self.location.search || '').match(/[?&]v=([^&]+)/);
+const __q = __vq ? '?v=' + __vq[1] : '';
+importScripts('color.js' + __q, 'optics.js' + __q, 'earcut.js' + __q, 'height-curve.js' + __q, 'data-filaments.js' + __q, 'engine.js' + __q, 'layer-optimizer.js' + __q, 'zip.js' + __q, 'exporter.js' + __q);
 
 self.onmessage = function (e) {
   const m = e.data || {};

@@ -15,6 +15,18 @@
   const WORK_RESOLUTIONS = [640, 1280, 2560];
   let workMax = WORK_RESOLUTIONS[0];
 
+  // GPU5: derive the asset version from this script's own ?v= tag so worker URLs
+  // (and their importScripts deps) are cache-busted in lockstep with every deploy.
+  // A bare worker URL would let returning users keep a stale cached CPU worker.
+  const ASSET_V = (() => {
+    try {
+      const s = document.querySelector('script[src*="js/app.js"]');
+      const m = s && s.src.match(/[?&]v=([^&]+)/);
+      return m ? m[1] : '';
+    } catch (e) { return ''; }
+  })();
+  const workerUrl = (f) => 'js/' + f + (ASSET_V ? '?v=' + ASSET_V : '');
+
   const state = {
     imageData: null,
     imageName: '',
@@ -624,7 +636,7 @@
   function runPlanInWorker(image, options, request) {
     return new Promise((resolve, reject) => {
       let worker;
-      try { worker = new Worker('js/compute-worker.js'); } catch (e) { reject(e); return; }
+      try { worker = new Worker(workerUrl('compute-worker.js')); } catch (e) { reject(e); return; }
       activeWorker = worker;
       let settled = false;
       let timer = null;
@@ -2093,7 +2105,7 @@
     if (meshPool) return meshPool;
     const n = Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 4) - 1));
     const workers = [];
-    for (let i = 0; i < n; i++) workers.push(new Worker('js/mesh-worker.js'));
+    for (let i = 0; i < n; i++) workers.push(new Worker(workerUrl('mesh-worker.js')));
     meshPool = { workers, n };
     return meshPool;
   }
