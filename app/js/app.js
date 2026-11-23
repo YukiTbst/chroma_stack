@@ -2109,16 +2109,51 @@
     meshPool = { workers, n };
     return meshPool;
   }
-  function runMeshChunk(pool, slot, payload) {
+  // R7: a stuck/dead mesh worker must not be reused forever (the old persistent pool
+  // hung subsequent exports). Reset on failure so the next export spawns fresh workers.
+  function resetMeshPool() {
+    if (!meshPool) return;
+    for (const w of meshPool.workers) { try { w.terminate(); } catch (e) { /* ignore */ } }
+    meshPool = null;
+  }
+  function runMeshChunk(pool, slot, payload, timeoutMs) {
     return new Promise((resolve, reject) => {
       const worker = pool.workers[slot];
       const id = ++meshTaskId;
-      const onMsg = (e) => { const d = e.data || {}; if (d.id !== id) return; worker.removeEventListener('message', onMsg); worker.removeEventListener('error', onErr); if (d.ok) resolve(d.objects); else reject(new Error(d.error || 'mesh failed')); };
-      const onErr = (e) => { worker.removeEventListener('message', onMsg); worker.removeEventListener('error', onErr); reject(new Error((e && e.message) || 'mesh worker error')); };
+      let settled = false;
+      const cleanup = () => { clearTimeout(timer); worker.removeEventListener('message', onMsg); worker.removeEventListener('error', onErr); };
+      const timer = setTimeout(() => { if (settled) return; settled = true; cleanup(); reject(new Error('网格化 worker 超时')); }, timeoutMs || 120000);
+      const onMsg = (e) => { const d = e.data || {}; if (d.id !== id || settled) return; settled = true; cleanup(); if (d.ok) resolve(d.objects); else reject(new Error(d.error || 'mesh failed')); };
+      const onErr = (e) => { if (settled) return; settled = true; cleanup(); reject(new Error((e && e.message) || 'mesh worker error')); };
       worker.addEventListener('message', onMsg);
       worker.addEventListener('error', onErr);
       const transfer = payload.tasks.map(t => t.mask.buffer);
-      worker.postMessage(Object.assign({ id }, payload), transfer);
+      try { worker.postMessage(Object.assign({ id }, payload), transfer); }
+      catch (e) { if (!settled) { settled = true; cleanup(); reject(e); } }
+    });
+  }
+  // R7: assembly + zip run in a dedicated worker so the main thread never builds the
+  // (potentially millions of lines of) vertex/triangle XML. Objects are transferred
+  // zero-copy; the plan is stripped to metadata via litePlan.
+  let exportWorker = null, exportTaskId = 0;
+  function runExportWorker(p, rawObjects, grid, plane, ew, eh, pixelSize) {
+    return new Promise((resolve, reject) => {
+      if (!exportWorker) exportWorker = new Worker(workerUrl('export-worker.js'));
+      const w = exportWorker;
+      const id = ++exportTaskId;
+      let settled = false;
+      const drop = () => { try { w.terminate(); } catch (e) { /* ignore */ } exportWorker = null; };
+      const cleanup = () => { clearTimeout(timer); w.removeEventListener('message', onMsg); w.removeEventListener('error', onErr); };
+      const timer = setTimeout(() => { if (settled) return; settled = true; cleanup(); drop(); reject(new Error('3MF 组装超时')); }, 180000);
+      const onMsg = (e) => { const d = e.data || {}; if (d.id !== id || settled) return; settled = true; cleanup(); if (d.ok) resolve(d); else reject(new Error(d.error || '3MF assembly failed')); };
+      const onErr = (e) => { if (settled) return; settled = true; cleanup(); drop(); reject(new Error((e && e.message) || 'export worker error')); };
+      w.addEventListener('message', onMsg);
+      w.addEventListener('error', onErr);
+      const objects = rawObjects.map(o => ({ filament: o.filament, name: o.name, positions: o.positions.buffer, indices: o.indices.buffer }));
+      const transfer = []; for (const o of objects) { transfer.push(o.positions, o.indices); }
+      const msg = { id, plan: X.litePlan(p), objects, grid: { downscaled: grid.downscaled }, plane: { changeStats: plane.changeStats }, ew, eh, pixelSize };
+      try { w.postMessage(msg, transfer); }
+      catch (e) { if (!settled) { settled = true; cleanup(); reject(e); } }
     });
   }
   async function build3MFParallel(p, options) {
@@ -2136,12 +2171,14 @@
     const chunks = [];
     for (let i = 0; i < tasks.length; i += per) chunks.push(tasks.slice(i, i + per));
     const paletteLite = p.palette.map(pp => ({ name: pp.name, hex: pp.hex }));
-    const results = await Promise.all(chunks.map((chunk, idx) => runMeshChunk(pool, idx, { palette: paletteLite, layerHeight: p.layerHeight, ew, eh, pixelSize, tasks: chunk })));
+    let results;
+    try {
+      results = await Promise.all(chunks.map((chunk, idx) => runMeshChunk(pool, idx, { palette: paletteLite, layerHeight: p.layerHeight, ew, eh, pixelSize, tasks: chunk }, 120000)));
+    } catch (e) { resetMeshPool(); throw e; }
     const rawObjects = [];
     for (const r of results) for (const o of r) rawObjects.push(o);
-    const out = X.assemble3MFParts(p, rawObjects, grid, plane, ew, eh, pixelSize);
-    const bytes = CS.zip.createZipAsync ? await CS.zip.createZipAsync(out.files) : CS.zip.createZip(out.files);
-    return { blob: new Blob([bytes], { type: 'model/3mf' }), meta: out.meta, ew, eh, pixelSize, exportDownscaled: grid.downscaled, exportChange: plane.changeStats };
+    const out = await runExportWorker(p, rawObjects, grid, plane, ew, eh, pixelSize);
+    return { blob: new Blob([out.bytes], { type: 'model/3mf' }), meta: out.meta, ew, eh, pixelSize, exportDownscaled: grid.downscaled, exportChange: plane.changeStats };
   }
 
   function export3MF() {

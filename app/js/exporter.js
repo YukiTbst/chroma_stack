@@ -865,7 +865,7 @@
       byteParts.push(encoder.encode(textLines.join('\n') + '\n'));
       textLines = [];
     };
-    const pushLine = s => textLines.push(s);
+    const pushLine = s => { textLines.push(s); if (textLines.length >= 20000) flushText(); };
     pushLine('<?xml version="1.0" encoding="UTF-8"?>');
     pushLine('<model unit="millimeter" xml:lang="zh-CN" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:BambuStudio="http://schemas.bambulab.com/package/2021" xmlns:slic3rpe="http://schemas.slic3r.org/3mf/2017/06">');
     pushLine(' <metadata name="Application">ChromaStack</metadata>');
@@ -1188,9 +1188,20 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
     return lines.join('\n');
   }
 
+  /* R7: strip the per-pixel arrays before transferring a plan to the export worker.
+     assemble3MFParts only reads metadata (palette/stats/geometry/lineInfo), never the
+     n-sized arrays, so dropping them keeps the transfer small and avoids cloning
+     millions of predicted objects. The assembled 3MF is byte-identical. */
+  function litePlan(plan) {
+    const { predicted, preview, flatMask, flatFilament, familyId, regionId, nearest, residual, stds,
+      printMask, sourcePrintMask, lineProtectMask, lineDirectMask, alpha, topLayer, holeMap, manualMask,
+      familyPixels, ...lite } = plan;
+    return lite;
+  }
+
   CS.exporter = {
     build3MFBytes, build3MFBytesAsync, build3MFBlob, build3MFBlobAsync, planSummary, buildPlanMarkdown, samplePlane, buildPrisms,
     traceLoops, simplifyLoop, loopArea, pointInLoop, meshPrism, exportGridFor, exportReport, buildLayerMasks,
-    meshPrismObjects, assemble3MFParts
+    meshPrismObjects, assemble3MFParts, litePlan
   };
 })(typeof globalThis !== 'undefined' ? globalThis : this);
