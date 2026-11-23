@@ -3741,6 +3741,9 @@
     const hasOpticalModel = !!(options.opticalModel && options.opticalModel.params);
     const hasTopOverride = (Number(options.gradTopMmOverride) || 0) > 0;
     if (hasOpticalModel || hasTopOverride) return buildPlan(imageData, options);
+    // R5: GPU pre-warm has a fixed setup/dispatch/readback cost; below ~100k pixels
+    // the CPU matcher is faster (review measured 19.2k px GPU ~38% slower). Skip it.
+    if (imageData.width * imageData.height < 100000) return buildPlan(imageData, options);
     let matcher = null;
     try {
       const w = imageData.width, h = imageData.height, n = w * h;

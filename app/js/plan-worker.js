@@ -26,14 +26,17 @@ self.onmessage = function (e) {
         neutralNeed: m.neutralNeed ? new Uint8Array(m.neutralNeed) : null,
         famNeutral: m.famNeutral ? new Uint8Array(m.famNeutral) : null,
         famPredL: new Float64Array(m.famPredL),
-        w: m.w, h: m.h, familyCount: m.familyCount, radius: m.radius, colorTol: m.colorTol
+        w: m.w, h: m.h, familyCount: m.familyCount, radius: m.radius, colorTol: m.colorTol,
+        // R5: reuse one full-size output buffer across passes instead of allocating
+        // per call; only the band slice is copied for transfer.
+        out: new Int16Array(m.w * m.h)
       };
       self.postMessage({ id: m.id, ok: true });
       return;
     }
     if (m.op === 'smooth') {
       const src = new Int16Array(m.src);
-      const out = new Int16Array(S.w * S.h);
+      const out = S.out;
       CS.engine.smoothFamilyMapBand(src, out, S.mask, S.protect, S.lab, S.familyCount, S.famPredL, S.neutralNeed, S.famNeutral, S.w, S.h, S.radius, m.y0, m.y1, S.colorTol);
       const band = out.slice(m.y0 * S.w, m.y1 * S.w);
       self.postMessage({ id: m.id, ok: true, y0: m.y0, out: band.buffer }, [band.buffer]);

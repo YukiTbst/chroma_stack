@@ -63,7 +63,7 @@ const palette = [
   ctx.navigator = { gpu: { requestAdapter: async () => ({ requestDevice: async () => nanDevice() }) } };
   load(ctx, ['color.js', 'data-filaments.js', 'data-lut.js', 'optics.js', 'height-curve.js', 'calibration-data.js', 'layer-optimizer.js', 'engine.js', 'gamut-gpu.js']);
   const CS = ctx.CS;
-  const w = 80, h = 60, n = w * h;
+  const w = 400, h = 300, n = w * h; // >= 100k so the GPU pre-warm is attempted (R5 threshold)
   const data = new Uint8ClampedArray(n * 4);
   for (let i = 0; i < n; i++) data.set([Math.round(30 + 180 * (i % w) / w), 90, 160, 255], i * 4);
   const opts = { engine: 'td', palette, widthMm: 80, layerHeight: 0.08, gradLayers: 4, foundationIndex: 1, families: 12, backgroundMode: 'off', smoothMm: 0.8, lineWidthMm: 0.42 };
@@ -71,6 +71,22 @@ const palette = [
   assert.equal(plan.computeEngine, 'cpu', 'GPU failure must fall back to CPU');
   const cpu = await CS.engine.buildPlan({ width: w, height: h, data }, opts);
   assert.equal(plan.stats.meanDE, cpu.stats.meanDE, 'fallback plan equals pure CPU');
+}
+
+/* (c) R5: below the size threshold the GPU pre-warm is skipped entirely (CPU path). */
+{
+  const ctx = makeCtx();
+  ctx.navigator = { gpu: { requestAdapter: async () => ({ requestDevice: async () => nanDevice() }) } };
+  load(ctx, ['color.js', 'data-filaments.js', 'data-lut.js', 'optics.js', 'height-curve.js', 'calibration-data.js', 'layer-optimizer.js', 'engine.js', 'gamut-gpu.js']);
+  const CS = ctx.CS;
+  const w = 80, h = 60, n = w * h; // 4800 < 100k
+  const data = new Uint8ClampedArray(n * 4);
+  for (let i = 0; i < n; i++) data.set([Math.round(30 + 180 * (i % w) / w), 90, 160, 255], i * 4);
+  const opts = { engine: 'td', palette, widthMm: 80, layerHeight: 0.08, gradLayers: 4, foundationIndex: 1, families: 12, backgroundMode: 'off', smoothMm: 0.8, lineWidthMm: 0.42 };
+  const plan = await CS.engine.buildPlanAsync({ width: w, height: h, data }, opts);
+  assert.notEqual(plan.computeEngine, 'gpu', 'small plan must not use the GPU pre-warm');
+  const cpu = await CS.engine.buildPlan({ width: w, height: h, data }, opts);
+  assert.equal(plan.stats.meanDE, cpu.stats.meanDE, 'small plan equals pure CPU');
 }
 
 console.log('all GPU error-fallback checks passed');

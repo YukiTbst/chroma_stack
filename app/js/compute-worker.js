@@ -19,11 +19,13 @@ self.onmessage = async function (e) {
       height: msg.height,
       data: new Uint8ClampedArray(msg.data)
     };
-    // GPU7: spawn a nested plan-worker pool for the per-pixel/row-band phases on
-    // large images (small images keep the sync path to avoid worker overhead).
+    // GPU7/R5: spawn a nested plan-worker pool only above the measured benefit point.
+    // Pool startup + per-worker data transfer is a fixed cost; below ~1M pixels the
+    // sync path is faster (review measured 230k px ~47% slower with the pool). 4x
+    // (~2.9M px) is where parallel smoothing/assign clearly wins.
     const n = msg.width * msg.height;
     const cores = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4;
-    if (n > 200000 && cores > 2 && CS.parallel) {
+    if (n > 1000000 && cores > 2 && CS.parallel) {
       const size = Math.min(8, Math.max(2, cores - 1));
       pool = CS.parallel.makePool((f) => f + __q, size);
     }
