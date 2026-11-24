@@ -60,7 +60,7 @@ function makeDevice(maxBind, maxWG) {
         const scoreArr = new Float32Array(outScore._data.buffer);
         for (let b = 0; b < batch; b++) {
           const tl = tgt[b * 4], ta = tgt[b * 4 + 1], tb = tgt[b * 4 + 2];
-          let bi = 0, bs = 1e38;
+          let bi = 0xFFFFFFFF, bs = 1e38;
           for (let i = 0; i < n; i++) {
             const s = Math.abs(tl - lab[i * 4]) + Math.abs(ta - lab[i * 4 + 1]) + Math.abs(tb - lab[i * 4 + 2]);
             if (s < bs || (s === bs && i < bi)) { bs = s; bi = i; }
