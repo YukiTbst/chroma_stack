@@ -40,6 +40,7 @@
   // F-EXP-01: a file may carry its payload as `parts` (array of Uint8Array) + `size`
   // so the exporter can stream the model XML without materializing one full buffer.
   function rawOf(file) {
+    if (file.stream) return { stream: file.stream };
     if (file.parts) return { size: file.size, parts: file.parts };
     const data = typeof file.data === 'string' ? utf8(file.data) : file.data;
     return { size: data.length, parts: [data] };
@@ -58,6 +59,22 @@
     } catch (e) { return null; }
   }
 
+  // True streaming: consume a pull-based raw ReadableStream (backpressure => one raw chunk
+  // resident at a time), accumulate CRC + raw size in a pass-through tap, DEFLATE, and
+  // collect only the COMPRESSED chunks. Peak memory is bounded by the compressed output,
+  // not the multi-GB raw XML. Returns {chunks, crc, rawSize}.
+  async function compressReadable(stream) {
+    const state = { crc: -1, raw: 0 };
+    const tap = new TransformStream({
+      transform(chunk, ctrl) { state.crc = updateCrc(state.crc, chunk); state.raw += chunk.length; ctrl.enqueue(chunk); }
+    });
+    const comp = stream.pipeThrough(tap).pipeThrough(new CompressionStream('deflate-raw'));
+    const reader = comp.getReader();
+    const chunks = [];
+    for (;;) { const r = await reader.read(); if (r.done) break; chunks.push(r.value); }
+    return { chunks, crc: (state.crc ^ -1) >>> 0, rawSize: state.raw };
+  }
+
   function createZip(files) {
     const packed = [];
     for (const file of files) {
@@ -69,12 +86,19 @@
     return assemble(packed);
   }
 
-  // Compress large text payloads (3D model XML) with DEFLATE, streaming the parts so
-  // the full uncompressed buffer is never duplicated. CRC is accumulated incrementally.
+  // Compress large text payloads (3D model XML) with DEFLATE. A `stream` entry is consumed
+  // with backpressure (raw XML never fully resident); a `parts` entry streams the parts so
+  // the full uncompressed buffer is not duplicated. CRC is accumulated incrementally.
   async function createZipAsync(files) {
     const packed = [];
     for (const file of files) {
       const r = rawOf(file);
+      if (r.stream) {
+        const z = await compressReadable(r.stream());
+        if (z.rawSize > ZIP32_MAX) throw capErr();
+        packed.push({ name: utf8(file.name), rawSize: z.rawSize, crc: z.crc, chunks: z.chunks, method: 8 });
+        continue;
+      }
       if (r.size > ZIP32_MAX) throw capErr();
       const crc = crc32Parts(r.parts);
       let stored = null, method = 0;
@@ -94,12 +118,15 @@
     // so entry offsets / central-directory offset can overflow 32 bits even when the
     // summed payload fits. Compute every offset before writing any setUint32 field.
     if (packed.length > 0xFFFF) throw capErr();
-    let offEst = 0, centralEst = 0;
+    const dataLenOf = e => e.chunks ? e.chunks.reduce((s, c) => s + c.length, 0) : e.stored.length;
+    let offEst = 0, centralEst = 0, anyChunks = false;
     for (const e of packed) {
-      if (e.rawSize > ZIP32_MAX || e.stored.length > ZIP32_MAX) throw capErr();
+      const dl = dataLenOf(e);
+      if (e.chunks) anyChunks = true;
+      if (e.rawSize > ZIP32_MAX || dl > ZIP32_MAX) throw capErr();
       const localSize = 30 + e.name.length;
-      if (offEst > ZIP32_MAX || offEst + localSize + e.stored.length > ZIP32_MAX) throw capErr();
-      offEst += localSize + e.stored.length;
+      if (offEst > ZIP32_MAX || offEst + localSize + dl > ZIP32_MAX) throw capErr();
+      offEst += localSize + dl;
       centralEst += 46 + e.name.length;
     }
     if (offEst > ZIP32_MAX || centralEst > ZIP32_MAX || offEst + centralEst + 22 > ZIP32_MAX) throw capErr();
@@ -108,7 +135,9 @@
     let offset = 0;
     const { time, day } = dosDateTime(new Date());
     for (const e of packed) {
-      const name = e.name, data = e.stored, crc = e.crc, method = e.method, rawSize = e.rawSize;
+      const name = e.name, crc = e.crc, method = e.method, rawSize = e.rawSize;
+      const dataChunks = e.chunks || [e.stored];
+      const dl = dataLenOf(e);
       const local = new Uint8Array(30 + name.length);
       const lv = new DataView(local.buffer);
       lv.setUint32(0, 0x04034B50, true);
@@ -118,12 +147,12 @@
       lv.setUint16(10, time, true);
       lv.setUint16(12, day, true);
       lv.setUint32(14, crc, true);
-      lv.setUint32(18, data.length, true);
+      lv.setUint32(18, dl, true);
       lv.setUint32(22, rawSize, true);
       lv.setUint16(26, name.length, true);
       lv.setUint16(28, 0, true);
       local.set(name, 30);
-      chunks.push(local, data);
+      chunks.push(local, ...dataChunks);
 
       const cd = new Uint8Array(46 + name.length);
       const cv = new DataView(cd.buffer);
@@ -135,7 +164,7 @@
       cv.setUint16(12, time, true);
       cv.setUint16(14, day, true);
       cv.setUint32(16, crc, true);
-      cv.setUint32(20, data.length, true);
+      cv.setUint32(20, dl, true);
       cv.setUint32(24, rawSize, true);
       cv.setUint16(28, name.length, true);
       cv.setUint16(30, 0, true);
@@ -146,7 +175,7 @@
       cv.setUint32(42, offset, true);
       cd.set(name, 46);
       central.push(cd);
-      offset += local.length + data.length;
+      offset += local.length + dl;
     }
     const centralSize = central.reduce((sum, c) => sum + c.length, 0);
     const eocd = new Uint8Array(22);
@@ -159,6 +188,8 @@
     ev.setUint32(12, centralSize, true);
     ev.setUint32(16, offset, true);
     ev.setUint16(20, 0, true);
+    // Streaming entries: return a Blob referencing the parts lazily (no full-ZIP copy).
+    if (anyChunks && typeof Blob !== 'undefined') return new Blob([...chunks, ...central, eocd]);
     const total = chunks.reduce((s, c) => s + c.length, 0) + centralSize + eocd.length;
     const out = new Uint8Array(total);
     let pos = 0;

@@ -1011,9 +1011,73 @@
     }
   }
 
+  // Lazy model-XML producer. Yields bounded Uint8Array chunks (flush every 20000 lines and
+  // per object) so a consumer can stream CRC+DEFLATE with backpressure instead of holding
+  // the whole multi-GB XML resident. The eager assembly consumes the same generator, so
+  // streaming and buffered paths emit byte-identical XML.
+  function* modelXmlChunks(plan, objects, assemblyId) {
+    const palette = plan.palette;
+    const encoder = new TextEncoder();
+    let textLines = [];
+    const flush = function* () {
+      if (!textLines.length) return;
+      yield encoder.encode(textLines.join('\n') + '\n');
+      textLines = [];
+    };
+    const pushLine = function* (s) { textLines.push(s); if (textLines.length >= 20000) yield* flush(); };
+    yield* pushLine('<?xml version="1.0" encoding="UTF-8"?>');
+    yield* pushLine('<model unit="millimeter" xml:lang="zh-CN" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:BambuStudio="http://schemas.bambulab.com/package/2021" xmlns:slic3rpe="http://schemas.slic3r.org/3mf/2017/06">');
+    yield* pushLine(' <metadata name="Application">ChromaStack</metadata>');
+    yield* pushLine(' <metadata name="BambuStudio:3mfVersion">1</metadata>');
+    yield* pushLine(` <metadata name="slic3rpe:layer_height">${plan.layerHeight}</metadata>`);
+    yield* pushLine(' <resources>');
+    yield* pushLine('  <basematerials id="1">');
+    for (const p of palette) yield* pushLine(`   <base name="${escapeXml(p.name)}" displaycolor="#${p.hex.replace('#', '').toUpperCase()}FF" />`);
+    yield* pushLine('  </basematerials>');
+    for (const obj of objects) {
+      yield* pushLine(`  <object id="${obj.id}" type="model" pid="1" pindex="${obj.filament}" name="${escapeXml(obj.name)}">`);
+      yield* pushLine('   <mesh>');
+      yield* pushLine('    <vertices>');
+      for (let i = 0; i < obj.positions.length; i += 3) {
+        yield* pushLine(`     <vertex x="${round(obj.positions[i], 4)}" y="${round(obj.positions[i + 1], 4)}" z="${round(obj.positions[i + 2], 4)}" />`);
+      }
+      yield* pushLine('    </vertices>');
+      yield* pushLine('    <triangles>');
+      for (let i = 0; i < obj.indices.length; i += 3) {
+        yield* pushLine(`     <triangle v1="${obj.indices[i]}" v2="${obj.indices[i + 1]}" v3="${obj.indices[i + 2]}" pid="1" pindex="${obj.filament}" />`);
+      }
+      yield* pushLine('    </triangles>');
+      yield* pushLine('   </mesh>');
+      yield* pushLine('  </object>');
+      yield* flush();
+    }
+    yield* pushLine(`  <object id="${assemblyId}" type="model" name="ChromaStack_Model">`);
+    yield* pushLine('   <components>');
+    for (const obj of objects) yield* pushLine(`    <component objectid="${obj.id}" />`);
+    yield* pushLine('   </components>');
+    yield* pushLine('  </object>');
+    yield* pushLine(' </resources>');
+    yield* pushLine(' <build>');
+    yield* pushLine(`  <item objectid="${assemblyId}" />`);
+    yield* pushLine(' </build>');
+    yield* pushLine('</model>');
+    yield* flush();
+  }
+
+  // Pull-based ReadableStream over the XML generator: one chunk per pull => the DEFLATE
+  // consumer applies backpressure and only one raw chunk is resident at a time.
+  function modelXmlStream(plan, objects, assemblyId) {
+    const gen = modelXmlChunks(plan, objects, assemblyId);
+    return new ReadableStream({
+      pull(ctrl) { const r = gen.next(); if (r.done) ctrl.close(); else ctrl.enqueue(r.value); }
+    });
+  }
+
   // PERF3: shared assembly (ids + XML + config + files). Serial build3MFParts and the
   // parallel worker-pool path both call this with the same rawObjects => identical bytes.
-  function assemble3MFParts(plan, rawObjects, grid, plane, ew, eh, pixelSize) {
+  // streaming=true replaces the eager model byteParts with a lazy stream entry so the ZIP
+  // writer can CRC+DEFLATE it with backpressure (bounded peak memory); XML bytes identical.
+  function assemble3MFParts(plan, rawObjects, grid, plane, ew, eh, pixelSize, streaming) {
     const palette = plan.palette;
     const objects = [];
     const componentMeta = [];
@@ -1036,66 +1100,21 @@
     for (const o of objects) { budgetV += o.positions.length / 3; budgetT += o.indices.length / 3; }
     assertModelXmlBudget(budgetV, budgetT);
 
-    // Encode the model XML in bounded chunks: at 1280+ grids the full string
-    // exceeds V8's maximum string length ("Invalid string length"), so each
-    // object is joined+encoded before the next one is appended.
-    const encoder = new TextEncoder();
-    const byteParts = [];
-    let textLines = [];
-    const flushText = () => {
-      if (!textLines.length) return;
-      byteParts.push(encoder.encode(textLines.join('\n') + '\n'));
-      textLines = [];
-    };
-    const pushLine = s => { textLines.push(s); if (textLines.length >= 20000) flushText(); };
-    pushLine('<?xml version="1.0" encoding="UTF-8"?>');
-    pushLine('<model unit="millimeter" xml:lang="zh-CN" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:BambuStudio="http://schemas.bambulab.com/package/2021" xmlns:slic3rpe="http://schemas.slic3r.org/3mf/2017/06">');
-    pushLine(' <metadata name="Application">ChromaStack</metadata>');
-    pushLine(' <metadata name="BambuStudio:3mfVersion">1</metadata>');
-    pushLine(` <metadata name="slic3rpe:layer_height">${plan.layerHeight}</metadata>`);
-    pushLine(' <resources>');
-    pushLine('  <basematerials id="1">');
-    for (const p of palette) pushLine(`   <base name="${escapeXml(p.name)}" displaycolor="#${p.hex.replace('#', '').toUpperCase()}FF" />`);
-    pushLine('  </basematerials>');
-    for (const obj of objects) {
-      pushLine(`  <object id="${obj.id}" type="model" pid="1" pindex="${obj.filament}" name="${escapeXml(obj.name)}">`);
-      pushLine('   <mesh>');
-      pushLine('    <vertices>');
-      for (let i = 0; i < obj.positions.length; i += 3) {
-        pushLine(`     <vertex x="${round(obj.positions[i], 4)}" y="${round(obj.positions[i + 1], 4)}" z="${round(obj.positions[i + 2], 4)}" />`);
+    // Model XML: eager byteParts (buffered path) or a lazy stream entry (streaming path).
+    // Both consume modelXmlChunks, so the emitted XML is byte-identical.
+    let modelEntry;
+    if (streaming) {
+      modelEntry = { name: '3D/3dmodel.model', stream: () => modelXmlStream(plan, objects, assemblyId) };
+    } else {
+      const byteParts = [];
+      for (const chunk of modelXmlChunks(plan, objects, assemblyId)) byteParts.push(chunk);
+      // F-EXP-01: refuse a >4GB payload (ZIP32 single-entry limit) with an actionable message.
+      const modelSize = byteParts.reduce((s, b) => s + b.length, 0);
+      if (modelSize > 0xFFFFFFFF) {
+        const err = new Error('模型 XML 超过 4GB（ZIP32 上限）：几何过大。请降低精度（如 2× 而非 4×）或减小成品尺寸。');
+        err.zipCapacity = true; throw err;
       }
-      pushLine('    </vertices>');
-      pushLine('    <triangles>');
-      for (let i = 0; i < obj.indices.length; i += 3) {
-        // Triangle-level colour is what Bambu Studio's standard-3MF colour
-        // parser reads. Object-level pid/pindex alone is treated as plain
-        // geometry, and the whole model falls back to the slicer's default
-        // two filaments (the "why only 2 filaments?" symptom).
-        pushLine(`     <triangle v1="${obj.indices[i]}" v2="${obj.indices[i + 1]}" v3="${obj.indices[i + 2]}" pid="1" pindex="${obj.filament}" />`);
-      }
-      pushLine('    </triangles>');
-      pushLine('   </mesh>');
-      pushLine('  </object>');
-      flushText();
-    }
-    pushLine(`  <object id="${assemblyId}" type="model" name="ChromaStack_Model">`);
-    pushLine('   <components>');
-    for (const obj of objects) pushLine(`    <component objectid="${obj.id}" />`);
-    pushLine('   </components>');
-    pushLine('  </object>');
-    pushLine(' </resources>');
-    pushLine(' <build>');
-    pushLine(`  <item objectid="${assemblyId}" />`);
-    pushLine(' </build>');
-    pushLine('</model>');
-    flushText();
-    // F-EXP-01: stream the model XML as parts (no full modelBytes copy). The ZIP
-    // writer accumulates CRC + DEFLATE over the parts, halving peak memory. Refuse
-    // a >4GB payload (ZIP32 single-entry limit) with an actionable message.
-    const modelSize = byteParts.reduce((s, b) => s + b.length, 0);
-    if (modelSize > 0xFFFFFFFF) {
-      const err = new Error('模型 XML 超过 4GB（ZIP32 上限）：几何过大。请降低精度（如 2× 而非 4×）或减小成品尺寸。');
-      err.zipCapacity = true; throw err;
+      modelEntry = { name: '3D/3dmodel.model', parts: byteParts, size: modelSize };
     }
 
     const assemblyFaces = objects.reduce((s, obj) => s + obj.indices.length / 3, 0);
@@ -1179,7 +1198,7 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
     const files = [
       { name: '[Content_Types].xml', data: contentTypes },
       { name: '_rels/.rels', data: rels },
-      { name: '3D/3dmodel.model', parts: byteParts, size: modelSize },
+      modelEntry,
       { name: 'Metadata/model_settings.config', data: modelSettings },
       { name: 'Metadata/project_settings.config', data: JSON.stringify(projectSettings, null, 2) },
       { name: 'Metadata/chromastack.json', data: JSON.stringify(meta, null, 2) }

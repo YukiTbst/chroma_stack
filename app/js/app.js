@@ -2207,7 +2207,9 @@
     const rawObjects = [];
     for (const r of results) if (r) for (const o of r) rawObjects.push(o);
     const out = await runExportWorker(p, rawObjects, grid, plane, ew, eh, pixelSize);
-    return { blob: new Blob([out.bytes], { type: 'model/3mf' }), meta: out.meta, ew, eh, pixelSize, exportDownscaled: grid.downscaled, exportChange: plane.changeStats };
+    // Streaming worker returns a lazy Blob; buffered compat returns bytes. Wrap either.
+    const blob = new Blob([out.blob || out.bytes], { type: 'model/3mf' });
+    return { blob, meta: out.meta, ew, eh, pixelSize, exportDownscaled: grid.downscaled, exportChange: plane.changeStats };
   }
 
   function export3MF() {

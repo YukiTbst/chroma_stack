@@ -16,14 +16,21 @@ self.onmessage = async function (e) {
       filament: o.filament, name: o.name,
       positions: new Float64Array(o.positions), indices: new Uint32Array(o.indices)
     }));
-    const out = CS.exporter.assemble3MFParts(m.plan, objects, m.grid, m.plane, m.ew, m.eh, m.pixelSize);
-    const bytes = CS.zip.createZipAsync ? await CS.zip.createZipAsync(out.files) : CS.zip.createZip(out.files);
-    const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-    self.postMessage({
-      id: m.id, ok: true, bytes: buf, meta: out.meta, objects: out.objects,
+    const out = CS.exporter.assemble3MFParts(m.plan, objects, m.grid, m.plane, m.ew, m.eh, m.pixelSize, true);
+    const z = CS.zip.createZipAsync ? await CS.zip.createZipAsync(out.files) : CS.zip.createZip(out.files);
+    const base = {
+      id: m.id, ok: true, meta: out.meta, objects: out.objects,
       ew: out.ew, eh: out.eh, pixelSize: out.pixelSize,
       exportDownscaled: out.exportDownscaled, exportChange: out.exportChange
-    }, [buf]);
+    };
+    if (typeof Blob !== 'undefined' && z instanceof Blob) {
+      // Streaming path: the ZIP is a lazy Blob (compressed chunks); clone it to the main
+      // thread without materializing a full byte buffer in the worker.
+      self.postMessage({ ...base, blob: z });
+    } else {
+      const buf = z.buffer.slice(z.byteOffset, z.byteOffset + z.byteLength);
+      self.postMessage({ ...base, bytes: buf }, [buf]);
+    }
   } catch (err) {
     self.postMessage({ id: m.id, ok: false, error: String((err && err.message) || err) });
   }
