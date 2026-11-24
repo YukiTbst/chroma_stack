@@ -2451,6 +2451,43 @@
     };
   }
 
+  /* P1 (perf review): apply a published calibrationV2 model to the palette. Shared by
+     buildPlan and the GPU pre-warm so both solve against the SAME effective TD/opaque
+     (the pre-warm must not use the raw library palette when a model is active). Mutates
+     palette; returns the diagnostic and the (possibly updated) foundation. */
+  function applyOpticalModel(palette, baseIndex, layerHeight, options) {
+    if (!(options.opticalModel && options.opticalModel.params)) return { diag: null, foundation: palette[baseIndex] };
+    const params = options.opticalModel.params;
+    const chKeys = ['r', 'g', 'b'];
+    const covered = [], uncovered = [];
+    let partialChannels = 0, effectiveChannels = 0;
+    for (const p of palette) {
+      const t = params[p.id] || params[p.name];
+      if (!t) { uncovered.push({ id: p.id, name: p.name }); continue; }
+      const st = t.state || ['estimated', 'estimated', 'estimated'];
+      const lin = { r: p.lin.r, g: p.lin.g, b: p.lin.b };
+      const hd = [p.hdR, p.hdG, p.hdB];
+      const used = [false, false, false];
+      for (let c = 0; c < 3; c++) {
+        if (st[c] === 'estimated') { lin[chKeys[c]] = t.opaque[c]; hd[c] = Math.exp(t.logHd[c]); used[c] = true; effectiveChannels++; }
+        else partialChannels++;
+      }
+      p.lin = lin;
+      p.hdR = hd[0]; p.hdG = hd[1]; p.hdB = hd[2];
+      p.hd = (hd[0] + hd[1] + hd[2]) / 3;
+      p.tdR = hd[0] * 10; p.tdG = hd[1] * 10; p.tdB = hd[2] * 10; p.td = p.hd * 10;
+      p.lab = C.rgb01ToLab({ r: C.linearToSrgb(p.lin.r), g: C.linearToSrgb(p.lin.g), b: C.linearToSrgb(p.lin.b) });
+      p.fromModel = used.some(Boolean);
+      p.modelChannels = used;
+      p.modelState = st.slice();
+      covered.push({ id: p.id, name: p.name, state: st.slice(), used });
+    }
+    const dom = options.opticalModel.compatibilityDomain;
+    const crossDomain = (dom && dom.layerHeightMm != null && Math.abs(dom.layerHeightMm - layerHeight) > 1e-6)
+      ? { modelLayerHeightMm: dom.layerHeightMm, productionLayerHeightMm: layerHeight } : null;
+    return { diag: { applied: true, source: 'calibrationV2', covered, uncovered, partialChannels, effectiveChannels, crossDomain }, foundation: palette[baseIndex] };
+  }
+
   /* Pure layer-geometry derivation, factored out so the coverage warning can
      probe which knob actually thicken the flat colour cap for the CURRENT
      geometry. In the default coupled TD path raising flatTopMm lifts the shared
@@ -2550,37 +2587,10 @@
     // models without a per-channel state are treated as estimated (backward compat).
     // F02: coverage / cross-domain / effective source are reported, never silent.
     let opticalModelDiag = null;
-    if (engine === 'td' && options.opticalModel && options.opticalModel.params) {
-      const params = options.opticalModel.params;
-      const chKeys = ['r', 'g', 'b'];
-      const covered = [], uncovered = [];
-      let partialChannels = 0, effectiveChannels = 0;
-      for (const p of palette) {
-        const t = params[p.id] || params[p.name];
-        if (!t) { uncovered.push({ id: p.id, name: p.name }); continue; }
-        const st = t.state || ['estimated', 'estimated', 'estimated'];
-        const lin = { r: p.lin.r, g: p.lin.g, b: p.lin.b };
-        const hd = [p.hdR, p.hdG, p.hdB];
-        const used = [false, false, false];
-        for (let c = 0; c < 3; c++) {
-          if (st[c] === 'estimated') { lin[chKeys[c]] = t.opaque[c]; hd[c] = Math.exp(t.logHd[c]); used[c] = true; effectiveChannels++; }
-          else partialChannels++;
-        }
-        p.lin = lin;
-        p.hdR = hd[0]; p.hdG = hd[1]; p.hdB = hd[2];
-        p.hd = (hd[0] + hd[1] + hd[2]) / 3;
-        p.tdR = hd[0] * 10; p.tdG = hd[1] * 10; p.tdB = hd[2] * 10; p.td = p.hd * 10;
-        p.lab = C.rgb01ToLab({ r: C.linearToSrgb(p.lin.r), g: C.linearToSrgb(p.lin.g), b: C.linearToSrgb(p.lin.b) });
-        p.fromModel = used.some(Boolean);
-        p.modelChannels = used;
-        p.modelState = st.slice();
-        covered.push({ id: p.id, name: p.name, state: st.slice(), used });
-      }
-      foundation = palette[baseIndex];
-      const dom = options.opticalModel.compatibilityDomain;
-      const crossDomain = (dom && dom.layerHeightMm != null && Math.abs(dom.layerHeightMm - layerHeight) > 1e-6)
-        ? { modelLayerHeightMm: dom.layerHeightMm, productionLayerHeightMm: layerHeight } : null;
-      opticalModelDiag = { applied: true, source: 'calibrationV2', covered, uncovered, partialChannels, effectiveChannels, crossDomain };
+    if (engine === 'td') {
+      const om = applyOpticalModel(palette, baseIndex, layerHeight, options);
+      opticalModelDiag = om.diag;
+      foundation = om.foundation;
     }
 
     let flatMask, stds, residual, nearest, stdT, resT;
@@ -3730,20 +3740,35 @@
   // deterministic early steps (kmeans centres + near-neutral gradient cells) so the
   // cache keys match exactly; cache misses fall back to the CPU matcher inside buildPlan.
   // When WebGPU is unavailable the matcher is null and this is just buildPlan (CPU).
+  // P2 (perf review): cache the adapter probe so a no-GPU device does not redo the
+  // Lab/mask/gamut pre-warm prep every compute only to discover there is no adapter.
+  let gpuAdapterProbe = null;
+  function probeGpu() {
+    if (gpuAdapterProbe) return gpuAdapterProbe;
+    gpuAdapterProbe = (async () => {
+      if (typeof navigator === 'undefined' || !navigator.gpu) return false;
+      try { return !!(await navigator.gpu.requestAdapter()); } catch (e) { return false; }
+    })();
+    return gpuAdapterProbe;
+  }
+
+  // P1 observability (perf review): a CPU plan records WHY it did not use the GPU,
+  // so the UI can show the real reason instead of a bare GPU/CPU label.
+  async function cpuFallback(imageData, options, reason) {
+    const plan = await buildPlan(imageData, options);
+    plan.computeEngine = 'cpu';
+    plan.computeDiag = { path: 'cpu', reason };
+    return plan;
+  }
+
   async function buildPlanAsync(imageData, options) {
     const engine = options.engine === 'td' ? 'td' : 'lut';
-    if (engine !== 'td' || !CS.gamutGpu || (options.palette || []).length === 0) return buildPlan(imageData, options);
-    // R1: the pre-warm gamut is built from the raw palette + requested gradLayers.
-    // opticalModel rewrites palette TD/opaque and a topOverride recomputes colour
-    // layers, so the formal gamut would differ. The gamut-signature cache key already
-    // prevents wrong recipes; skip the pre-warm entirely here to avoid wasted GPU work
-    // (these cases run the exact CPU path).
-    const hasOpticalModel = !!(options.opticalModel && options.opticalModel.params);
-    const hasTopOverride = (Number(options.gradTopMmOverride) || 0) > 0;
-    if (hasOpticalModel || hasTopOverride) return buildPlan(imageData, options);
-    // R5: GPU pre-warm has a fixed setup/dispatch/readback cost; below ~100k pixels
-    // the CPU matcher is faster (review measured 19.2k px GPU ~38% slower). Skip it.
-    if (imageData.width * imageData.height < 100000) return buildPlan(imageData, options);
+    if (engine !== 'td') return cpuFallback(imageData, options, 'lut-engine');
+    if (!CS.gamutGpu || (options.palette || []).length === 0) return cpuFallback(imageData, options, 'no-gpu-module');
+    // R5: below ~100k pixels the CPU matcher beats the GPU setup/dispatch/readback cost.
+    if (imageData.width * imageData.height < 100000) return cpuFallback(imageData, options, 'small-image');
+    // P2: probe the adapter FIRST; no GPU -> straight to the formal CPU flow, no prep.
+    if (!(await probeGpu())) return cpuFallback(imageData, options, 'no-adapter');
     let matcher = null;
     try {
       const w = imageData.width, h = imageData.height, n = w * h;
@@ -3751,21 +3776,32 @@
       const pixelSize = (Number(options.widthMm) || 150) / w;
       const palette = buildUserPalette(options.palette || []);
       const baseIndex = clamp(Math.round(Number(options.foundationIndex) || 0), 0, palette.length - 1);
-      const foundation = palette[baseIndex];
-      const colorLayers = clamp(Math.round(Number(options.gradLayers) || 6), 1, 24);
+      // P1: solve against the SAME effective palette/geometry as the formal plan, so
+      // calibrated (opticalModel) and top-override configs accelerate too instead of
+      // being skipped. applyOpticalModel + deriveLayerGeometry are the shared helpers
+      // buildPlan uses; the gamut signature cache key still guards against any mismatch.
+      const foundation = applyOpticalModel(palette, baseIndex, layerHeight, options).foundation;
+      const requestedColorLayers = clamp(Math.round(Number(options.gradLayers) || 6), 1, 24);
       const uniformN = options.equalHeight === true || options.luminanceHeight === true;
       const variableHeight = options.variableHeight !== false && !uniformN;
+      const geo = deriveLayerGeometry({
+        engine: 'td', flatTopMm: Number(options.flatTopMm) || 2.0, layerHeight,
+        reliefMm: uniformN ? 0 : (Number(options.reliefMm) || 0), colorLayers: requestedColorLayers,
+        baseLayers: 0, startOverride: Math.round(Number(options.gradStartLayerOverride) || 0),
+        topOverride: Number(options.gradTopMmOverride) || 0
+      });
+      const colorLayers = geo.colorLayers;
       const { lab } = imageToLab(imageData);
       const { printMask } = buildPrintMask(lab, w, h, options, pixelSize);
       const auto = buildFlatMask(lab, w, h, palette, options);
       const flatMask = auto.mask;
       let flatCount = 0; for (let i = 0; i < n; i++) flatCount += flatMask[i];
       const gradCount = n - flatCount;
-      if (gradCount <= 0) return buildPlan(imageData, options);
+      if (gradCount <= 0) return cpuFallback(imageData, options, 'all-flat');
       const gamut = buildTdGamut(palette, foundation, layerHeight, colorLayers, variableHeight, uniformN ? { allowRepeat: true, diverse: true } : undefined);
-      if (!gamut || !gamut.length) return buildPlan(imageData, options);
+      if (!gamut || !gamut.length) return cpuFallback(imageData, options, 'empty-gamut');
       matcher = await CS.gamutGpu.createMatcher(gamut);
-      if (!matcher) return buildPlan(imageData, options);
+      if (!matcher) return cpuFallback(imageData, options, 'no-matcher');
       const edgeCleanRequested = clamp(Math.round(Number(options.edgeClean == null ? 1 : options.edgeClean) || 0), 0, 3);
       const edgeMask = (edgeCleanRequested > 0 && gradCount >= n * 0.20) ? buildEdgeMask(lab, w, h, edgeCleanRequested) : null;
       const samples = sampleGradientLab(lab, flatMask, 12000, edgeMask);
@@ -3794,6 +3830,7 @@
       if (exacts.length) { const er = await matcher.matchBatch(exacts); exacts.forEach((c, i) => cache.match.set(key(c), er[i])); }
       const plan = await buildPlan(imageData, { ...options, matchCache: cache });
       plan.computeEngine = 'gpu';
+      plan.computeDiag = { path: 'gpu', gamutSize: gamut.length, colorLayers, opticalModel: !!(options.opticalModel && options.opticalModel.params), prewarm: { centers: centers.length, cells: cells.length, exacts: exacts.length } };
       matcher.destroy();
       return plan;
     } catch (e) {
@@ -3802,6 +3839,7 @@
       // the fallback is the exact synchronous CPU path, not a retry on a bad pool.
       const plan = await buildPlan(imageData, { ...options, pool: null, matchCache: null });
       plan.computeEngine = 'cpu';
+      plan.computeDiag = { path: 'cpu', reason: 'gpu-error', error: String((e && e.message) || e) };
       return plan;
     }
   }

@@ -13,7 +13,7 @@ import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const ctx = vm.createContext({ console, setTimeout, clearTimeout, performance });
+const ctx = vm.createContext({ console, setTimeout, clearTimeout, performance, navigator: { gpu: { requestAdapter: async () => ({}) } } });
 ctx.globalThis = ctx;
 for (const f of ['color.js', 'data-filaments.js', 'data-lut.js', 'optics.js', 'height-curve.js', 'calibration-data.js', 'layer-optimizer.js', 'engine.js']) {
   vm.runInContext(fs.readFileSync(path.join(root, 'app', 'js', f), 'utf8'), ctx);
@@ -22,9 +22,12 @@ const CS = ctx.CS, E = CS.engine;
 
 /* Mock WebGPU matcher: scores targets against the gamut it is handed (the pre-warm
    gamut), exactly like the real shader would. If the formal plan uses a different
-   gamut, these cached recipes are wrong and must NOT be used. */
+   gamut, these cached recipes are wrong and must NOT be used. Counts createMatcher
+   calls so the test can assert the GPU path was actually exercised. */
+let matcherCalls = 0;
 CS.gamutGpu = {
   async createMatcher(gamut) {
+    matcherCalls++;
     return {
       n: gamut.length,
       async matchBatch(targets) { return targets.map(t => E.matchGamut(t, gamut)); },
@@ -34,7 +37,7 @@ CS.gamutGpu = {
   }
 };
 
-const w = 160, h = 120, n = w * h;
+const w = 400, h = 300, n = w * h; // > 100k so the GPU pre-warm is attempted
 const data = new Uint8ClampedArray(n * 4);
 for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
   const i = y * w + x;
@@ -66,13 +69,17 @@ function compare(cpu, gpu, label) {
   assert.ok(maxDE < 1e-9, label + ': max visual diff ~0 (got ' + maxDE + ')');
 }
 
-/* (a) height overrides: requested gradLayers=4 but topOverride forces 6 colour layers. */
+/* (a) height overrides: requested gradLayers=4 but topOverride forces 6 colour layers.
+   The pre-warm must now use the FINAL geometry (6 layers) and still match the CPU. */
 const optsHeight = { ...base, gradStartLayerOverride: 5, gradTopMmOverride: 0.88 };
 const cpuH = await E.buildPlan(image, optsHeight);
+let mc = matcherCalls;
 const gpuH = await E.buildPlanAsync(image, optsHeight);
+assert.ok(matcherCalls > mc, 'height-override: GPU matcher must be invoked (not skipped)');
+assert.equal(gpuH.computeEngine, 'gpu', 'height-override: GPU path active');
 compare(cpuH, gpuH, 'height-override');
 
-/* (b) opticalModel: formal palette TD/opaque overridden, pre-warm must not use raw palette. */
+/* (b) opticalModel: formal palette TD/opaque overridden, pre-warm must use the model too. */
 const opticalModel = {
   params: {
     k: { state: ['estimated', 'estimated', 'estimated'], logHd: [Math.log(0.05), Math.log(0.05), Math.log(0.05)], opaque: [0.02, 0.02, 0.02] },
@@ -83,12 +90,17 @@ const opticalModel = {
 };
 const optsOpt = { ...base, opticalModel };
 const cpuO = await E.buildPlan(image, optsOpt);
+mc = matcherCalls;
 const gpuO = await E.buildPlanAsync(image, optsOpt);
+assert.ok(matcherCalls > mc, 'opticalModel: GPU matcher must be invoked (not skipped)');
+assert.equal(gpuO.computeEngine, 'gpu', 'opticalModel: GPU path active');
 compare(cpuO, gpuO, 'opticalModel');
 
 /* (c) default (no override/model) must STILL be identical (GPU pre-warm valid). */
 const cpuD = await E.buildPlan(image, base);
+mc = matcherCalls;
 const gpuD = await E.buildPlanAsync(image, base);
+assert.ok(matcherCalls > mc, 'default: GPU matcher invoked');
 compare(cpuD, gpuD, 'default');
 
 console.log('all GPU pre-warm consistency checks passed');

@@ -1061,13 +1061,22 @@
     $('metricFamilies').textContent = String(s.familyCount);
     $('metricSwaps').textContent = String(s.toolChanges);
     $('metricRelief').textContent = (p.reliefMm >= 0 ? '+' : '') + p.reliefMm.toFixed(2);
-    // PERF2-GPU: show whether this plan was computed on GPU or CPU.
+    // PERF2-GPU: show whether this plan was computed on GPU or CPU, plus the reason
+    // (perf review: a bare GPU/CPU label hides why GPU was skipped / what accelerated).
     if ($('computeEngine')) {
       const eng = p.computeEngine === 'gpu' ? 'GPU' : 'CPU';
       $('computeEngine').hidden = false;
       $('computeEngineName').textContent = eng;
       $('computeEngineName').className = eng === 'GPU' ? 'eng-gpu' : 'eng-cpu';
       $('computeEngineMs').textContent = state.planMs ? ` · ${(state.planMs / 1000).toFixed(1)}s` : '';
+      const d = p.computeDiag;
+      let tip;
+      if (d && d.path === 'gpu') tip = `GPU 预热加速：色域 ${d.gamutSize} 条，色层 ${d.colorLayers}${d.opticalModel ? '，已用标定模型' : ''}；预热中心 ${d.prewarm.centers}/单元 ${d.prewarm.cells}/精确 ${d.prewarm.exacts}。其余阶段（中性约束/协调等）仍在 CPU。`;
+      else if (d && d.reason) {
+        const reasons = { 'lut-engine': 'LUT 引擎', 'no-gpu-module': '无 WebGPU 模块', 'small-image': '图像小于 10 万像素（CPU 更快）', 'no-adapter': '无可用 GPU 适配器', 'all-flat': '全纯色无渐变', 'empty-gamut': '色域为空', 'no-matcher': 'GPU 匹配器创建失败', 'gpu-error': 'GPU 出错回退' };
+        tip = `CPU 计算：${reasons[d.reason] || d.reason}${d.error ? '（' + d.error + '）' : ''}`;
+      } else tip = 'CPU 计算';
+      $('computeEngine').title = tip;
     }
     $('valUnder5').textContent = s.under5.toFixed(0) + '%';
     $('valUnder10').textContent = s.under10.toFixed(0) + '%';
