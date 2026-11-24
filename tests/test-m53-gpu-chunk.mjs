@@ -51,15 +51,21 @@ function makeDevice(maxBind, maxWG) {
     createCommandEncoder() {
       const ops = [];
       const runCompute = (bg) => {
-        const lab = bg._m[0]._typed, tgt = bg._m[2]._typed, out = bg._m[3], par = bg._m[4]._typed;
+        // P3: simulate the per-target reduction shader (binding 3 = idx, 5 = score).
+        const lab = bg._m[0]._typed, tgt = bg._m[2]._typed, outIdx = bg._m[3], outScore = bg._m[5], par = bg._m[4]._typed;
         const n = par[0], batch = par[1];
-        out._data = new Uint8Array(batch * n * 4);
-        const f = new Float32Array(out._data.buffer);
+        outIdx._data = new Uint8Array(batch * 4);
+        outScore._data = new Uint8Array(batch * 4);
+        const idxArr = new Uint32Array(outIdx._data.buffer);
+        const scoreArr = new Float32Array(outScore._data.buffer);
         for (let b = 0; b < batch; b++) {
           const tl = tgt[b * 4], ta = tgt[b * 4 + 1], tb = tgt[b * 4 + 2];
+          let bi = 0, bs = 1e38;
           for (let i = 0; i < n; i++) {
-            f[b * n + i] = Math.abs(tl - lab[i * 4]) + Math.abs(ta - lab[i * 4 + 1]) + Math.abs(tb - lab[i * 4 + 2]);
+            const s = Math.abs(tl - lab[i * 4]) + Math.abs(ta - lab[i * 4 + 1]) + Math.abs(tb - lab[i * 4 + 2]);
+            if (s < bs || (s === bs && i < bi)) { bs = s; bi = i; }
           }
+          idxArr[b] = bi; scoreArr[b] = bs;
         }
       };
       return {
@@ -97,12 +103,13 @@ gamut.neutral = [];
 
 function l1Best(t) { let bi = 0, bs = Infinity; for (let i = 0; i < n; i++) { const g = gamut[i].lab; const s = Math.abs(t.L - g.L) + Math.abs(t.a - g.a) + Math.abs(t.b - g.b); if (s < bs) { bs = s; bi = i; } } return bi; }
 
-/* Small binding cap forces chunking: chunkCap = floor(100000/(40*4)) = 625. */
-const CS = loadGpu(makeDevice(100000, 65535));
+/* P3: chunking is now by workgroup-per-dimension limit (one workgroup per target).
+   A small maxWG forces a 5000-target batch to split into chunks. */
+const CS = loadGpu(makeDevice(100000, 1000));
 const matcher = await CS.gamutGpu.createMatcher(gamut);
 assert.ok(matcher, 'matcher created');
 
-/* Large batch (5000 targets) — unchunked out buffer = 5000*40*4 = 800KB > 100KB cap. */
+/* Large batch (5000 targets) > maxWG 1000 -> chunked; argmin must stay correct. */
 const targets = [];
 for (let b = 0; b < 5000; b++) targets.push({ L: (b * 37) % 100, a: ((b * 13) % 21) - 10, b: ((b * 7) % 17) - 8 });
 const res = await matcher.scanBestBatch(targets);

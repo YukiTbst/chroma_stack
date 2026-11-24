@@ -13,13 +13,15 @@ const PI: f32 = 3.141592653589793;
 struct Gamut { lab: array<vec3<f32>>, };
 struct Meta { m: array<vec3<f32>>, };   // runs, distinct, chromaFrac
 struct Targets { t: array<vec3<f32>>, };
-struct Out { s: array<f32>, };
+struct OutIdx { v: array<u32>, };
+struct OutScore { v: array<f32>, };
 @group(0) @binding(0) var<storage, read> gamut: Gamut;
 @group(0) @binding(1) var<storage, read> gmeta: Meta;
 @group(0) @binding(2) var<storage, read> targets: Targets;
-@group(0) @binding(3) var<storage, read_write> out: Out;
+@group(0) @binding(3) var<storage, read_write> outIdx: OutIdx;
 struct Params { n: u32, batch: u32, pad0: u32, pad1: u32, };
 @group(0) @binding(4) var<uniform> params: Params;
+@group(0) @binding(5) var<storage, read_write> outScore: OutScore;
 
 fn deltaE2000(lab1: vec3<f32>, lab2: vec3<f32>) -> f32 {
   let L1 = lab1.x; let a1 = lab1.y; let b1 = lab1.z;
@@ -66,16 +68,43 @@ fn penalty(t: vec3<f32>, m: vec3<f32>) -> f32 {
   return p;
 }
 
+var<workgroup> shIdx: array<u32, 256>;
+var<workgroup> shScore: array<f32, 256>;
+
+// P3: one workgroup per target reduces over the whole gamut and writes ONLY the
+// winning index + score (was: full batch*gamut score matrix read back to CPU).
+// Tie-break is (score, index) lexicographic so the result is deterministic and
+// matches the CPU lowest-index-on-tie rule. 1e38 sentinel marks "no finite score".
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let idx = gid.x;
-  let total = params.n * params.batch;
-  if (idx >= total) { return; }
-  let b = idx / params.n;
-  let i = idx % params.n;
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let b = wid.x;
+  let tid = lid.x;
+  if (b >= params.batch) { return; }
   let t = targets.t[b];
-  let de = deltaE2000(t, gamut.lab[i]);
-  out.s[idx] = de + penalty(t, gmeta.m[i]);
+  var bestIdx: u32 = 0u;
+  var bestScore: f32 = 1e38;
+  var i = tid;
+  loop {
+    if (i >= params.n) { break; }
+    let s = deltaE2000(t, gamut.lab[i]) + penalty(t, gmeta.m[i]);
+    if (s < bestScore || (s == bestScore && i < bestIdx)) { bestScore = s; bestIdx = i; }
+    i += 256u;
+  }
+  shIdx[tid] = bestIdx;
+  shScore[tid] = bestScore;
+  workgroupBarrier();
+  var stride = 128u;
+  loop {
+    if (stride == 0u) { break; }
+    if (tid < stride) {
+      let s1 = shScore[tid]; let i1 = shIdx[tid];
+      let s2 = shScore[tid + stride]; let i2 = shIdx[tid + stride];
+      if (s2 < s1 || (s2 == s1 && i2 < i1)) { shScore[tid] = s2; shIdx[tid] = i2; }
+    }
+    workgroupBarrier();
+    stride = stride / 2u;
+  }
+  if (tid == 0u) { outIdx.v[b] = shIdx[0]; outScore.v[b] = shScore[0]; }
 }
 `;
 
@@ -126,19 +155,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     function isNeutralEntry(g) { return !(g.chromaFrac > 0); }
 
-    // GPU6: bound each dispatch so the score buffer fits a storage binding and the
-    // workgroup count fits one dimension. Large images (4x) produce ~56k near-neutral
-    // targets; an unchunked batch needs a ~700MB buffer the device rejects, which used
-    // to throw and silently fall back to CPU. Chunking keeps results identical (each
-    // target's argmin is independent) while staying within device limits.
+    // P3: one workgroup per target, so a chunk is bounded by the workgroup-per-dimension
+    // limit (not by a batch*gamut score buffer). Readback is now batch*(idx+score) only.
     const lim = device.limits || {};
-    const maxBind = Math.min(lim.maxStorageBufferBindingSize || 134217728, lim.maxBufferSize || 268435456);
     const maxWG = lim.maxComputeWorkgroupsPerDimension || 65535;
-    const WG = 256; // matches @workgroup_size(256)
-    const chunkCap = Math.max(1, Math.min(Math.floor(maxBind / (n * 4)), Math.floor((maxWG * WG) / n)));
+    const chunkCap = Math.max(1, maxWG);
 
-    // GPU scores the whole gamut for one chunk of targets; CPU argmin. Returns raw
-    // best {index, entry} per target (no neutral lock, no f64 ΔE report yet).
+    // GPU reduces the whole gamut per target and returns only the winning index+score.
     async function rawBestChunk(targets) {
       const batch = targets.length;
       if (!batch) return [];
@@ -148,36 +171,40 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       for (let b = 0; b < batch; b++) { tData[b * 4] = targets[b].L; tData[b * 4 + 1] = targets[b].a; tData[b * 4 + 2] = targets[b].b; }
       const tBuf = device.createBuffer({ size: tData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
       device.queue.writeBuffer(tBuf, 0, tData);
-      const outSize = batch * n * 4;
-      const outBuf = device.createBuffer({ size: outSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-      const readBuf = device.createBuffer({ size: outSize, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      const outSize = batch * 4;
+      const outIdxBuf = device.createBuffer({ size: outSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+      const outScoreBuf = device.createBuffer({ size: outSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+      const readIdxBuf = device.createBuffer({ size: outSize, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      const readScoreBuf = device.createBuffer({ size: outSize, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
       device.queue.writeBuffer(paramBuf, 0, new Uint32Array([n, batch, 0, 0]));
       const bind = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
         { binding: 0, resource: { buffer: labBuf } }, { binding: 1, resource: { buffer: gmetaBuf } },
-        { binding: 2, resource: { buffer: tBuf } }, { binding: 3, resource: { buffer: outBuf } },
-        { binding: 4, resource: { buffer: paramBuf } },
+        { binding: 2, resource: { buffer: tBuf } }, { binding: 3, resource: { buffer: outIdxBuf } },
+        { binding: 4, resource: { buffer: paramBuf } }, { binding: 5, resource: { buffer: outScoreBuf } },
       ] });
       const enc = device.createCommandEncoder();
       const pass = enc.beginComputePass();
       pass.setPipeline(pipeline); pass.setBindGroup(0, bind);
-      pass.dispatchWorkgroups(Math.ceil(batch * n / 256));
+      pass.dispatchWorkgroups(batch);
       pass.end();
-      enc.copyBufferToBuffer(outBuf, 0, readBuf, 0, outSize);
+      enc.copyBufferToBuffer(outIdxBuf, 0, readIdxBuf, 0, outSize);
+      enc.copyBufferToBuffer(outScoreBuf, 0, readScoreBuf, 0, outSize);
       device.queue.submit([enc.finish()]);
       const gpuErr = await device.popErrorScope();
-      if (gpuErr) { tBuf.destroy(); outBuf.destroy(); readBuf.destroy(); throw new Error('GPU validation error: ' + (gpuErr.message || gpuErr)); }
-      await readBuf.mapAsync(GPUMapMode.READ);
-      const scores = new Float32Array(readBuf.getMappedRange().slice(0));
-      readBuf.unmap();
-      tBuf.destroy(); outBuf.destroy(); readBuf.destroy();
+      const cleanup = () => { tBuf.destroy(); outIdxBuf.destroy(); outScoreBuf.destroy(); readIdxBuf.destroy(); readScoreBuf.destroy(); };
+      if (gpuErr) { cleanup(); throw new Error('GPU validation error: ' + (gpuErr.message || gpuErr)); }
+      await readIdxBuf.mapAsync(GPUMapMode.READ);
+      await readScoreBuf.mapAsync(GPUMapMode.READ);
+      const idx = new Uint32Array(readIdxBuf.getMappedRange().slice(0));
+      const score = new Float32Array(readScoreBuf.getMappedRange().slice(0));
+      readIdxBuf.unmap(); readScoreBuf.unmap();
+      cleanup();
       const out = [];
       for (let b = 0; b < batch; b++) {
-        let bi = -1, bs = Infinity; const off = b * n;
-        // R2: only finite scores may win. If every score for a target is NaN/Inf
-        // (e.g. a driver/backend mishandles the shader), throw so buildPlanAsync
-        // falls back to CPU instead of silently returning gamut[0].
-        for (let i = 0; i < n; i++) { const s = scores[off + i]; if (Number.isFinite(s) && s < bs) { bs = s; bi = i; } }
-        if (bi < 0) throw new Error('GPU produced no finite score for target ' + b);
+        const bi = idx[b], s = score[b];
+        // R2/P3: the 1e38 sentinel (or any non-finite) means no valid score won ->
+        // throw so buildPlanAsync falls back to CPU instead of returning gamut[0].
+        if (!Number.isFinite(s) || s >= 1e38) throw new Error('GPU produced no finite score for target ' + b);
         out.push({ index: bi, entry: gamut[bi] });
       }
       return out;
