@@ -797,8 +797,13 @@
       for (let i = 1; i < left.length - 1; i++) poly.push([r.x0, left[i]]);
       let exposed = 0;
       for (const s of segs) {
-        const mx = s.ox !== 0 ? s.ax + s.ox : Math.floor((s.ax + s.bx) / 2);
-        const my = s.oy !== 0 ? s.ay + s.oy : Math.floor((s.ay + s.by) / 2);
+        // Boundary coords are pixel GRID LINES, not centres: the pixel left of a vertical
+        // line x=cx is column cx-1, but the pixel right of it is column cx (not cx+1);
+        // likewise above a horizontal line y=cy is row cy-1, below is row cy. Sampling
+        // ax+ox / ay+oy skipped the adjacent pixel on the right/bottom, mislabelling internal
+        // edges as walls (and vice versa) -> stray/missing walls and non-manifold columns.
+        const mx = s.ox !== 0 ? s.ax + (s.ox < 0 ? -1 : 0) : Math.floor((s.ax + s.bx) / 2);
+        const my = s.oy !== 0 ? s.ay + (s.oy < 0 ? -1 : 0) : Math.floor((s.ay + s.by) / 2);
         if (!at(mx, my)) { s.wall = true; exposed++; } else s.wall = false;
       }
       return { r, segs, poly, k: poly.length, exposed };
