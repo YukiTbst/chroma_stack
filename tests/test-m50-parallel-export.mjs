@@ -47,7 +47,7 @@ const parBytes = Z.createZip(out.files);
 // R6: compare the 3MF file CONTENTS, not the ZIP container bytes — zip.js stamps
 // each entry with the current time, so two real-time zips can differ by a second
 // even when the geometry/XML are identical (the old byte compare flaked).
-const fbytes = (f) => typeof f.data === 'string' ? Buffer.from(f.data, 'utf8') : Buffer.from(f.data);
+const fbytes = (f) => f.parts ? Buffer.concat(f.parts.map(p => Buffer.from(p))) : (typeof f.data === 'string' ? Buffer.from(f.data, 'utf8') : Buffer.from(f.data));
 const sFiles = serial.files.slice().sort((a, b) => (a.name < b.name ? -1 : 1));
 const pFiles = out.files.slice().sort((a, b) => (a.name < b.name ? -1 : 1));
 assert.equal(sFiles.length, pFiles.length, '3MF file count matches');

@@ -30,7 +30,7 @@ assert.equal(lite.flatMask, undefined, 'litePlan strips flatMask');
 assert.ok(lite.palette && lite.stats, 'litePlan keeps metadata');
 const liteOut = X.assemble3MFParts(lite, rawObjects, grid, plane, ew, eh, pixelSize);
 
-const fbytes = (f) => typeof f.data === 'string' ? Buffer.from(f.data, 'utf8') : Buffer.from(f.data);
+const fbytes = (f) => f.parts ? Buffer.concat(f.parts.map(p => Buffer.from(p))) : (typeof f.data === 'string' ? Buffer.from(f.data, 'utf8') : Buffer.from(f.data));
 assert.equal(full.files.length, liteOut.files.length, 'file count');
 for (let i = 0; i < full.files.length; i++) {
   assert.equal(full.files[i].name, liteOut.files[i].name, 'file name ' + i);

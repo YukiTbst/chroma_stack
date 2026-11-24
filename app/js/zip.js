@@ -29,70 +29,74 @@
     return { time, day };
   }
 
-  function createZip(files) {
-    return assemble(files, null);
-  }
+  const ZIP32_MAX = 0xFFFFFFFF;
+  function capErr() { const e = new Error('模型超过 ZIP32 4GB 上限：几何过大。请降低精度（如 2× 而非 4×）或减小成品尺寸。'); e.zipCapacity = true; return e; }
 
-  async function compressRaw(data) {
+  // F-EXP-01: a file may carry its payload as `parts` (array of Uint8Array) + `size`
+  // so the exporter can stream the model XML without materializing one full buffer.
+  function rawOf(file) {
+    if (file.parts) return { size: file.size, parts: file.parts };
+    const data = typeof file.data === 'string' ? utf8(file.data) : file.data;
+    return { size: data.length, parts: [data] };
+  }
+  function crc32Parts(parts) {
+    let crc = 0xFFFFFFFF;
+    for (const bytes of parts) for (let i = 0; i < bytes.length; i++) crc = CRC_TABLE[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+    return (crc ^ 0xFFFFFFFF) >>> 0;
+  }
+  function concatParts(parts, size) { const out = new Uint8Array(size); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; } return out; }
+  async function compressParts(parts) {
     if (typeof CompressionStream === 'undefined' || typeof Response === 'undefined' || typeof Blob === 'undefined') return null;
     try {
-      const stream = new Blob([data]).stream().pipeThrough(new CompressionStream('deflate-raw'));
-      const ab = await new Response(stream).arrayBuffer();
-      return new Uint8Array(ab);
-    } catch (e) {
-      return null;
-    }
+      const stream = new Blob(parts).stream().pipeThrough(new CompressionStream('deflate-raw'));
+      return new Uint8Array(await new Response(stream).arrayBuffer());
+    } catch (e) { return null; }
   }
 
-  // Compress large text payloads (3D model XML) with DEFLATE. 3MF is a ZIP,
-  // and a watertight line-art mesh can be 20-40 MB as stored XML; deflate
-  // brings that down by roughly 8-10x with no slicer compatibility cost.
+  function createZip(files) {
+    const packed = [];
+    for (const file of files) {
+      const r = rawOf(file);
+      if (r.size > ZIP32_MAX) throw capErr();
+      const raw = concatParts(r.parts, r.size);
+      packed.push({ name: utf8(file.name), rawSize: r.size, crc: crc32(raw), stored: raw, method: 0 });
+    }
+    return assemble(packed);
+  }
+
+  // Compress large text payloads (3D model XML) with DEFLATE, streaming the parts so
+  // the full uncompressed buffer is never duplicated. CRC is accumulated incrementally.
   async function createZipAsync(files) {
     const packed = [];
     for (const file of files) {
-      const name = utf8(file.name);
-      const data = typeof file.data === 'string' ? utf8(file.data) : file.data;
-      let stored = data, method = 0;
-      if (data.length > 512) {
-        const z = await compressRaw(data);
-        if (z && z.length < data.length) { stored = z; method = 8; }
+      const r = rawOf(file);
+      if (r.size > ZIP32_MAX) throw capErr();
+      const crc = crc32Parts(r.parts);
+      let stored = null, method = 0;
+      if (r.size > 512) {
+        const z = await compressParts(r.parts);
+        if (z && z.length < r.size) { stored = z; method = 8; }
       }
-      packed.push({ name, data, stored, method });
+      if (!stored) stored = concatParts(r.parts, r.size);
+      packed.push({ name: utf8(file.name), rawSize: r.size, crc, stored, method });
     }
-    return assemble(packed, true);
+    return assemble(packed);
   }
 
-  function assemble(files, packedInput) {
-    // F-EXP-01: ZIP32 capacity guard. Local/central headers store sizes as uint32, so
-    // an entry > 4 GiB (e.g. a 4x line-art model XML ~4.9 GB) silently overflows the
-    // header even when the compressed file is small. Reject with an actionable error
-    // BEFORE writing rather than producing a corrupt 3MF. (ZIP64 needs target-slicer
-    // validation, so we do not silently emit it.)
-    const ZIP32_MAX = 0xFFFFFFFF;
+  function assemble(packed) {
+    // F-EXP-01: ZIP32 capacity guard before writing 32-bit header fields.
     let totalStored = 0;
-    for (const file of files) {
-      const raw = packedInput ? file.data : (typeof file.data === 'string' ? utf8(file.data) : file.data);
-      const stored = packedInput ? file.stored : raw;
-      if (raw.length > ZIP32_MAX || stored.length > ZIP32_MAX) {
-        const err = new Error('模型超过 ZIP32 单条目 4GB 上限：几何过大。请降低精度（如 2× 而非 4×）或减小成品尺寸。');
-        err.zipCapacity = true; throw err;
-      }
-      totalStored += stored.length;
+    for (const e of packed) {
+      if (e.rawSize > ZIP32_MAX || e.stored.length > ZIP32_MAX) throw capErr();
+      totalStored += e.stored.length;
     }
-    if (files.length > 0xFFFF || totalStored > ZIP32_MAX) {
-      const err = new Error('模型超过 ZIP32 容量上限：请降低精度或减小成品尺寸。');
-      err.zipCapacity = true; throw err;
-    }
+    if (packed.length > 0xFFFF || totalStored > ZIP32_MAX) throw capErr();
     const chunks = [];
     const central = [];
     let offset = 0;
     const { time, day } = dosDateTime(new Date());
-    for (const file of files) {
-      const name = packedInput ? file.name : utf8(file.name);
-      const raw = packedInput ? file.data : (typeof file.data === 'string' ? utf8(file.data) : file.data);
-      const data = packedInput ? file.stored : raw;
-      const method = packedInput ? file.method : 0;
-      const crc = crc32(raw);
+    for (const e of packed) {
+      const name = e.name, data = e.stored, crc = e.crc, method = e.method, rawSize = e.rawSize;
       const local = new Uint8Array(30 + name.length);
       const lv = new DataView(local.buffer);
       lv.setUint32(0, 0x04034B50, true);
@@ -103,7 +107,7 @@
       lv.setUint16(12, day, true);
       lv.setUint32(14, crc, true);
       lv.setUint32(18, data.length, true);
-      lv.setUint32(22, raw.length, true);
+      lv.setUint32(22, rawSize, true);
       lv.setUint16(26, name.length, true);
       lv.setUint16(28, 0, true);
       local.set(name, 30);
@@ -120,7 +124,7 @@
       cv.setUint16(14, day, true);
       cv.setUint32(16, crc, true);
       cv.setUint32(20, data.length, true);
-      cv.setUint32(24, raw.length, true);
+      cv.setUint32(24, rawSize, true);
       cv.setUint16(28, name.length, true);
       cv.setUint16(30, 0, true);
       cv.setUint16(32, 0, true);
@@ -138,8 +142,8 @@
     ev.setUint32(0, 0x06054B50, true);
     ev.setUint16(4, 0, true);
     ev.setUint16(6, 0, true);
-    ev.setUint16(8, files.length, true);
-    ev.setUint16(10, files.length, true);
+    ev.setUint16(8, packed.length, true);
+    ev.setUint16(10, packed.length, true);
     ev.setUint32(12, centralSize, true);
     ev.setUint32(16, offset, true);
     ev.setUint16(20, 0, true);
