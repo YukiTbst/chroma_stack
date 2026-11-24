@@ -715,6 +715,10 @@
       // watertight (heavier for large organic masks, but correct).
       positions.length = startPos * 3;
       indices.length = startIdx;
+      // Task C: try exact-occupancy rectangle compression first (fewer faces); it
+      // rolls back and returns null if not manifold or not smaller, then per-cell tiling.
+      const rectMode = meshPrismRect(mask, w, h, pixelSize, z0, z1, positions, indices);
+      if (rectMode) return rectMode;
       return meshPrismTiling(mask, w, h, pixelSize, z0, z1, positions, indices);
     }
     return 'earcut';
@@ -725,6 +729,148 @@
      are keyed per grid corner AND per diagonal group, so cells that only
      touch at a point never share the corner column and their walls cannot
      weld into a 4-face non-manifold edge. */
+  /* Task C (export review): exact-occupancy rectangle compression of the fallback.
+     Row-run rectangles partition the mask exactly; shared edges are split at a common
+     breakpoint set so adjacent rects conform (no T-junctions); caps use a center fan
+     (k>4) or a quad (k==4); walls only on exposed sub-segments; diagonal contacts keep
+     the tiling's groupAt vertex separation. Returns 'rect' on success, or null to fall
+     back to per-cell tiling (when not manifold or not fewer faces). Footprint identical. */
+  function meshPrismRect(mask, w, h, pixelSize, z0, z1, positions, indices) {
+    const X = x => (x - w / 2) * pixelSize;
+    const Y = y => (h / 2 - y) * pixelSize;
+    const at = (x, y) => (x >= 0 && x < w && y >= 0 && y < h) ? mask[y * w + x] : 0;
+    const startPos = positions.length / 3, startIdx = indices.length;
+    const rollback = () => { positions.length = startPos * 3; indices.length = startIdx; };
+    // 1. deterministic row-run rectangles (extend vertically on identical runs)
+    const rects = [];
+    let active = new Map();
+    for (let y = 0; y < h; y++) {
+      const cur = new Map();
+      let x = 0;
+      while (x < w) {
+        if (!mask[y * w + x]) { x++; continue; }
+        let x1 = x; while (x1 < w && mask[y * w + x1]) x1++;
+        const key = x + ',' + x1;
+        const prev = active.get(key);
+        if (prev) { prev.y1 = y + 1; cur.set(key, prev); }
+        else { const r = { x0: x, y0: y, x1, y1: y + 1 }; rects.push(r); cur.set(key, r); }
+        x = x1;
+      }
+      active = cur;
+    }
+    if (!rects.length) return null;
+    let A = 0, P = 0;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      if (!mask[y * w + x]) continue;
+      A++;
+      if (!at(x, y - 1)) P++; if (!at(x, y + 1)) P++; if (!at(x - 1, y)) P++; if (!at(x + 1, y)) P++;
+    }
+    const Ttile = 4 * A + 2 * P;
+    // 2. shared-edge breakpoints
+    const horizontal = new Map(), vertical = new Map();
+    const addH = (y, x) => { let s = horizontal.get(y); if (!s) { s = new Set(); horizontal.set(y, s); } s.add(x); };
+    const addV = (x, y) => { let s = vertical.get(x); if (!s) { s = new Set(); vertical.set(x, s); } s.add(y); };
+    for (const r of rects) {
+      addH(r.y0, r.x0); addH(r.y0, r.x1); addH(r.y1, r.x0); addH(r.y1, r.x1);
+      addV(r.x0, r.y0); addV(r.x0, r.y1); addV(r.x1, r.y0); addV(r.x1, r.y1);
+    }
+    const hS = new Map(), vS = new Map();
+    for (const [y, s] of horizontal) hS.set(y, [...s].sort((a, b) => a - b));
+    for (const [x, s] of vertical) vS.set(x, [...s].sort((a, b) => a - b));
+    const between = (arr, a, b) => { const o = []; if (arr) for (const v of arr) if (v >= a && v <= b) o.push(v); return o; };
+    // per-rect boundary sub-segments with outward direction + polygon vertex count
+    const rectData = rects.map(r => {
+      const top = between(hS.get(r.y0), r.x0, r.x1);
+      const right = between(vS.get(r.x1), r.y0, r.y1);
+      const bottom = between(hS.get(r.y1), r.x0, r.x1).reverse();
+      const left = between(vS.get(r.x0), r.y0, r.y1).reverse();
+      const segs = [];
+      for (let i = 0; i < top.length - 1; i++) segs.push({ ax: top[i], ay: r.y0, bx: top[i + 1], by: r.y0, ox: 0, oy: -1 });
+      for (let i = 0; i < right.length - 1; i++) segs.push({ ax: r.x1, ay: right[i], bx: r.x1, by: right[i + 1], ox: 1, oy: 0 });
+      for (let i = 0; i < bottom.length - 1; i++) segs.push({ ax: bottom[i], ay: r.y1, bx: bottom[i + 1], by: r.y1, ox: 0, oy: 1 });
+      for (let i = 0; i < left.length - 1; i++) segs.push({ ax: r.x0, ay: left[i], bx: r.x0, by: left[i + 1], ox: -1, oy: 0 });
+      // polygon vertices CCW: top L->R, right T->B, bottom R->L, left B->T (corners once)
+      const poly = [];
+      for (const x of top) poly.push([x, r.y0]);
+      for (let i = 1; i < right.length; i++) poly.push([r.x1, right[i]]);
+      for (let i = 1; i < bottom.length; i++) poly.push([bottom[i], r.y1]);
+      for (let i = 1; i < left.length - 1; i++) poly.push([r.x0, left[i]]);
+      let exposed = 0;
+      for (const s of segs) {
+        const mx = s.ox !== 0 ? s.ax + s.ox : Math.floor((s.ax + s.bx) / 2);
+        const my = s.oy !== 0 ? s.ay + s.oy : Math.floor((s.ay + s.by) / 2);
+        if (!at(mx, my)) { s.wall = true; exposed++; } else s.wall = false;
+      }
+      return { r, segs, poly, k: poly.length, exposed };
+    });
+    // 8. face-count selection: only use rect if strictly fewer faces than tiling
+    let Trect = 0;
+    for (const d of rectData) Trect += (d.k === 4 ? 4 : 2 * d.k) + 2 * d.exposed;
+    if (Trect >= Ttile) return null;
+    // vertex helpers (same keying as tiling; diagonal group from an inside adjacent cell)
+    const vmap = new Map();
+    const vert = (cx, cy, z, g) => {
+      const key = Math.round(X(cx) * 100000) + ',' + Math.round(Y(cy) * 100000) + ',' + Math.round(z * 100000) + ',' + g;
+      let idx = vmap.get(key);
+      if (idx === undefined) { idx = positions.length / 3; vmap.set(key, idx); positions.push(X(cx), Y(cy), z); }
+      return idx;
+    };
+    const tri = (a, b, c) => { if (a !== b && b !== c && a !== c) indices.push(a, b, c); };
+    const groupAt = (cx, cy, x, y) => {
+      const nw = at(cx - 1, cy - 1), ne = at(cx, cy - 1), sw = at(cx - 1, cy), se = at(cx, cy);
+      if (nw && se && !ne && !sw) return (x === cx - 1 && y === cy - 1) ? 1 : 2;
+      if (ne && sw && !nw && !se) return (x === cx && y === cy - 1) ? 1 : 2;
+      return 0;
+    };
+    const cornerGroup = (cx, cy, r) => {
+      let ix = cx === r.x1 ? cx - 1 : cx;
+      let iy = cy === r.y1 ? cy - 1 : cy;
+      if (ix < r.x0) ix = r.x0; if (ix >= r.x1) ix = r.x1 - 1;
+      if (iy < r.y0) iy = r.y0; if (iy >= r.y1) iy = r.y1 - 1;
+      return groupAt(cx, cy, ix, iy);
+    };
+    const pidx = i => [positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]];
+    const quad = (a, b, c, d, outward) => {
+      const [ax, ay, az] = pidx(a), [bx, by, bz] = pidx(b), [cx2, cy2, cz] = pidx(c), [dx, dy, dz] = pidx(d);
+      const ux = bx - ax, uy = by - ay, uz = bz - az, vx = cx2 - ax, vy = cy2 - ay, vz = cz - az;
+      const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+      if (nx * outward[0] + ny * outward[1] + nz * outward[2] < 0) { tri(a, c, b); tri(a, d, c); }
+      else { tri(a, b, c); tri(a, c, d); }
+    };
+    // 3-6. emit caps + walls per rect
+    for (let ri = 0; ri < rectData.length; ri++) {
+      const { r, segs, poly, k } = rectData[ri];
+      const vg = (cx, cy, z) => vert(cx, cy, z, cornerGroup(cx, cy, r));
+      // top cap (+Z) and bottom cap (-Z)
+      if (k === 4) {
+        const a1 = vg(poly[0][0], poly[0][1], z1), b1 = vg(poly[1][0], poly[1][1], z1), c1 = vg(poly[2][0], poly[2][1], z1), d1 = vg(poly[3][0], poly[3][1], z1);
+        quad(a1, b1, c1, d1, [0, 0, 1]);
+        const a0 = vg(poly[0][0], poly[0][1], z0), b0 = vg(poly[1][0], poly[1][1], z0), c0 = vg(poly[2][0], poly[2][1], z0), d0 = vg(poly[3][0], poly[3][1], z0);
+        quad(a0, d0, c0, b0, [0, 0, -1]);
+      } else {
+        const cx = (r.x0 + r.x1) / 2, cy = (r.y0 + r.y1) / 2;
+        const cTop = vert(cx, cy, z1, 'c' + ri), cBot = vert(cx, cy, z0, 'c' + ri);
+        for (let i = 0; i < k; i++) {
+          const p0 = poly[i], p1 = poly[(i + 1) % k];
+          const v0t = vg(p0[0], p0[1], z1), v1t = vg(p1[0], p1[1], z1);
+          tri(cTop, v1t, v0t);
+          const v0b = vg(p0[0], p0[1], z0), v1b = vg(p1[0], p1[1], z0);
+          tri(cBot, v0b, v1b);
+        }
+      }
+      // walls on exposed sub-segments
+      for (const s of segs) {
+        if (!s.wall) continue;
+        const ga = cornerGroup(s.ax, s.ay, r), gb = cornerGroup(s.bx, s.by, r);
+        const a0 = vert(s.ax, s.ay, z0, ga), b0 = vert(s.bx, s.by, z0, gb);
+        const a1 = vert(s.ax, s.ay, z1, ga), b1 = vert(s.bx, s.by, z1, gb);
+        quad(a0, b0, b1, a1, [s.ox, -s.oy, 0]);
+      }
+    }
+    if (!validateLocalEdges(indices, startIdx)) { rollback(); return null; }
+    return 'rect';
+  }
+
   function meshPrismTiling(mask, w, h, pixelSize, z0, z1, positions, indices) {
     const X = x => (x - w / 2) * pixelSize;
     const Y = y => (h / 2 - y) * pixelSize;
@@ -1217,6 +1363,6 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
   CS.exporter = {
     build3MFBytes, build3MFBytesAsync, build3MFBlob, build3MFBlobAsync, planSummary, buildPlanMarkdown, samplePlane, buildPrisms,
     traceLoops, simplifyLoop, loopArea, pointInLoop, meshPrism, exportGridFor, exportReport, buildLayerMasks,
-    meshPrismObjects, assemble3MFParts, litePlan
+    meshPrismObjects, assemble3MFParts, litePlan, meshPrismRect, meshPrismTiling
   };
 })(typeof globalThis !== 'undefined' ? globalThis : this);
