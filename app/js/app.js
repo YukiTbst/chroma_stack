@@ -2131,7 +2131,7 @@
       const id = ++meshTaskId;
       let settled = false;
       const cleanup = () => { clearTimeout(timer); worker.removeEventListener('message', onMsg); worker.removeEventListener('error', onErr); };
-      const timer = setTimeout(() => { if (settled) return; settled = true; cleanup(); reject(new Error('网格化 worker 超时')); }, timeoutMs || 120000);
+      const timer = setTimeout(() => { if (settled) return; settled = true; cleanup(); const err = new Error('网格化 worker 超时'); err.meshTimeout = true; reject(err); }, timeoutMs || 120000);
       const onMsg = (e) => { const d = e.data || {}; if (d.id !== id || settled) return; settled = true; cleanup(); if (d.ok) resolve(d.objects); else reject(new Error(d.error || 'mesh failed')); };
       const onErr = (e) => { if (settled) return; settled = true; cleanup(); reject(new Error((e && e.message) || 'mesh worker error')); };
       worker.addEventListener('message', onMsg);
@@ -2153,7 +2153,7 @@
       let settled = false;
       const drop = () => { try { w.terminate(); } catch (e) { /* ignore */ } exportWorker = null; };
       const cleanup = () => { clearTimeout(timer); w.removeEventListener('message', onMsg); w.removeEventListener('error', onErr); };
-      const timer = setTimeout(() => { if (settled) return; settled = true; cleanup(); drop(); reject(new Error('3MF 组装超时')); }, 180000);
+      const timer = setTimeout(() => { if (settled) return; settled = true; cleanup(); drop(); const err = new Error('3MF 组装超时'); err.exportTimeout = true; reject(err); }, 180000);
       const onMsg = (e) => { const d = e.data || {}; if (d.id !== id || settled) return; settled = true; cleanup(); if (d.ok) resolve(d); else reject(new Error(d.error || '3MF assembly failed')); };
       const onErr = (e) => { if (settled) return; settled = true; cleanup(); drop(); reject(new Error((e && e.message) || 'export worker error')); };
       w.addEventListener('message', onMsg);
@@ -2175,17 +2175,25 @@
     for (let f = 0; f < p.palette.length; f++) for (const pr of prisms[f]) tasks.push({ f, mask: pr.mask, z0: pr.z0, z1: pr.z1 });
     if (!tasks.length) throw new Error('没有可导出的几何体（检查纯色区/渐变区层数）');
     const pool = getMeshPool();
-    const n = Math.min(pool.n, tasks.length);
-    const per = Math.ceil(tasks.length / n);
-    const chunks = [];
-    for (let i = 0; i < tasks.length; i += per) chunks.push(tasks.slice(i, i + per));
     const paletteLite = p.palette.map(pp => ({ name: pp.name, hex: pp.hex }));
-    let results;
+    // E2 (export review): dynamic task queue instead of static equal-count chunks.
+    // Static chunking handed one worker all the heavy black/white prisms while the
+    // others idled (2x: 11s vs 40.7s; 4x: timeout). Workers pull the next task as they
+    // finish; results are stored by original index so object order/bytes stay identical.
+    const results = new Array(tasks.length);
+    let nextTask = 0;
+    const workerLoop = (slot) => (async () => {
+      for (;;) {
+        const i = nextTask++;
+        if (i >= tasks.length) return;
+        results[i] = await runMeshChunk(pool, slot, { palette: paletteLite, layerHeight: p.layerHeight, ew, eh, pixelSize, tasks: [tasks[i]] }, 120000);
+      }
+    })();
     try {
-      results = await Promise.all(chunks.map((chunk, idx) => runMeshChunk(pool, idx, { palette: paletteLite, layerHeight: p.layerHeight, ew, eh, pixelSize, tasks: chunk }, 120000)));
+      await Promise.all(pool.workers.map((_, slot) => workerLoop(slot)));
     } catch (e) { resetMeshPool(); throw e; }
     const rawObjects = [];
-    for (const r of results) for (const o of r) rawObjects.push(o);
+    for (const r of results) if (r) for (const o of r) rawObjects.push(o);
     const out = await runExportWorker(p, rawObjects, grid, plane, ew, eh, pixelSize);
     return { blob: new Blob([out.bytes], { type: 'model/3mf' }), meta: out.meta, ew, eh, pixelSize, exportDownscaled: grid.downscaled, exportChange: plane.changeStats };
   }
@@ -2202,11 +2210,22 @@
       try {
         // The started export intentionally uses the clicked plan snapshot even
         // if the user keeps editing; later edits never change its content/name.
-        // PERF3: mesh across a worker pool (off the main thread); fall back to serial.
+        // PERF3: mesh across a worker pool (off the main thread). E3 (export review):
+        // a task timeout must NOT trigger a full serial recompute from scratch (that
+        // discards finished work and re-stalls the UI). Only worker-unsupported /
+        // startup failures fall back to the serial compat path.
         let out;
         if (typeof Worker !== 'undefined' && location.protocol !== 'file:') {
           try { out = await build3MFParallel(p); }
-          catch (e) { console.warn('并行导出失败，回退串行导出', e); out = await X.build3MFBlobAsync(p); }
+          catch (e) {
+            if (e && (e.meshTimeout || e.exportTimeout)) {
+              console.warn('导出超时，停止（不整单重算）', e);
+              toast('3MF 导出超时：模型几何过大。请降低精度（如 2× 而非 4×）或减小成品尺寸后重试。');
+              return;
+            }
+            console.warn('并行导出不可用，回退串行导出', e);
+            out = await X.build3MFBlobAsync(p);
+          }
         } else {
           out = await X.build3MFBlobAsync(p);
         }
