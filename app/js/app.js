@@ -2114,7 +2114,7 @@
     if (meshPool) return meshPool;
     const n = Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 4) - 1));
     const workers = [];
-    for (let i = 0; i < n; i++) workers.push(new Worker(workerUrl('mesh-worker.js')));
+    for (let i = 0; i < n; i++) { try { workers.push(new Worker(workerUrl('mesh-worker.js'))); } catch (e) { e.workerStartup = true; throw e; } }
     meshPool = { workers, n };
     return meshPool;
   }
@@ -2132,13 +2132,13 @@
       let settled = false;
       const cleanup = () => { clearTimeout(timer); worker.removeEventListener('message', onMsg); worker.removeEventListener('error', onErr); };
       const timer = setTimeout(() => { if (settled) return; settled = true; cleanup(); const err = new Error('网格化 worker 超时'); err.meshTimeout = true; reject(err); }, timeoutMs || 120000);
-      const onMsg = (e) => { const d = e.data || {}; if (d.id !== id || settled) return; settled = true; cleanup(); if (d.ok) resolve(d.objects); else reject(new Error(d.error || 'mesh failed')); };
-      const onErr = (e) => { if (settled) return; settled = true; cleanup(); reject(new Error((e && e.message) || 'mesh worker error')); };
+      const onMsg = (e) => { const d = e.data || {}; if (d.id !== id || settled) return; settled = true; cleanup(); if (d.ok) resolve(d.objects); else { const err = new Error(d.error || 'mesh failed'); err.meshRuntime = true; reject(err); } };
+      const onErr = (e) => { if (settled) return; settled = true; cleanup(); const err = new Error((e && e.message) || 'mesh worker error'); err.meshRuntime = true; reject(err); };
       worker.addEventListener('message', onMsg);
       worker.addEventListener('error', onErr);
       const transfer = payload.tasks.map(t => t.mask.buffer);
       try { worker.postMessage(Object.assign({ id }, payload), transfer); }
-      catch (e) { if (!settled) { settled = true; cleanup(); reject(e); } }
+      catch (e) { if (!settled) { settled = true; cleanup(); e.meshRuntime = true; reject(e); } }
     });
   }
   // R7: assembly + zip run in a dedicated worker so the main thread never builds the
@@ -2147,22 +2147,22 @@
   let exportWorker = null, exportTaskId = 0;
   function runExportWorker(p, rawObjects, grid, plane, ew, eh, pixelSize) {
     return new Promise((resolve, reject) => {
-      if (!exportWorker) exportWorker = new Worker(workerUrl('export-worker.js'));
+      if (!exportWorker) { try { exportWorker = new Worker(workerUrl('export-worker.js')); } catch (e) { e.workerStartup = true; reject(e); return; } }
       const w = exportWorker;
       const id = ++exportTaskId;
       let settled = false;
       const drop = () => { try { w.terminate(); } catch (e) { /* ignore */ } exportWorker = null; };
       const cleanup = () => { clearTimeout(timer); w.removeEventListener('message', onMsg); w.removeEventListener('error', onErr); };
       const timer = setTimeout(() => { if (settled) return; settled = true; cleanup(); drop(); const err = new Error('3MF 组装超时'); err.exportTimeout = true; reject(err); }, 180000);
-      const onMsg = (e) => { const d = e.data || {}; if (d.id !== id || settled) return; settled = true; cleanup(); if (d.ok) resolve(d); else reject(new Error(d.error || '3MF assembly failed')); };
-      const onErr = (e) => { if (settled) return; settled = true; cleanup(); drop(); reject(new Error((e && e.message) || 'export worker error')); };
+      const onMsg = (e) => { const d = e.data || {}; if (d.id !== id || settled) return; settled = true; cleanup(); if (d.ok) resolve(d); else { const err = new Error(d.error || '3MF assembly failed'); err.assemblyRuntime = true; reject(err); } };
+      const onErr = (e) => { if (settled) return; settled = true; cleanup(); drop(); const err = new Error((e && e.message) || 'export worker error'); err.assemblyRuntime = true; reject(err); };
       w.addEventListener('message', onMsg);
       w.addEventListener('error', onErr);
       const objects = rawObjects.map(o => ({ filament: o.filament, name: o.name, positions: o.positions.buffer, indices: o.indices.buffer }));
       const transfer = []; for (const o of objects) { transfer.push(o.positions, o.indices); }
       const msg = { id, plan: X.litePlan(p), objects, grid: { downscaled: grid.downscaled }, plane: { changeStats: plane.changeStats }, ew, eh, pixelSize };
       try { w.postMessage(msg, transfer); }
-      catch (e) { if (!settled) { settled = true; cleanup(); reject(e); } }
+      catch (e) { if (!settled) { settled = true; cleanup(); e.assemblyRuntime = true; reject(e); } }
     });
   }
   async function build3MFParallel(p, options) {
@@ -2218,13 +2218,20 @@
         if (typeof Worker !== 'undefined' && location.protocol !== 'file:') {
           try { out = await build3MFParallel(p); }
           catch (e) {
-            if (e && (e.meshTimeout || e.exportTimeout)) {
-              console.warn('导出超时，停止（不整单重算）', e);
-              toast('3MF 导出超时：模型几何过大。请降低精度（如 2× 而非 4×）或减小成品尺寸后重试。');
+            // F-EXP-02: only a Worker-unsupported / startup failure uses the serial
+            // compat path. Any failure AFTER processing started (mesh/assembly runtime
+            // error, worker error, timeout) must stop — a full serial recompute would
+            // discard finished work and re-stall the main thread. Errors are classified
+            // at their source (workerStartup / meshRuntime / assemblyRuntime / *Timeout).
+            if (e && e.workerStartup) {
+              console.warn('Worker 不可用，回退串行兼容导出', e);
+              out = await X.build3MFBlobAsync(p);
+            } else {
+              console.warn('导出失败，停止（不整单重算）', e);
+              const stage = e && e.meshTimeout ? '网格化超时' : e && e.exportTimeout ? '组装超时' : e && e.meshRuntime ? '网格化' : e && e.assemblyRuntime ? '组装/压缩' : '导出';
+              toast(`3MF ${stage}失败：${(e && e.message) || e}。请降低精度（如 2× 而非 4×）或减小成品尺寸后重试。`);
               return;
             }
-            console.warn('并行导出不可用，回退串行导出', e);
-            out = await X.build3MFBlobAsync(p);
           }
         } else {
           out = await X.build3MFBlobAsync(p);

@@ -924,6 +924,13 @@
     let modelBytes = null;
     {
       const total = byteParts.reduce((s, b) => s + b.length, 0);
+      // F-EXP-01: refuse to allocate a >4GB model buffer (ZIP32 single-entry limit).
+      // This stops the 4x line-art case before exhausting memory, with an actionable
+      // message, rather than overflowing the ZIP header or stalling the page.
+      if (total > 0xFFFFFFFF) {
+        const err = new Error('模型 XML 超过 4GB（ZIP32 上限）：几何过大。请降低精度（如 2× 而非 4×）或减小成品尺寸。');
+        err.zipCapacity = true; throw err;
+      }
       modelBytes = new Uint8Array(total);
       let off = 0;
       for (const b of byteParts) { modelBytes.set(b, off); off += b.length; }

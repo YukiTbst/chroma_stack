@@ -53,7 +53,7 @@ const palette = [
   const gamut = CS.engine.buildTdGamut(pal, pal[1], 0.08, 4, true);
   const matcher = await CS.gamutGpu.createMatcher(gamut);
   assert.ok(matcher, 'matcher created against mock device');
-  await assert.rejects(() => matcher.matchBatch([{ L: 50, a: 0, b: 0 }, { L: 30, a: 5, b: -5 }]), /no finite score/, 'NaN scores must reject, not pick gamut[0]');
+  await assert.rejects(() => matcher.matchBatch([{ L: 50, a: 0, b: 0 }, { L: 30, a: 5, b: -5 }]), /no valid score/, 'NaN scores must reject, not pick gamut[0]');
   matcher.destroy();
 }
 

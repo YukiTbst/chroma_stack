@@ -81,7 +81,11 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
   let tid = lid.x;
   if (b >= params.batch) { return; }
   let t = targets.t[b];
-  var bestIdx: u32 = 0u;
+  // F-GPU-01: 0xFFFFFFFF is an explicit "no valid candidate" index sentinel. A finite
+  // score sentinel (1e38) is unsafe because Math.fround(1e38) < 1e38 in JS, so the
+  // read-back check could miss it. The index is validated against the gamut range on
+  // the CPU side, which is exact regardless of f32 rounding.
+  var bestIdx: u32 = 0xFFFFFFFFu;
   var bestScore: f32 = 1e38;
   var i = tid;
   loop {
@@ -200,11 +204,14 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
       readIdxBuf.unmap(); readScoreBuf.unmap();
       cleanup();
       const out = [];
+      const sentinel = Math.fround(1e38);
       for (let b = 0; b < batch; b++) {
         const bi = idx[b], s = score[b];
-        // R2/P3: the 1e38 sentinel (or any non-finite) means no valid score won ->
-        // throw so buildPlanAsync falls back to CPU instead of returning gamut[0].
-        if (!Number.isFinite(s) || s >= 1e38) throw new Error('GPU produced no finite score for target ' + b);
+        // F-GPU-01: validate the index against the gamut range (the shader writes
+        // 0xFFFFFFFF when no candidate won) AND guard the score. The f32 sentinel
+        // read back is Math.fround(1e38) (< 1e38), so compare against that exact value;
+        // any invalid result throws -> buildPlanAsync falls back to CPU, never gamut[0].
+        if (bi >= n || !Number.isFinite(s) || s >= sentinel) throw new Error('GPU produced no valid score for target ' + b);
         out.push({ index: bi, entry: gamut[bi] });
       }
       return out;

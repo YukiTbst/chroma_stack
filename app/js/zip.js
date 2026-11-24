@@ -63,6 +63,26 @@
   }
 
   function assemble(files, packedInput) {
+    // F-EXP-01: ZIP32 capacity guard. Local/central headers store sizes as uint32, so
+    // an entry > 4 GiB (e.g. a 4x line-art model XML ~4.9 GB) silently overflows the
+    // header even when the compressed file is small. Reject with an actionable error
+    // BEFORE writing rather than producing a corrupt 3MF. (ZIP64 needs target-slicer
+    // validation, so we do not silently emit it.)
+    const ZIP32_MAX = 0xFFFFFFFF;
+    let totalStored = 0;
+    for (const file of files) {
+      const raw = packedInput ? file.data : (typeof file.data === 'string' ? utf8(file.data) : file.data);
+      const stored = packedInput ? file.stored : raw;
+      if (raw.length > ZIP32_MAX || stored.length > ZIP32_MAX) {
+        const err = new Error('模型超过 ZIP32 单条目 4GB 上限：几何过大。请降低精度（如 2× 而非 4×）或减小成品尺寸。');
+        err.zipCapacity = true; throw err;
+      }
+      totalStored += stored.length;
+    }
+    if (files.length > 0xFFFF || totalStored > ZIP32_MAX) {
+      const err = new Error('模型超过 ZIP32 容量上限：请降低精度或减小成品尺寸。');
+      err.zipCapacity = true; throw err;
+    }
     const chunks = [];
     const central = [];
     let offset = 0;
