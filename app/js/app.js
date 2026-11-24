@@ -2114,7 +2114,10 @@
     if (meshPool) return meshPool;
     const n = Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 4) - 1));
     const workers = [];
-    for (let i = 0; i < n; i++) { try { workers.push(new Worker(workerUrl('mesh-worker.js'))); } catch (e) { e.workerStartup = true; throw e; } }
+    for (let i = 0; i < n; i++) {
+      try { workers.push(new Worker(workerUrl('mesh-worker.js'))); }
+      catch (e) { for (const w of workers) { try { w.terminate(); } catch (_) {} } e.workerStartup = true; throw e; }
+    }
     meshPool = { workers, n };
     return meshPool;
   }
@@ -2145,9 +2148,17 @@
   // (potentially millions of lines of) vertex/triangle XML. Objects are transferred
   // zero-copy; the plan is stripped to metadata via litePlan.
   let exportWorker = null, exportTaskId = 0;
+  // Review P2: create/verify the export worker BEFORE meshing (preflight). A late
+  // constructor failure after mesh work is done must not be classed as a startup
+  // failure (which would discard finished meshing and redo everything serially).
+  function preflightExportWorker() {
+    if (exportWorker) return;
+    try { exportWorker = new Worker(workerUrl('export-worker.js')); }
+    catch (e) { e.workerStartup = true; throw e; }
+  }
   function runExportWorker(p, rawObjects, grid, plane, ew, eh, pixelSize) {
     return new Promise((resolve, reject) => {
-      if (!exportWorker) { try { exportWorker = new Worker(workerUrl('export-worker.js')); } catch (e) { e.workerStartup = true; reject(e); return; } }
+      if (!exportWorker) { const e = new Error('export worker unavailable after preflight'); e.assemblyRuntime = true; reject(e); return; }
       const w = exportWorker;
       const id = ++exportTaskId;
       let settled = false;
@@ -2175,6 +2186,7 @@
     for (let f = 0; f < p.palette.length; f++) for (const pr of prisms[f]) tasks.push({ f, mask: pr.mask, z0: pr.z0, z1: pr.z1 });
     if (!tasks.length) throw new Error('没有可导出的几何体（检查纯色区/渐变区层数）');
     const pool = getMeshPool();
+    preflightExportWorker(); // before any mesh task: a startup failure here is a true preflight failure
     const paletteLite = p.palette.map(pp => ({ name: pp.name, hex: pp.hex }));
     // E2 (export review): dynamic task queue instead of static equal-count chunks.
     // Static chunking handed one worker all the heavy black/white prisms while the

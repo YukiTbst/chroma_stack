@@ -14,11 +14,16 @@
     return table;
   })();
 
-  function crc32(bytes) {
-    let crc = 0xFFFFFFFF;
-    for (let i = 0; i < bytes.length; i++) crc = CRC_TABLE[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
-    return (crc ^ 0xFFFFFFFF) >>> 0;
+  // Incremental CRC kernel. Keeping the per-byte loop in a dedicated function with
+  // an int32-coerced state avoids the JIT deopt that made the inline parts loop ~4x
+  // slower on large payloads (review: 766MB CRC 9s -> 2s). State is the running CRC
+  // (init -1, final XOR -1); never finalize per chunk.
+  function updateCrc(crc, bytes) {
+    crc |= 0;
+    for (let i = 0; i < bytes.length; i++) crc = CRC_TABLE[(crc ^ bytes[i]) & 255] ^ (crc >>> 8);
+    return crc;
   }
+  function crc32(bytes) { return (updateCrc(-1, bytes) ^ -1) >>> 0; }
 
   function utf8(str) { return new TextEncoder().encode(str); }
 
@@ -40,9 +45,9 @@
     return { size: data.length, parts: [data] };
   }
   function crc32Parts(parts) {
-    let crc = 0xFFFFFFFF;
-    for (const bytes of parts) for (let i = 0; i < bytes.length; i++) crc = CRC_TABLE[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
-    return (crc ^ 0xFFFFFFFF) >>> 0;
+    let crc = -1;
+    for (const bytes of parts) crc = updateCrc(crc, bytes);
+    return (crc ^ -1) >>> 0;
   }
   function concatParts(parts, size) { const out = new Uint8Array(size); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; } return out; }
   async function compressParts(parts) {
@@ -84,13 +89,20 @@
   }
 
   function assemble(packed) {
-    // F-EXP-01: ZIP32 capacity guard before writing 32-bit header fields.
-    let totalStored = 0;
+    // F-EXP-01 / review P2: ZIP32 capacity guard over the FULL layout, not just the
+    // payload. Each local header is 30+name bytes and each central header 46+name,
+    // so entry offsets / central-directory offset can overflow 32 bits even when the
+    // summed payload fits. Compute every offset before writing any setUint32 field.
+    if (packed.length > 0xFFFF) throw capErr();
+    let offEst = 0, centralEst = 0;
     for (const e of packed) {
       if (e.rawSize > ZIP32_MAX || e.stored.length > ZIP32_MAX) throw capErr();
-      totalStored += e.stored.length;
+      const localSize = 30 + e.name.length;
+      if (offEst > ZIP32_MAX || offEst + localSize + e.stored.length > ZIP32_MAX) throw capErr();
+      offEst += localSize + e.stored.length;
+      centralEst += 46 + e.name.length;
     }
-    if (packed.length > 0xFFFF || totalStored > ZIP32_MAX) throw capErr();
+    if (offEst > ZIP32_MAX || centralEst > ZIP32_MAX || offEst + centralEst + 22 > ZIP32_MAX) throw capErr();
     const chunks = [];
     const central = [];
     let offset = 0;
