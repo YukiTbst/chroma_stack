@@ -66,12 +66,32 @@
   async function compressReadable(stream) {
     const state = { crc: -1, raw: 0 };
     const tap = new TransformStream({
-      transform(chunk, ctrl) { state.crc = updateCrc(state.crc, chunk); state.raw += chunk.length; ctrl.enqueue(chunk); }
+      transform(chunk, ctrl) {
+        // Early-stop budget: reject the moment the running raw size would exceed ZIP32,
+        // before CRC/enqueue, so the error propagates and cancels the upstream producer
+        // instead of draining the whole multi-GB stream first.
+        if (state.raw + chunk.length > ZIP32_MAX) throw capErr();
+        state.raw += chunk.length;
+        state.crc = updateCrc(state.crc, chunk);
+        ctrl.enqueue(chunk);
+      }
     });
     const comp = stream.pipeThrough(tap).pipeThrough(new CompressionStream('deflate-raw'));
     const reader = comp.getReader();
     const chunks = [];
-    for (;;) { const r = await reader.read(); if (r.done) break; chunks.push(r.value); }
+    let stored = 0;
+    try {
+      for (;;) {
+        const r = await reader.read();
+        if (r.done) break;
+        stored += r.value.length;
+        if (stored > ZIP32_MAX) throw capErr();
+        chunks.push(r.value);
+      }
+    } catch (e) {
+      try { await reader.cancel(e); } catch (cancelErr) { /* ignore */ }
+      throw e;
+    }
     return { chunks, crc: (state.crc ^ -1) >>> 0, rawSize: state.raw };
   }
 

@@ -57,14 +57,20 @@ assert.equal(modelCrc >>> 0, Z.crc32(bufModel), 'CRC matches buffered XML');
 const inflated = new Uint8Array(await new Response(new Blob([modelComp]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer());
 assert.equal(Buffer.compare(Buffer.from(inflated), Buffer.from(bufModel)), 0, 'streaming zip inflates to identical XML');
 
-// (c) capacity guard on a >4GB stream with only ~1MB resident (backpressure).
-const MB = 1 << 20;
-const block = new Uint8Array(MB); // reused, never duplicated
-function* bigGen() { for (let i = 0; i < 4300; i++) yield block; } // ~4.3GB raw
-const bigIter = bigGen();
-const bigStream = new ReadableStream({ pull(ctrl) { const r = bigIter.next(); if (r.done) ctrl.close(); else ctrl.enqueue(r.value); } });
+// (c) capacity guard EARLY-STOPS: with large chunks the tap rejects as soon as the running
+// raw size would exceed ZIP32, cancels the upstream producer, and never drains the stream.
+const CHUNK = 512 * 1024 * 1024; // 512MiB
+const block = new Uint8Array(CHUNK); // reused, never duplicated
+let pulls = 0, cancelCalled = false;
+const bigStream = new ReadableStream({
+  pull(ctrl) { pulls++; if (pulls > 40) { ctrl.close(); return; } ctrl.enqueue(block); },
+  cancel() { cancelCalled = true; }
+});
 let threw = null;
 try { await Z.createZipAsync([{ name: '3D/3dmodel.model', stream: () => bigStream }]); } catch (e) { threw = e; }
 assert.ok(threw && threw.zipCapacity, '>4GB stream rejected with zipCapacity');
+assert.ok(cancelCalled, 'upstream producer cancelled on over-limit');
+assert.ok(pulls < 40, 'early stop: pulled ' + pulls + ' of 40 chunks');
+assert.ok(pulls <= 12, 'stopped near the limit, pulled ' + pulls);
 
-console.log('m66 passed: streaming XML/CRC/DEFLATE byte-identical + Blob zip + >4GB backpressured capacity guard');
+console.log('m66 passed: streaming XML/CRC/DEFLATE byte-identical + Blob zip + early-stop >4GB capacity guard (pulls=' + pulls + ', cancelled)');
