@@ -17,6 +17,13 @@ deploy/
 deploy/online-*.js
 deploy/online-*.html
 
+# Local verification scratch: artwork fixtures and measurement output stay local
+# (the public repo must not carry user artwork or one-off measurement scripts).
+scratch-*.mjs
+scratch-*.py
+app/test-art.*
+app/art-*
+
 # Local editor and operating-system files.
 .qoder/
 .vscode/

@@ -994,6 +994,23 @@
     return assemble3MFParts(plan, rawObjects, grid, plane, ew, eh, pixelSize);
   }
 
+  // P1 (export review): fail an over-large model BEFORE generating its XML. The exact
+  // modelSize check below only runs after every bytePart is built, so a 4x model can
+  // exhaust memory mid-generation before the capacity guard fires. These helpers give a
+  // guaranteed LOWER bound on the model XML byte count from vertex/triangle counts alone:
+  // a vertex line `     <vertex x="…" y="…" z="…" />\n` is >= 34 bytes (31 fixed + 3 coords
+  // of >= 1 char) and a triangle line `     <triangle v1="…" v2="…" v3="…" pid="1" pindex="…" />\n`
+  // is >= 58 bytes (54 fixed + 3 indices + 1 pindex, each >= 1 char). Header/resources/build
+  // and XML-escaped names only ADD bytes, so actual >= lowerBound always: rejecting when the
+  // lower bound exceeds ZIP32 can never falsely reject a model that actually fits.
+  function modelXmlLowerBound(totalV, totalT) { return totalV * 34 + totalT * 58; }
+  function assertModelXmlBudget(totalV, totalT) {
+    if (modelXmlLowerBound(totalV, totalT) > 0xFFFFFFFF) {
+      const err = new Error('模型 XML 超过 4GB（ZIP32 上限）：几何过大。请降低精度（如 2× 而非 4×）或减小成品尺寸。');
+      err.zipCapacity = true; throw err;
+    }
+  }
+
   // PERF3: shared assembly (ids + XML + config + files). Serial build3MFParts and the
   // parallel worker-pool path both call this with the same rawObjects => identical bytes.
   function assemble3MFParts(plan, rawObjects, grid, plane, ew, eh, pixelSize) {
@@ -1013,6 +1030,11 @@
     }
     if (!objects.length) throw new Error('没有可导出的几何体（检查纯色区/渐变区层数）');
     const assemblyId = nextId++;
+
+    // P1: early capacity guard from counts alone, before any XML is materialized.
+    let budgetV = 0, budgetT = 0;
+    for (const o of objects) { budgetV += o.positions.length / 3; budgetT += o.indices.length / 3; }
+    assertModelXmlBudget(budgetV, budgetT);
 
     // Encode the model XML in bounded chunks: at 1280+ grids the full string
     // exceeds V8's maximum string length ("Invalid string length"), so each
@@ -1363,6 +1385,7 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
   CS.exporter = {
     build3MFBytes, build3MFBytesAsync, build3MFBlob, build3MFBlobAsync, planSummary, buildPlanMarkdown, samplePlane, buildPrisms,
     traceLoops, simplifyLoop, loopArea, pointInLoop, meshPrism, exportGridFor, exportReport, buildLayerMasks,
-    meshPrismObjects, assemble3MFParts, litePlan, meshPrismRect, meshPrismTiling
+    meshPrismObjects, assemble3MFParts, litePlan, meshPrismRect, meshPrismTiling,
+    modelXmlLowerBound, assertModelXmlBudget
   };
 })(typeof globalThis !== 'undefined' ? globalThis : this);
