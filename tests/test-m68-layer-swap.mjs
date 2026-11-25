@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 globalThis.earcut = require('../app/js/earcut.js');
-for (const m of ['color', 'optics', 'height-curve', 'data-filaments', 'layer-swap', 'zip', 'exporter']) require('../app/js/' + m + '.js');
+for (const m of ['color', 'optics', 'height-curve', 'data-filaments', 'engine', 'layer-swap', 'zip', 'exporter']) require('../app/js/' + m + '.js');
 const C = globalThis.CS.color, O = globalThis.CS.optics, LS = globalThis.CS.layerSwap, X = globalThis.CS.exporter;
 const db = (globalThis.CS.FILAMENT_DB && CS.FILAMENT_DB.filaments) || [];
 const pick = n => db.find(f => f.brand === 'BambuLab Basic' && f.material === 'PLA' && f.name === n);

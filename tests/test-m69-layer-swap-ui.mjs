@@ -6,10 +6,11 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 globalThis.earcut = require('../app/js/earcut.js');
-for (const m of ['color', 'optics', 'height-curve', 'data-filaments', 'layer-swap']) require('../app/js/' + m + '.js');
+for (const m of ['color', 'optics', 'height-curve', 'data-filaments', 'engine', 'layer-swap']) require('../app/js/' + m + '.js');
 const LS = globalThis.CS.layerSwap;
 const html = fs.readFileSync(new URL('../app/index.html', import.meta.url), 'utf8');
 const app = fs.readFileSync(new URL('../app/js/app.js', import.meta.url), 'utf8');
+const worker = fs.readFileSync(new URL('../app/js/compute-worker.js', import.meta.url), 'utf8');
 
 // LUT retired: no lut entry/field/script; strategy switch present.
 assert.ok(!html.includes('data-engine="lut"'), 'no LUT engine button');
@@ -20,8 +21,10 @@ assert.ok(html.includes('data-engine="layerSwap"') && html.includes('data-engine
 for (const id of ['lsPanel', 'lsSegments', 'lsAddSeg', 'lsFirst', 'lsRest', 'lsMin', 'lsSmooth', 'lsFixHeights', 'btnLsOptimize', 'lsChangeList']) {
   assert.ok(html.includes(`id="${id}"`), 'panel control ' + id);
 }
-// app wiring.
-assert.ok(app.includes('CS.layerSwap.buildPlan'), 'analyze uses layerSwap builder');
+// app wiring: layerSwap solved off-thread via compute-worker (P1-08).
+assert.ok(worker.includes('CS.layerSwap.buildPlan'), 'compute-worker runs layerSwap solver');
+assert.ok(app.includes('buildPlanSmart'), 'analyze routes through worker smart path');
+assert.ok(app.includes('fixInfeasible'), 'app keeps old plan on infeasible fixed heights');
 assert.ok(app.includes('bindLsPanel()'), 'panel bound at init');
 assert.ok(app.includes('renderLsChangeList()'), 'change list rendered after plan');
 assert.ok(app.includes('fixTopLayer'), 'fix-heights mode wired');
@@ -46,4 +49,9 @@ const segs2 = [{ materialId: 'Black', layerCount: 3 }, { materialId: 'Jade White
 const p2 = LS.buildPlan({ width: w, height: h, data: d }, { ...base, segments: segs2, fixTopLayer: p1.topLayer });
 assert.deepEqual(Array.from(p2.topLayer), Array.from(p1.topLayer), 'fixTopLayer preserves heights');
 assert.notDeepEqual(Array.from(p2.preview), Array.from(p1.preview), 'preview recoloured on new sequence');
-console.log('m69 passed: layerSwap UI wired + LUT retired + TD calibration preserved + fix-heights mode');
+// P1-05: shrinking the sequence below the fixed heights must flag infeasible (not crash).
+const segsShort = [{ materialId: 'Black', layerCount: 1 }, { materialId: 'Jade White', layerCount: 1 }];
+const p3 = LS.buildPlan({ width: w, height: h, data: d }, { ...base, segments: segsShort, fixTopLayer: p1.topLayer });
+assert.equal(p3.fixInfeasible, true, 'infeasible fixed heights flagged');
+assert.ok(p3.conflicts.some(c => /fixed heights incompatible/.test(c.reason)), 'conflict reason reported');
+console.log('m69 passed: layerSwap UI wired + LUT retired + TD calibration preserved + fix-heights feasibility');

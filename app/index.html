@@ -73,6 +73,19 @@
           <label class="field"><span>空间平滑</span><input type="range" id="lsSmooth" min="0" max="2" step="0.5" value="1"></label>
         </div>
         <label class="field tiny"><input type="checkbox" id="lsFixHeights"> 固定当前高度，仅查看改色影响</label>
+        <label class="field tiny"><input type="checkbox" id="lsLuma"> 亮度映射辅助（可选偏好，不强制单调）</label>
+        <div class="field"><span>区域锚点 <em class="tiny">F-03：权重/顶部段/固定高度</em></span>
+          <div class="field-grid">
+            <select id="lsAnchorType"><option value="weight">优先还原(权重)</option><option value="topSegment">顶部段约束</option><option value="fixedHeight">固定高度</option></select>
+            <input type="number" id="lsAnchorValue" value="3" min="1" max="40" step="1">
+          </div>
+          <div class="field-grid">
+            <input type="number" id="lsAnchorX0" value="0" min="0" max="100" step="5"><input type="number" id="lsAnchorY0" value="0" min="0" max="100" step="5">
+            <input type="number" id="lsAnchorX1" value="100" min="0" max="100" step="5"><input type="number" id="lsAnchorY1" value="100" min="0" max="100" step="5">
+          </div>
+          <button class="btn" id="lsAddAnchor">＋ 添加锚点(%)</button>
+          <div id="lsAnchorList" class="tiny"></div>
+        </div>
         <button class="btn primary" id="btnLsOptimize">优化段长（保留基线）</button>
         <div class="field"><span>换色清单</span><div id="lsChangeList" class="tiny"></div></div>
       </div>
@@ -438,11 +451,11 @@
       <div>
         <h3>三层策略</h3>
         <p><b>1. 纯色直印</b>：检测大面积低方差、且能被现有耗材色覆盖的区域，整块用该耗材打印，色准最高。</p>
-        <p><b>2. 局部分层</b>：其余区域按颜色聚类，每类选一组层叠配方。默认 TD 模式用 Beer–Lambert 遮盖模型，并为当前耗材枚举可达色域；层序限制为连续色段，每种耗材最多一段，不会红-蓝-红-蓝交替。LUT 可选模式直接用 Lumina Studio 的拓竹 PLA Basic 实测 5 层色卡。</p>
+        <p><b>2. 局部分层</b>：其余区域按颜色聚类，每类选一组层叠配方。默认 TD 模式用 Beer–Lambert 遮盖模型，并为当前耗材枚举可达色域；层序限制为连续色段，每种耗材最多一段，不会红-蓝-红-蓝交替。逐层换色模式则用一条全局耗材序列，按像素停止高度取前缀叠色。</p>
         <p><b>分层预览</b>：浅色棋盘格表示该层没有材料；黑色耗材是实心黑色。导出的 layer_maps 用透明像素表示未打印。</p>
         <p><b>3D 预览</b>：默认从图片正面观察，拖动旋转、滚轮缩放。「材料堆叠」顶面显示光学混色，台阶与侧面按真实耗材逐层着色；开启 X 剖面可裁去右侧并查看内部材料层。「成品混色」保留旧的平滑最终色高度场。高度夸张只影响预览，3MF 仍是精确阶梯。</p>
         <p><b>背景移除</b>：自动识别边框主色或点击原图取色，只删除与边缘连通的近纯色，保留封闭浅色内部。分层、3D、剖面和原生 3MF 共用同一异形轮廓；识别会删空整幅图时自动放弃。</p>
-        <p><b>3. 高度控制</b>：纯色区顶高、渐变起始层、渐变最高高度、最大叠层数分开设置，三者联动；TD 的短线配方会自然形成低台阶，最长配方形成最高点，像油画厚涂。打印层高在 TD 可改，LUT 固定 0.08 mm。</p>
+        <p><b>3. 高度控制</b>：纯色区顶高、渐变起始层、渐变最高高度、最大叠层数分开设置，三者联动；TD 的短线配方会自然形成低台阶，最长配方形成最高点，像油画厚涂。打印层高可改；逐层换色模式首层与后续层高可分别设置。</p>
         <p><b>有限颜色</b>：切到「色域」视图，红色区域是当前耗材物理上叠不出来的颜色；软件会按面积给出缺少的 Bambu Basic 耗材，并可一键加入重算。</p>
         <p><b>结构平滑</b>：按“最小可打印结构尺寸（mm）”做多数表决，不再是固定像素等级。引擎按成品宽度换算像素半径（0.8 mm 在 150 mm/640 px 约 2 px，在 80 mm/600 px 约 3 px），所以换尺寸不会改变物理平滑量；小于喷嘴线宽的尺寸会提示可能打不出来。</p>
         <p><b>层序合并</b>：渐变目标色差在阈值内时，相邻色族共享同一段底层，顶部再分开；更像 HueForge 的连续叠色，也更少碎结构。0 关闭。</p>

@@ -43,7 +43,7 @@
       { materialId: 'Blue', layerCount: 2, locked: false },
       { materialId: 'Red', layerCount: 1, locked: false }
     ],
-    lsFirst: 0.2, lsRest: 0.08, lsMin: 1, lsSmooth: 1, lsFixHeights: false, lsAnchors: [],
+    lsFirst: 0.2, lsRest: 0.08, lsMin: 1, lsSmooth: 1, lsFixHeights: false, lsLuma: false, lsAnchors: [],
     widthMm: 150,
     flatTopMm: 1.6,
     reliefMm: 0.16,
@@ -176,6 +176,7 @@
       }, 45);
     });
     update3DModeUI();
+    loadLsDraft();
     bindLsPanel();
     updateEngineUI();
     renderPalette();
@@ -547,8 +548,14 @@
       return {
         engine: 'td', palette: state.tdPalette, widthMm: state.widthMm,
         segments: state.lsSegments, firstLayerMm: state.lsFirst, layerMm: state.lsRest,
-        minLayers: state.lsMin, prefs: { smooth: state.lsSmooth },
-        anchors: state.lsAnchors || [], printMask: mask,
+        minLayers: state.lsMin, prefs: { smooth: state.lsSmooth, luma: state.lsLuma ? 1 : 0 }, lineWidthMm: state.lineWidthMm,
+        anchors: state.lsAnchors || [],
+        // Old flat/gradient brush is a spatialMix concept; do NOT feed lockValue as the
+        // layerSwap print mask (P1-06). Background exclusion not wired in R1 -> null.
+        printMask: null,
+        opticalModel: (state.calibrationV2 && state.calibrationV2.activeModelId)
+          ? (state.calibrationV2.models || []).find(m => m.modelId === state.calibrationV2.activeModelId) || null
+          : null,
         fixTopLayer: state.lsFixHeights && state.plan && state.plan.printStrategy === 'layerSwap' ? state.plan.topLayer : null,
         boundary: { linearRgb: { r: 1, g: 1, b: 1 } }, seed: 7
       };
@@ -690,10 +697,14 @@
       const t0 = Date.now();
       try {
         if (request !== state.analysisRequest) return;
-        const plan = state.printStrategy === 'layerSwap'
-          ? await CS.layerSwap.buildPlan(image, options)
-          : await buildPlanSmart(image, options, request);
+        const plan = await buildPlanSmart(image, options, request);
         if (!plan || request !== state.analysisRequest) return;
+        // P1-05: incompatible fixed heights -> explain and KEEP the previous valid plan.
+        if (plan.printStrategy === 'layerSwap' && plan.fixInfeasible) {
+          toast('固定高度与新色段/锚点不兼容，已保留上一份计划；请调整或取消固定高度后重新匹配。');
+          state.dirty = true; updateDirtyUI();
+          return;
+        }
         state.plan = plan;
         state.appliedVersion = version;
         state.dirty = state.editVersion !== version;
@@ -782,7 +793,7 @@
       list.appendChild(item);
     });
     $('paletteCount').textContent = `${palette.length} 槽`;
-    $('btnRecommend').disabled = !state.imageData;
+    $('btnRecommend').disabled = !state.imageData || state.printStrategy === 'layerSwap';
     $('paletteHint').textContent = 'TD 为逐通道透光距离（R/G/B），标定后自动写入；手动修改 TD 会把三个通道设为同一值。HD ≈ TD × 0.1。';
     fillFoundationSelect();
   }
@@ -851,6 +862,7 @@
     if (state.printStrategy === strategy) return;
     state.engine = 'td';
     state.printStrategy = strategy;
+    saveLsDraft();
     clearManualEdits();
     updateEngineUI();
     renderPalette();
@@ -875,7 +887,8 @@
     $('engineBadge').textContent = isLs ? '逐层换色 · 全局序列' : 'TD 浮雕 · 自定义耗材';
     $('paletteHint').textContent = 'TD 为透光距离；HD ≈ TD × 0.1。色域视图会标出当前耗材无法覆盖的区域。';
     $('btnRecommend').disabled = !state.imageData || isLs;
-    if (isLs) renderLsPanel();
+    if (isLs) { state.brushOn = false; if ($('btnBrush')) $('btnBrush').disabled = true; renderLsPanel(); }
+    else if ($('btnBrush')) $('btnBrush').disabled = false;
   }
 
   /* ---------------- layerSwap segment editor ---------------- */
@@ -884,7 +897,7 @@
     const pal = state.tdPalette;
     let acc = 0;
     wrap.innerHTML = state.lsSegments.map((sg, i) => {
-      const opts = pal.map(p => `<option value="${p.id != null ? p.id : p.name}" ${ (p.id != null ? p.id : p.name) === sg.materialId ? 'selected' : ''}>${p.name}</option>`).join('');
+      const opts = pal.map(p => `<option value="${p.id != null && p.id !== '' ? p.id : p.name}" ${((p.id != null && p.id !== '' ? p.id : p.name) === sg.materialId || p.name === sg.materialId) ? 'selected' : ''}>${p.name}</option>`).join('');
       const start = acc; acc += sg.layerCount;
       return `<div class="ls-seg" data-i="${i}">
         <select data-act="mat">${opts}</select>
@@ -900,6 +913,8 @@
     $('lsMin').value = String(state.lsMin);
     $('lsSmooth').value = String(state.lsSmooth);
     $('lsFixHeights').checked = state.lsFixHeights;
+    $('lsLuma').checked = state.lsLuma;
+    $('lsAnchorList').innerHTML = state.lsAnchors.map((a, i) => `<div>${a.type} · [${a.region.x0},${a.region.y0},${a.region.x1},${a.region.y1}] · ${a.value} <button data-ai="${i}">×</button></div>`).join('') || '<span class="tiny">无锚点</span>';
     renderLsChangeList();
   }
   function renderLsChangeList() {
@@ -919,7 +934,7 @@
       if (act === 'mat') state.lsSegments[i].materialId = e.target.value;
       else if (act === 'count') state.lsSegments[i].layerCount = Math.max(1, Math.round(+e.target.value || 1));
       else if (act === 'lock') state.lsSegments[i].locked = e.target.checked;
-      markDirty(false); renderLsPanel();
+      saveLsDraft(); markDirty(false); renderLsPanel();
     });
     wrap.addEventListener('click', (e) => {
       const btn = e.target.closest('button[data-act]'); if (!btn) return;
@@ -929,29 +944,58 @@
       else if (act === 'down' && i < s.length - 1) [s[i + 1], s[i]] = [s[i], s[i + 1]];
       else if (act === 'dup') s.splice(i + 1, 0, { ...s[i], locked: false });
       else if (act === 'del' && s.length > 1) s.splice(i, 1);
-      markDirty(false); renderLsPanel();
+      saveLsDraft(); markDirty(false); renderLsPanel();
     });
     $('lsAddSeg').addEventListener('click', () => { state.lsSegments.push({ materialId: state.tdPalette[0].id != null ? state.tdPalette[0].id : state.tdPalette[0].name, layerCount: 1, locked: false }); markDirty(false); renderLsPanel(); });
     for (const [id, key] of [['lsFirst', 'lsFirst'], ['lsRest', 'lsRest'], ['lsMin', 'lsMin'], ['lsSmooth', 'lsSmooth']]) {
       $(id).addEventListener('change', (e) => { state[key] = +e.target.value || 0; markDirty(false); });
     }
-    $('lsFixHeights').addEventListener('change', (e) => { state.lsFixHeights = e.target.checked; renderLsPanel(); });
+    $('lsFixHeights').addEventListener('change', (e) => { state.lsFixHeights = e.target.checked; saveLsDraft(); renderLsPanel(); });
+    $('lsLuma').addEventListener('change', (e) => { state.lsLuma = e.target.checked; saveLsDraft(); markDirty(false); });
+    $('lsAddAnchor').addEventListener('click', () => {
+      const w = state.imageData ? state.imageData.width : 100, h = state.imageData ? state.imageData.height : 100;
+      const pc = id => Math.max(0, Math.min(100, +$(id).value || 0)) / 100;
+      const region = { x0: Math.round(pc('lsAnchorX0') * w), y0: Math.round(pc('lsAnchorY0') * h), x1: Math.round(pc('lsAnchorX1') * w), y1: Math.round(pc('lsAnchorY1') * h) };
+      const type = $('lsAnchorType').value;
+      const a = { type, region, value: Math.max(1, Math.round(+$('lsAnchorValue').value || 1)) };
+      if (type === 'topSegment') a.segmentId = state.lsSegments[0] ? state.lsSegments[0].segmentId : 0;
+      state.lsAnchors.push(a); saveLsDraft(); markDirty(false); renderLsPanel();
+    });
+    $('lsAnchorList').addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-ai]'); if (!btn) return;
+      state.lsAnchors.splice(+btn.dataset.ai, 1); saveLsDraft(); markDirty(false); renderLsPanel();
+    });
     $('btnLsOptimize').addEventListener('click', async () => {
       const p = state.plan; if (!p || p.printStrategy !== 'layerSwap') { toast('请先计算逐层换色方案'); return; }
       showProgress('优化段长（保留基线）…');
       setTimeout(async () => {
         try {
-          const opt = CS.layerSwap.optimizeSegmentLengths(state.imageData, p, { maxTrials: 8 });
+          const opt = CS.layerSwap.optimizeSegmentLengths(state.imageData, p, { maxTrials: 8, fixTopLayer: state.lsFixHeights ? p.topLayer : null });
           const b = opt.baseline.metrics.meanDE, best = opt.best.metrics.meanDE;
           const msg = `基线 meanΔE ${b.toFixed(2)}；最优 ${best.toFixed(2)}（${opt.best.counts || '基线'}）。应用最优？`;
           if (opt.best !== opt.baseline && window.confirm(msg)) {
             state.lsSegments = opt.best.segments.map(s => ({ ...s }));
-            markDirty(false); renderLsPanel(); analyze();
+            saveLsDraft(); markDirty(false); renderLsPanel(); analyze();
           } else toast(`保留基线（meanΔE ${b.toFixed(2)}）`);
         } catch (err) { toast('优化失败：' + (err.message || err)); }
         finally { hideProgress(); }
       }, 0);
     });
+  }
+  // layerSwap draft persistence (P2-05): strategy + segment edits survive refresh.
+  const LS_DRAFT_KEY = 'chromastack.lsDraft.v1';
+  function saveLsDraft() {
+    try { localStorage.setItem(LS_DRAFT_KEY, JSON.stringify({ printStrategy: state.printStrategy, lsSegments: state.lsSegments, lsFirst: state.lsFirst, lsRest: state.lsRest, lsMin: state.lsMin, lsSmooth: state.lsSmooth, lsFixHeights: state.lsFixHeights, lsLuma: state.lsLuma, lsAnchors: state.lsAnchors })); } catch (e) { /* storage unavailable */ }
+  }
+  function loadLsDraft() {
+    try {
+      const d = JSON.parse(localStorage.getItem(LS_DRAFT_KEY) || 'null'); if (!d) return;
+      if (Array.isArray(d.lsSegments) && d.lsSegments.length) state.lsSegments = d.lsSegments;
+      for (const k of ['lsFirst', 'lsRest', 'lsMin', 'lsSmooth']) if (typeof d[k] === 'number') state[k] = d[k];
+      state.lsFixHeights = !!d.lsFixHeights; state.lsLuma = !!d.lsLuma;
+      if (Array.isArray(d.lsAnchors)) state.lsAnchors = d.lsAnchors;
+      if (d.printStrategy === 'layerSwap' || d.printStrategy === 'spatialMix') state.printStrategy = d.printStrategy;
+    } catch (e) { /* ignore corrupt draft */ }
   }
 
   function updateStructureFields() {
@@ -2152,6 +2196,8 @@
   // F-OUTLINE-02: render the ACTUAL export grid top surface (not the native preview),
   // so the user sees exactly what the 3MF will contain after downsampling.
   function exportPreviewPlan(p) {
+    // layerSwap: native grid, finished-mix prefix preview is exactly the export surface.
+    if (p.printStrategy === 'layerSwap') return { width: p.w, height: p.h, data: new Uint8ClampedArray(p.preview) };
     const grid = X.exportGridFor(p);
     const plane = X.samplePlane(p, grid.width, grid.height);
     const ew = grid.width, eh = grid.height, n = ew * eh;

@@ -96,7 +96,7 @@ try {
   /* ---- browser layer: first run migrates legacy localStorage ---- */
   const lsPhone = makeLocalStorage();
   lsPhone.setItem('chromastack.filament-calibrations.v1', JSON.stringify({
-    version: 1, data: { calibrations: { 'id:black': { id: 'black', name: 'Black', hex: '#000000', td: 0.42, source: 'photo' } }, lutTdOverrides: {}, lutHexOverrides: {} }
+    version: 1, data: { calibrations: { 'id:black': { id: 'black', name: 'Black', hex: '#000000', td: 0.42, source: 'photo' } } }
   }));
   lsPhone.setItem('chromastack.api-base', BASE);
   let CS = loadBrowserModules(lsPhone);
@@ -113,14 +113,13 @@ try {
   /* edits flow to the server through settings.save + flush */
   const state = {
     tdPalette: [{ id: 'black', name: 'Black', hex: '#000000', td: 0.55, brand: 'Test', material: 'PLA' }],
-    filamentCalibrations: {}, lutTdOverrides: {}, lutHexOverrides: {}
-  };
+    filamentCalibrations: {}  };
   assert.equal(CS.settings.save(state), true);
   await CS.profiles.flush(false);
   assert.equal((await req('GET', 'profiles/' + firstId)).body.data.calibrations['id:black'].td, 0.55, 'edit reached the server');
 
   /* second profile + switching; pointer is the only browser-side choice */
-  const p2 = await CS.profiles.create('第二套', { calibrations: { 'id:red': { td: 3.1 } }, lutTdOverrides: {}, lutHexOverrides: {} });
+  const p2 = await CS.profiles.create('第二套', { calibrations: { 'id:red': { td: 3.1 } } });
   const switched = await CS.profiles.switchTo(p2.id);
   assert.equal(switched.calibrations['id:red'].td, 3.1);
   assert.ok(!('id:black' in switched.calibrations), 'profiles are isolated');
@@ -153,7 +152,7 @@ try {
   /* ---- offline fallback: mirror keeps edits, pointer still respected ---- */
   const lsOffline = makeLocalStorage();
   lsOffline.setItem('chromastack.api-base', 'http://127.0.0.1:1/'); // unreachable
-  lsOffline.setItem(CS.profiles.MIRROR_KEY, JSON.stringify({ profileId: 'p-x', data: { calibrations: { 'id:blue': { td: 2.2 } }, lutTdOverrides: {}, lutHexOverrides: {} }, updatedAt: Date.now() }));
+  lsOffline.setItem(CS.profiles.MIRROR_KEY, JSON.stringify({ profileId: 'p-x', data: { calibrations: { 'id:blue': { td: 2.2 } } }, updatedAt: Date.now() }));
   lsOffline.setItem('chromastack.active-profile.v1', 'p-x');
   CS = loadBrowserModules(lsOffline);
   let offlineSeen = false;
@@ -172,11 +171,11 @@ try {
   const conId = removedLast.activeId;
   await CS.profiles.init();
   const rev0 = (await req('GET', 'profiles/' + conId)).body.revision;
-  const other = { calibrations: { 'id:blue': { id: 'blue', name: 'Blue', hex: '#00358e', td: 2.2 } }, lutTdOverrides: {}, lutHexOverrides: {} };
+  const other = { calibrations: { 'id:blue': { id: 'blue', name: 'Blue', hex: '#00358e', td: 2.2 } } };
   assert.equal((await req('PUT', 'profiles/' + conId, { data: other, expectedRevision: rev0 })).status, 200, 'other device writes');
   const statusesC = [];
   CS.profiles.onStatus = s => statusesC.push(s);
-  const localRed = { tdPalette: [{ id: 'red', name: 'Red', hex: '#c00d1e', td: 4.4, brand: 'Test', material: 'PLA' }], filamentCalibrations: {}, lutTdOverrides: {}, lutHexOverrides: {} };
+  const localRed = { tdPalette: [{ id: 'red', name: 'Red', hex: '#c00d1e', td: 4.4, brand: 'Test', material: 'PLA' }], filamentCalibrations: {} };
   CS.settings.save(localRed);
   await CS.profiles.flush(false);
   assert.ok(statusesC.includes('conflict'), 'stale write reports a conflict');
@@ -194,8 +193,8 @@ try {
 
   /* local resolution overwrites with a fresh precondition */
   const cur = (await req('GET', 'profiles/' + conId)).body;
-  await req('PUT', 'profiles/' + conId, { data: { calibrations: { 'id:yellow': { td: 7 } }, lutTdOverrides: {}, lutHexOverrides: {} }, expectedRevision: cur.revision });
-  const localBlue = { tdPalette: [{ id: 'blue', name: 'Blue', hex: '#00358e', td: 3.3, brand: 'Test', material: 'PLA' }], filamentCalibrations: {}, lutTdOverrides: {}, lutHexOverrides: {} };
+  await req('PUT', 'profiles/' + conId, { data: { calibrations: { 'id:yellow': { td: 7 } } }, expectedRevision: cur.revision });
+  const localBlue = { tdPalette: [{ id: 'blue', name: 'Blue', hex: '#00358e', td: 3.3, brand: 'Test', material: 'PLA' }], filamentCalibrations: {} };
   CS.settings.save(localBlue);
   await CS.profiles.flush(false);
   assert.ok(CS.profiles.hasConflict(), 'second stale write conflicts again');
@@ -237,7 +236,7 @@ try {
   lsMix.setItem('chromastack.active-profile.v1', 'p-x');
   lsMix.setItem(CS.profiles.MIRROR_KEY, JSON.stringify({
     profileId: 'p-y', revision: 2,
-    data: { calibrations: { 'id:blue': { td: 2.2 } }, lutTdOverrides: {}, lutHexOverrides: {} },
+    data: { calibrations: { 'id:blue': { td: 2.2 } } },
     updatedAt: Date.now()
   }));
   CS = loadBrowserModules(lsMix);

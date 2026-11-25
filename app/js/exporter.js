@@ -153,20 +153,25 @@
   function buildLayerMasks(plan, plane, z) {
     const { ew, eh, flatMask, flatFilament, familyId, printMask } = plane;
     const K = plan.palette.length;
-    const masks = new Array(K);
-    for (let f = 0; f < K; f++) masks[f] = new Uint8Array(ew * eh);
     const n = ew * eh;
-    // layerSwap: exactly one non-empty material mask per physical layer (= S[z]);
-    // occupancy is the nested prefix set {p : H[p] > z}. No per-pixel recipe branches.
+    // layerSwap: allocate ONLY the single non-empty material mask for this layer (= S[z]);
+    // other slots stay null (P2-04). Occupancy = nested prefix set {p : H[p] > z}.
     if (plane.layerSwap) {
+      const masks = new Array(K).fill(null);
       const fi = plane.layerMaterial ? plane.layerMaterial[z] : -1;
       const top = plane.topLayer;
-      for (let i = 0; i < n; i++) {
-        if (printMask && !printMask[i]) continue;
-        if (top && top[i] > z && fi != null && fi >= 0) masks[fi][i] = 1;
+      if (fi != null && fi >= 0) {
+        const m = new Uint8Array(n);
+        for (let i = 0; i < n; i++) {
+          if (printMask && !printMask[i]) continue;
+          if (top && top[i] > z) m[i] = 1;
+        }
+        masks[fi] = m;
       }
       return masks;
     }
+    const masks = new Array(K);
+    for (let f = 0; f < K; f++) masks[f] = new Uint8Array(ew * eh);
     for (let i = 0; i < n; i++) {
       if (printMask && !printMask[i]) continue;
       let fi = -1;
@@ -236,6 +241,7 @@
       const masks = buildLayerMasks(plan, plane, z);
       for (let f = 0; f < K; f++) {
         const mask = masks[f];
+        if (!mask) { if (active[f]) { prisms[f].push({ mask: active[f], z0: activeStart[f], z1: z }); active[f] = null; } continue; }
         let any = false;
         for (let i = 0; i < mask.length; i++) if (mask[i]) { any = true; break; }
         if (!any) {
@@ -1175,7 +1181,8 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
     // layer height and infill from here.
     const projectSettings = {
       layer_height: String(plan.layerHeight),
-      initial_layer_print_height: String(plan.layerHeight),
+      // P1-03: first layer uses the planned first-layer thickness, not the repeat height.
+      initial_layer_print_height: String(plan.firstLayerMm != null ? plan.firstLayerMm : plan.layerHeight),
       wall_loops: '2',
       sparse_infill_density: '100%',
       printer_model: 'ChromaStack',
@@ -1215,7 +1222,15 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
         lineStrokePercent: +((plan.lineInfo && plan.lineInfo.strokePercent) || 0).toFixed(2),
         lineDirectPercent: +((plan.lineInfo && plan.lineInfo.directPercent) || 0).toFixed(2) },
       exportGrid: [ew, eh], exportDownscaled: grid.downscaled, exportChange: plane.changeStats,
-      triangles: componentMeta.reduce((s, c) => s + c.triangles, 0)
+      triangles: componentMeta.reduce((s, c) => s + c.triangles, 0),
+      // layerSwap contract (P1-04): strategy, sequence, true layer heights, change list.
+      printStrategy: plan.printStrategy || 'spatialMix',
+      ...(plan.printStrategy === 'layerSwap' ? {
+        firstLayerMm: plan.firstLayerMm, layerZMm: plan.layerZMm, layerThicknessMm: plan.layerThicknessMm,
+        segments: plan.segments, layerMaterialId: plan.layerMaterialId,
+        effectiveParamsHash: plan.effectiveParamsHash || null, modelRef: plan.modelRef || null,
+        fitMetrics: plan.fitMetrics || null, changeList: CS.layerSwap.changeList(plan)
+      } : {})
     };
     const files = [
       { name: '[Content_Types].xml', data: contentTypes },
@@ -1250,6 +1265,24 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
   }
 
   function planSummary(plan) {
+    // layerSwap has no families/regions; emit its own contract summary (P1-04).
+    if (plan.printStrategy === 'layerSwap') {
+      const cl = CS.layerSwap.changeList(plan);
+      const m = plan.fitMetrics || {};
+      return {
+        app: 'ChromaStack', printStrategy: 'layerSwap', schemaVersion: plan.schemaVersion,
+        engine: plan.engine, solverVersion: plan.solverVersion, inputHash: plan.inputHash,
+        effectiveParamsHash: plan.effectiveParamsHash || null, modelRef: plan.modelRef || null,
+        physical: { widthMm: +plan.widthMm.toFixed(2), heightMm: +plan.heightMm.toFixed(2), pixelSizeMm: +plan.pixelSize.toFixed(4) },
+        layers: { firstLayerMm: plan.firstLayerMm, layerHeight: plan.layerHeight, maxLayers: plan.maxLayers, minLayers: plan.minLayers, layerZMm: plan.layerZMm },
+        segments: plan.segments.map(s => ({ segmentId: s.segmentId, materialId: s.materialId, layerCount: s.layerCount, locked: !!s.locked })),
+        changeList: cl, swaps: cl.filter(e => e.kind === 'change').length,
+        fitMetrics: { meanDE: m.meanDE, p90: m.p90, maxDE: m.maxDE, regionDE: m.regionDE, isolatedJumps: m.isolatedJumps, printedPixels: m.printedPixels },
+        structuralDiagnostics: plan.structuralDiagnostics,
+        palette: plan.palette.map(p => ({ name: p.name, hex: p.hex, td: p.td })),
+        exportGrid: [plan.w, plan.h]
+      };
+    }
     // #99: the plan package must carry the FINAL coordinated material, not only the
     // pre-coordination colour-family segmentation. Build the region map summary and
     // the per-region final recipes (authoritative regionRecipes == filamentAt).

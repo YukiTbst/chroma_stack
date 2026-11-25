@@ -3877,8 +3877,23 @@
     return -1;
   }
 
+  // Single "effective material params" entry shared by spatialMix and layerSwap:
+  // normalize tdR/G/B -> hdR/G/B, then apply the active optical model (calibrationV2).
+  // Returns { palette, diag, modelRef, effectiveParamsHash } so consumers never build a
+  // nominal-parameter prediction bypass (review P1-01).
+  function effectivePalette(list, options, layerHeight) {
+    const palette = buildUserPalette(list || []);
+    const baseIndex = clamp(Math.round(Number(options && options.foundationIndex) || 0), 0, Math.max(0, palette.length - 1));
+    const om = applyOpticalModel(palette, baseIndex, layerHeight, options || {});
+    const modelRef = (options && options.opticalModel && options.opticalModel.modelId) || null;
+    const sig = palette.map(p => [p.id, p.name, p.hex, p.hdR, p.hdG, p.hdB, p.lin.r, p.lin.g, p.lin.b].join(':')).join('|');
+    let h = 2166136261 >>> 0; const s = sig + '#' + (modelRef || '') + '#' + (layerHeight || 0);
+    for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+    return { palette, diag: om.diag, foundation: om.foundation, modelRef, effectiveParamsHash: h.toString(16) };
+  }
+
   CS.engine = {
-    buildPlan, buildPlanAsync, recommendPalette, buildUserPalette,
+    buildPlan, buildPlanAsync, recommendPalette, buildUserPalette, effectivePalette,
     imageToLab, filamentAt, compositeLinear, stackTransmission, localStd,
     autoStdThreshold, kmeansLab, mergeIneffectiveHeights, physicalSmoothParams,
     mergeSmallRegions, buildPrintMask, buildStrokeInfo, buildTdGamut, gamutPenalty, gamutScore, matchGamut, mergeCommonBases, buildFamilyAdjacency, recipeSensitivity,

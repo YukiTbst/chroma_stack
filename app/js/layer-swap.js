@@ -27,16 +27,19 @@
     return { layerMaterial, layerThicknessMm, layerZMm, segOfLayer };
   }
 
-  // Prefix color table P[k] = PredictStack(S[0:k], d[0:k], boundary). Incremental reuse:
-  // only recompute from the first changed layer onward (caller passes cached prefix).
+  // Prefix table. boundary may be a measured substrate reflectance (linearRgb) that already
+  // represents the first b physical layers (supportStartLayers): P[b]=boundary and only
+  // S[b:k] is simulated; allowed stop heights >= b. Never double-count the base (P2-04).
   function prefixTable(model, layerMaterial, layerThicknessMm, boundary, fromK, cached) {
+    const b = (boundary && boundary.supportStartLayers) || 0;
     const P = cached ? cached.slice(0, fromK) : [];
     if (!cached) {
-      P[0] = O.predictStack(model, [], boundary, null);
+      for (let k = 0; k <= Math.min(b, layerMaterial.length); k++) P[k] = O.predictStack(model, [], boundary, null);
     }
     for (let k = Math.max(1, fromK); k <= layerMaterial.length; k++) {
+      if (k <= b) { P[k] = O.predictStack(model, [], boundary, null); continue; }
       const stack = [];
-      for (let z = 0; z < k; z++) stack.push({ materialId: layerMaterial[z], thicknessMm: layerThicknessMm[z] });
+      for (let z = b; z < k; z++) stack.push({ materialId: layerMaterial[z], thicknessMm: layerThicknessMm[z] });
       P[k] = O.predictStack(model, stack, boundary, null);
     }
     return P;
@@ -62,42 +65,53 @@
     }
     return null;
   }
+  // Hard constraints INTERSECT (order-independent); weight anchors stay separate (P2-02).
   function rangeFor(plan, p, w) {
     let lo = plan.minLayers, hi = plan.maxLayers; const conflicts = [];
     for (const a of plan.anchors || []) {
       if (!anchorHas(a, p, w)) continue;
       if (a.type === 'fixedHeight') {
-        if (a.value < plan.minLayers || a.value > plan.maxLayers) conflicts.push({ anchor: a, reason: 'fixedHeight out of range' });
-        lo = hi = a.value;
+        const v = a.value;
+        if (v < plan.minLayers || v > plan.maxLayers) conflicts.push({ anchor: a, reason: 'fixedHeight out of range' });
+        lo = Math.max(lo, v); hi = Math.min(hi, v);
       } else if (a.type === 'topSegment') {
         const r = segmentLayerRange(plan, a.segmentId);
         if (!r) { conflicts.push({ anchor: a, reason: 'segment missing' }); continue; }
         lo = Math.max(lo, r[0] + 1); hi = Math.min(hi, r[1]);
-        if (lo > hi) conflicts.push({ anchor: a, reason: 'topSegment range empty' });
       }
     }
+    if (lo > hi) conflicts.push({ p, reason: 'hard constraints intersect empty' });
     return { lo, hi, conflicts };
   }
 
   function buildPlan(image, opts) {
     const w = image.width, h = image.height, n = w * h;
-    const palette = opts.palette;
-    const matIndex = new Map();
-    palette.forEach((p, i) => { if (p.id != null) matIndex.set(p.id, i); if (p.name != null) matIndex.set(p.name, i); });
-    const model = { materials: {} };
-    for (const p of palette) { if (p.id != null) model.materials[p.id] = p; if (p.name != null) model.materials[p.name] = p; }
-    const segments = (opts.segments || []).map((s, i) => ({ segmentId: s.segmentId != null ? s.segmentId : i, materialId: s.materialId, layerCount: s.layerCount, locked: !!s.locked }));
     const firstMm = opts.firstLayerMm != null ? opts.firstLayerMm : 0.2;
     const restMm = opts.layerMm != null ? opts.layerMm : 0.08;
+    if (!(firstMm > 0) || !(restMm > 0)) throw new Error('layerSwap: layer thickness must be > 0');
+    // SAME effective params as spatialMix: tdR/G/B->hdR/G/B normalization + active optical
+    // model (calibrationV2). No nominal-parameter prediction bypass (review P1-01).
+    const eff = CS.engine.effectivePalette(opts.palette, opts, restMm);
+    const palette = eff.palette;
+    const matIndex = new Map();
+    palette.forEach((p, i) => { if (p.id != null && p.id !== '') matIndex.set(p.id, i); if (p.name != null) matIndex.set(p.name, i); });
+    const model = { materials: {} };
+    for (const p of palette) { if (p.id != null && p.id !== '') model.materials[p.id] = p; if (p.name != null) model.materials[p.name] = p; }
+    const segments = (opts.segments || []).map((s, i) => ({ segmentId: s.segmentId != null ? s.segmentId : i, materialId: s.materialId, layerCount: Math.max(1, Math.min(40, Math.round(s.layerCount || 1))), locked: !!s.locked }));
     const exp = expandSegments(segments, firstMm, restMm);
     const L = exp.layerMaterial.length;
+    if (L > 240) throw new Error('layerSwap: total layers exceed resource cap 240');
     // map materialId -> palette index for export
     const layerMaterialIdx = exp.layerMaterial.map(id => matIndex.get(id));
-    if (layerMaterialIdx.some(i => i == null)) throw new Error('layerSwap: segment references unknown material');
+    const unknown = exp.layerMaterial.filter((id, i) => layerMaterialIdx[i] == null);
+    if (unknown.length) throw new Error('layerSwap: segment references unknown material: ' + [...new Set(unknown)].join(', '));
     const boundary = opts.boundary || { linearRgb: { r: 1, g: 1, b: 1 } };
+    const baseStart = (boundary && boundary.supportStartLayers) || 0;
     const P = prefixTable(model, exp.layerMaterial, exp.layerThicknessMm, boundary, 1, null);
-    const minLayers = Math.max(1, opts.minLayers != null ? opts.minLayers : 1);
+    const conflicts = [];
+    let minLayers = Math.max(1, Math.round(opts.minLayers != null ? opts.minLayers : 1), baseStart);
     const maxLayers = L;
+    if (minLayers > maxLayers) { conflicts.push({ reason: 'minLayers exceeds total layers', minLayers, maxLayers }); minLayers = maxLayers; }
     const printMask = opts.printMask || null;
     // target Lab
     const target = new Array(n);
@@ -105,15 +119,17 @@
     const anchors = opts.anchors || [];
     const prefs = Object.assign({ hue: 0, luma: 0, smooth: 1 }, opts.prefs || {});
     const plan = {
-      printStrategy: 'layerSwap', schemaVersion: 1, palette, segments,
+      printStrategy: 'layerSwap', schemaVersion: 2, palette, segments,
       layerMaterial: layerMaterialIdx, layerMaterialId: exp.layerMaterial, segOfLayer: exp.segOfLayer,
       layerThicknessMm: exp.layerThicknessMm, layerZMm: exp.layerZMm,
       maxLayers, minLayers, printMask, topLayer: new Int16Array(n),
       prefixPrediction: P.map((pp, k) => ({ k, lab: pp.lab, linearRgb: pp.linearRgb, zMm: exp.layerZMm[k], warnings: pp.warnings })),
       anchors, prefs, w, h, widthMm: opts.widthMm || 150, heightMm: (opts.widthMm || 150) * h / w,
       pixelSize: (opts.widthMm || 150) / w, layerHeight: restMm, firstLayerMm: firstMm,
-      boundary, solverVersion: SOLVER, seed: opts.seed != null ? opts.seed : 1,
-      stats: {}, fitMetrics: null, structuralDiagnostics: null, conflicts: []
+      lineWidthMm: opts.lineWidthMm != null ? opts.lineWidthMm : 0.42,
+      boundary, baseStart, solverVersion: SOLVER, seed: opts.seed != null ? opts.seed : 1,
+      modelRef: eff.modelRef, effectiveParamsHash: eff.effectiveParamsHash, opticalModel: opts.opticalModel || null,
+      stats: {}, fitMetrics: null, structuralDiagnostics: null, conflicts, fixInfeasible: false
     };
     // edge weights from target gradient (low at strong edges)
     const edgeW = new Float32Array(n);
@@ -124,7 +140,9 @@
       edgeW[p] = g > 12 ? 0.15 : 1.0;
     }
     const weightOf = p => { let wt = 1; for (const a of anchors) if (a.type === 'weight' && anchorHas(a, p, w)) wt = Math.max(wt, a.value || 3); return wt; };
-    const dE = (p, k) => C.deltaE2000(target[p], P[k].lab);
+    // Optional luminance preference (auxiliary, never a hard monotonic constraint).
+    const lumaW = 0.3 * (prefs.luma || 0);
+    const dE = (p, k) => C.deltaE2000(target[p], P[k].lab) + lumaW * Math.abs(target[p].L - P[k].lab.L);
     // per-pixel top-3 candidates + independent nearest
     const top3 = new Int16Array(n * 3);
     const H = new Int16Array(n);
@@ -171,71 +189,92 @@
       if (!changed) { stopReason = 'icm-converged'; break; }
     }
     plan.topLayer = H;
-    // "Fix heights, view colour change only": reuse the previous height map, recompute
-    // prefix colours/preview/metrics on the new sequence without rematching (spec §4.2).
-    if (opts.fixTopLayer && opts.fixTopLayer.length === n) plan.topLayer = Int16Array.from(opts.fixTopLayer);
+    // Fix-heights mode: validate against the NEW sequence + hard anchors BEFORE applying;
+    // if incompatible flag it so the app keeps the previous valid plan (P1-05).
+    if (opts.fixTopLayer && opts.fixTopLayer.length === n) {
+      let ok = true;
+      for (let p = 0; p < n; p++) {
+        const v = opts.fixTopLayer[p], r = ranges[p];
+        if (v < minLayers || v > maxLayers || v < r.lo || v > r.hi) { ok = false; break; }
+      }
+      if (ok) plan.topLayer = Int16Array.from(opts.fixTopLayer);
+      else { plan.fixInfeasible = true; conflicts.push({ reason: 'fixed heights incompatible with new sequence/anchors' }); }
+    }
     plan.stopReason = stopReason;
-    // Finished-mix preview = P[H] per pixel (spec §3.2), so the existing 'sim' view and
-    // export statistics read the same prefix prediction. flatMask marks printed pixels.
+    // Finished-mix preview = P[H]. labToRgb01 already returns sRGB — do NOT re-encode (P1-02).
+    // AIR (printMask=0) pixels transparent so preview/stats/geometry agree (P1-06).
     const preview = new Uint8ClampedArray(n * 4);
     for (let p = 0; p < n; p++) {
+      if (printMask && !printMask[p]) { preview[p * 4 + 3] = 0; continue; }
       const rgb = C.labToRgb01(P[plan.topLayer[p]].lab);
-      preview[p * 4] = Math.round(C.linearToSrgb(rgb.r) * 255);
-      preview[p * 4 + 1] = Math.round(C.linearToSrgb(rgb.g) * 255);
-      preview[p * 4 + 2] = Math.round(C.linearToSrgb(rgb.b) * 255);
+      preview[p * 4] = Math.round(rgb.r * 255);
+      preview[p * 4 + 1] = Math.round(rgb.g * 255);
+      preview[p * 4 + 2] = Math.round(rgb.b * 255);
       preview[p * 4 + 3] = 255;
     }
     plan.preview = preview;
     plan.flatMask = printMask ? Uint8Array.from(printMask) : new Uint8Array(n).fill(1);
     plan.fitMetrics = computeMetrics(plan, target, edgeW, w, h);
     plan.structuralDiagnostics = structural(plan, w, h);
-    plan.inputHash = hashStr(JSON.stringify({ w, h, segments, firstMm, restMm, minLayers, anchors: anchors.map(a => ({ type: a.type, region: a.region, value: a.value, segmentId: a.segmentId })), seed: plan.seed, sample: target.filter((_, i) => i % 97 === 0).map(t => [t.L | 0, t.a | 0, t.b | 0]) }));
+    plan.inputHash = hashStr(JSON.stringify({
+      w, h, segments, firstMm, restMm, minLayers, baseStart,
+      effectiveParamsHash: eff.effectiveParamsHash, modelRef: eff.modelRef,
+      boundary: boundary.linearRgb || boundary.supportStack || null, prefs,
+      anchors: anchors.map(a => ({ type: a.type, region: a.region, value: a.value, segmentId: a.segmentId })),
+      printMaskSample: printMask ? Array.from(printMask.filter((_, i) => i % 131 === 0)) : null,
+      seed: plan.seed, sample: target.filter((_, i) => i % 97 === 0).map(t => [t.L | 0, t.a | 0, t.b | 0])
+    }));
     return plan;
   }
 
   function computeMetrics(plan, target, edgeW, w, h) {
-    const n = w * h, P = plan.prefixPrediction, H = plan.topLayer;
-    let sum = 0, mx = 0, rsum = 0, rn = 0; const errs = new Float64Array(n);
+    const n = w * h, P = plan.prefixPrediction, H = plan.topLayer, pm = plan.printMask;
+    let sum = 0, mx = 0, rsum = 0, rn = 0, cnt = 0; const errs = [];
     const region = (plan.anchors.find(a => a.type === 'weight') || {}).region;
     for (let p = 0; p < n; p++) {
-      const e = C.deltaE2000(target[p], P[H[p]].lab); errs[p] = e; sum += e; if (e > mx) mx = e;
+      if (pm && !pm[p]) continue; // AIR excluded from stats (P1-06)
+      const e = C.deltaE2000(target[p], P[H[p]].lab); errs.push(e); sum += e; cnt++; if (e > mx) mx = e;
       if (region) { const x = p % w, y = (p / w) | 0; if (x >= region.x0 && x < region.x1 && y >= region.y0 && y < region.y1) { rsum += e; rn++; } }
     }
-    const sorted = Array.from(errs).sort((a, b) => a - b);
+    errs.sort((a, b) => a - b);
     let jump = 0, jn = 0, iso = 0;
     for (let p = 0; p < n; p++) {
+      if (pm && !pm[p]) continue;
       const x = p % w, y = (p / w) | 0;
-      if (edgeW[p] > 0.5 && x + 1 < w && edgeW[p + 1] > 0.5) { jump += Math.abs(plan.layerZMm[H[p]] - plan.layerZMm[H[p + 1]]); jn++; }
+      if (edgeW[p] > 0.5 && x + 1 < w && edgeW[p + 1] > 0.5 && (!pm || pm[p + 1])) { jump += Math.abs(plan.layerZMm[H[p]] - plan.layerZMm[H[p + 1]]); jn++; }
       let big = 0, nb = 0;
-      if (x > 0) { nb++; if (Math.abs(plan.layerZMm[H[p]] - plan.layerZMm[H[p - 1]]) > 0.16) big++; }
-      if (x + 1 < w) { nb++; if (Math.abs(plan.layerZMm[H[p]] - plan.layerZMm[H[p + 1]]) > 0.16) big++; }
-      if (y > 0) { nb++; if (Math.abs(plan.layerZMm[H[p]] - plan.layerZMm[H[p - w]]) > 0.16) big++; }
-      if (y + 1 < h) { nb++; if (Math.abs(plan.layerZMm[H[p]] - plan.layerZMm[H[p + w]]) > 0.16) big++; }
+      if (x > 0 && (!pm || pm[p - 1])) { nb++; if (Math.abs(plan.layerZMm[H[p]] - plan.layerZMm[H[p - 1]]) > 0.16) big++; }
+      if (x + 1 < w && (!pm || pm[p + 1])) { nb++; if (Math.abs(plan.layerZMm[H[p]] - plan.layerZMm[H[p + 1]]) > 0.16) big++; }
+      if (y > 0 && (!pm || pm[p - w])) { nb++; if (Math.abs(plan.layerZMm[H[p]] - plan.layerZMm[H[p - w]]) > 0.16) big++; }
+      if (y + 1 < h && (!pm || pm[p + w])) { nb++; if (Math.abs(plan.layerZMm[H[p]] - plan.layerZMm[H[p + w]]) > 0.16) big++; }
       if (edgeW[p] > 0.5 && nb && big >= 3) iso++;
     }
-    return { meanDE: sum / n, p90: sorted[Math.floor(n * 0.9)], maxDE: mx, regionDE: rn ? rsum / rn : null, flatJumpMm: jn ? jump / jn : 0, isolatedJumps: iso };
+    return { meanDE: cnt ? sum / cnt : 0, p90: errs.length ? errs[Math.floor(errs.length * 0.9)] : 0, maxDE: mx, regionDE: rn ? rsum / rn : null, flatJumpMm: jn ? jump / jn : 0, isolatedJumps: iso, printedPixels: cnt };
   }
 
+  // Per-layer manufacturability audit at the configured nozzle line width (P2-04).
   function structural(plan, w, h) {
-    const out = []; const H = plan.topLayer, n = w * h;
-    for (const z of [plan.maxLayers - 1, Math.floor(plan.maxLayers / 2)]) {
+    const out = []; const H = plan.topLayer, n = w * h, pm = plan.printMask;
+    const minCells = Math.max(1, Math.round((plan.lineWidthMm || 0.42) / plan.pixelSize));
+    for (let z = 0; z < plan.maxLayers; z++) {
       let occ = 0, narrow = 0, single = 0;
       for (let p = 0; p < n; p++) {
-        if (H[p] <= z) continue; occ++;
+        if (H[p] <= z || (pm && !pm[p])) continue; occ++;
         const x = p % w, y = (p / w) | 0; let nb = 0;
         if (x > 0 && H[p - 1] > z) nb++; if (x + 1 < w && H[p + 1] > z) nb++; if (y > 0 && H[p - w] > z) nb++; if (y + 1 < h && H[p + w] > z) nb++;
         if (nb < 2) narrow++; if (nb === 0) single++;
       }
-      out.push({ layer: z, occupied: occ, narrowCells: narrow, isolatedCells: single });
+      out.push({ layer: z, occupied: occ, narrowCells: narrow, isolatedCells: single, minCellsForNozzle: minCells });
     }
     return out;
   }
 
-  // F-05: fixed-order integer segment-length optimization. Baseline ALWAYS retained.
-  // Candidates compared under the SAME anchors/prefs/spatial/metrics (full rematch).
+  // F-05: fixed-order integer segment-length optimization. Baseline ALWAYS retained;
+  // baseline/candidates/application share the SAME hard constraints (incl. fixTopLayer) and
+  // scoring (P2-01). Budget spread over ALL adjacent boundaries, both directions.
   function optimizeSegmentLengths(image, plan, opts) {
     const o = opts || {};
-    const maxTrials = o.maxTrials != null ? o.maxTrials : 12;
+    const maxTrials = o.maxTrials != null ? o.maxTrials : 2 * Math.max(1, plan.segments.length - 1);
     const base = plan.segments.map(s => ({ ...s }));
     const baseline = { segments: base, metrics: plan.fitMetrics, isBaseline: true };
     const trials = [];
@@ -248,11 +287,12 @@
       const thick = plan.firstLayerMm + (total - 1) * plan.layerHeight;
       if (o.maxThicknessMm != null && thick > o.maxThicknessMm) return;
       if (segs.some((s, i) => s.locked && s.layerCount !== base[i].layerCount)) return;
-      const p2 = buildPlan(image, { ...optsToPlan(plan), segments: segs });
+      const p2 = buildPlan(image, { ...optsToPlan(plan, o), segments: segs });
+      if (p2.fixInfeasible) return; // discard conflicting candidates
       trials.push({ segments: segs, counts: key, metrics: p2.fitMetrics, thicknessMm: thick });
     };
     const counts0 = base.map(s => s.layerCount);
-    for (let i = 0; i < base.length - 1; i++) for (const dir of [1, -1]) {
+    for (const dir of [1, -1]) for (let i = 0; i < base.length - 1; i++) {
       const c = counts0.slice(); c[i] += dir; c[i + 1] -= dir;
       if (c[i] < 1 || c[i + 1] < 1) continue; push(c);
     }
@@ -260,24 +300,30 @@
     for (const t of trials) if (t.metrics.meanDE < best.metrics.meanDE) best = t;
     return { baseline, trials, best, stopReason: trials.length >= maxTrials ? 'budget' : 'exhausted-local' };
   }
-  function optsToPlan(plan) {
-    return { palette: plan.palette, firstLayerMm: plan.firstLayerMm, layerMm: plan.layerHeight, boundary: plan.boundary, minLayers: plan.minLayers, anchors: plan.anchors, prefs: plan.prefs, printMask: plan.printMask, widthMm: plan.widthMm, seed: plan.seed };
+  function optsToPlan(plan, o) {
+    return {
+      palette: plan.palette, firstLayerMm: plan.firstLayerMm, layerMm: plan.layerHeight,
+      boundary: plan.boundary, minLayers: plan.minLayers, anchors: plan.anchors, prefs: plan.prefs,
+      printMask: plan.printMask, widthMm: plan.widthMm, seed: plan.seed, lineWidthMm: plan.lineWidthMm,
+      opticalModel: (o && o.opticalModel) || plan.opticalModel || null,
+      fixTopLayer: (o && o.fixTopLayer) || null
+    };
   }
 
-  // §13.2 change list: first load separate; 1-based start layer; bottom/top Z; prev seg last layer.
+  // §13.2 change list. Adjacent same-material segments are NOT a swap (kind 'continue');
+  // only segments reached by some printed pixel produce entries (P1-06 / P2-04).
   function changeList(plan) {
-    const maxH = plan.topLayer.reduce((a, b) => Math.max(a, b), 0);
-    const out = []; let start = 0; let prevLast = 0;
+    const pm = plan.printMask; let maxH = 0;
+    for (let p = 0; p < plan.topLayer.length; p++) if ((!pm || pm[p]) && plan.topLayer[p] > maxH) maxH = plan.topLayer[p];
+    const out = []; let start = 0; let prevLast = 0; let prevMat = null;
     plan.segments.forEach((sg, i) => {
       const c = sg.layerCount;
+      const mat = plan.layerMaterialId[start];
       if (start < maxH) {
-        out.push({
-          segmentId: sg.segmentId, materialId: plan.layerMaterialId[start], kind: i === 0 ? 'first-load' : 'change',
-          startLayer1: start + 1, bottomZmm: plan.layerZMm[start], topZmm: plan.layerZMm[start + 1],
-          prevSegmentLastLayer1: i === 0 ? null : prevLast
-        });
+        const kind = i === 0 ? 'first-load' : (mat === prevMat ? 'continue' : 'change');
+        out.push({ segmentId: sg.segmentId, materialId: mat, kind, startLayer1: start + 1, bottomZmm: plan.layerZMm[start], topZmm: plan.layerZMm[start + 1], prevSegmentLastLayer1: i === 0 ? null : prevLast });
       }
-      prevLast = start + c; start += c;
+      prevMat = mat; prevLast = start + c; start += c;
     });
     return out;
   }

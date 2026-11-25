@@ -204,6 +204,8 @@ void main() {
     const sy = Math.min(plan.h - 1, Math.max(0, Math.round(y)));
     const i = sy * plan.w + sx;
     if (plan.printMask && !plan.printMask[i]) return { top: 0, i };
+    // layerSwap: top surface is the per-pixel stop height H[p] (P2-03).
+    if (plan.printStrategy === 'layerSwap' && plan.topLayer) return { top: plan.topLayer[i], i };
     // 亮度浮雕: top surface is the per-pixel luminance height field.
     if (plan.luminanceHeight && plan.topLayer) return { top: plan.topLayer[i], i };
     let top = null;
@@ -428,7 +430,7 @@ void main() {
     for (let y = 0; y < gh; y++) {
       for (let x = 0; x < gw; x++) {
         const s = sampleCell(p, x, y, gw, gh, true);
-        const h = s.top * p.layerHeight * V.exag;
+        const h = (p.layerZMm ? p.layerZMm[s.top] : s.top * p.layerHeight) * V.exag;
         const i = y * gw + x;
         heights[i] = h;
         visible[i] = p.printMask ? p.printMask[s.i] : 1;

@@ -8,7 +8,7 @@
    cached worker/importScripts and the GPU path never activates. */
 const __vq = (self.location && self.location.search || '').match(/[?&]v=([^&]+)/);
 const __q = __vq ? '?v=' + __vq[1] : '';
-importScripts('color.js' + __q, 'data-filaments.js' + __q, 'earcut.js' + __q, 'optics.js' + __q, 'height-curve.js' + __q, 'gamut-gpu.js' + __q, 'calibration-data.js' + __q, 'layer-optimizer.js' + __q, 'engine.js' + __q, 'parallel.js' + __q);
+importScripts('color.js' + __q, 'data-filaments.js' + __q, 'earcut.js' + __q, 'optics.js' + __q, 'height-curve.js' + __q, 'gamut-gpu.js' + __q, 'calibration-data.js' + __q, 'layer-optimizer.js' + __q, 'engine.js' + __q, 'layer-swap.js' + __q, 'parallel.js' + __q);
 
 self.onmessage = async function (e) {
   const msg = e.data || {};
@@ -19,6 +19,12 @@ self.onmessage = async function (e) {
       height: msg.height,
       data: new Uint8ClampedArray(msg.data)
     };
+    // layerSwap runs its own solver off the UI thread (P1-08).
+    if (msg.options && msg.options.printStrategy === 'layerSwap') {
+      const plan = CS.layerSwap.buildPlan(image, msg.options);
+      self.postMessage({ id: msg.id, ok: true, plan });
+      return;
+    }
     // GPU7/R5: spawn a nested plan-worker pool only above the measured benefit point.
     // Pool startup + per-worker data transfer is a fixed cost; below ~1M pixels the
     // sync path is faster (review measured 230k px ~47% slower with the pool). 4x

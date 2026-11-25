@@ -40,7 +40,7 @@ const ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 fs.mkdirSync(PROFILE_DIR, { recursive: true });
 
 function emptyData() {
-  return { calibrations: {}, lutTdOverrides: {}, lutHexOverrides: {} };
+  return { calibrations: {} };
 }
 
 function sanitizeData(input) {
