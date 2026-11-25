@@ -56,8 +56,6 @@
     }
     return {
       calibrations,
-      lutTdOverrides: clone(state.lutTdOverrides || {}),
-      lutHexOverrides: clone(state.lutHexOverrides || {}),
       ...(state.calibrationV2 ? { calibrationV2: clone(state.calibrationV2) } : {})
     };
   }

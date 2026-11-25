@@ -28,6 +28,9 @@
         regionRecipes: plan.regionRecipes || null,
         luminanceHeight: !!plan.luminanceHeight,
         topLayer: plan.topLayer ? new Int32Array(plan.topLayer) : null,
+        // layerSwap: one global sequence; per-layer single material from layerMaterial.
+        layerSwap: plan.printStrategy === 'layerSwap',
+        layerMaterial: plan.layerMaterial ? Array.from(plan.layerMaterial) : null,
         colorLayers: plan.colorLayers || plan.maxGradLayers,
         structureCleanup: null,
         changeStats: { sourcePixels: 0, changedPixels: 0, changedPercent: 0 }
@@ -153,6 +156,17 @@
     const masks = new Array(K);
     for (let f = 0; f < K; f++) masks[f] = new Uint8Array(ew * eh);
     const n = ew * eh;
+    // layerSwap: exactly one non-empty material mask per physical layer (= S[z]);
+    // occupancy is the nested prefix set {p : H[p] > z}. No per-pixel recipe branches.
+    if (plane.layerSwap) {
+      const fi = plane.layerMaterial ? plane.layerMaterial[z] : -1;
+      const top = plane.topLayer;
+      for (let i = 0; i < n; i++) {
+        if (printMask && !printMask[i]) continue;
+        if (top && top[i] > z && fi != null && fi >= 0) masks[fi][i] = 1;
+      }
+      return masks;
+    }
     for (let i = 0; i < n; i++) {
       if (printMask && !printMask[i]) continue;
       let fi = -1;
@@ -945,7 +959,7 @@
     const lineArt = !!(plan.lineApplied && (plan.lineProtectMask || plan.lineDirectMask));
     // 亮度浮雕: the per-pixel height field is the texture — downsampling would erase it,
     // so luminance plans export at native resolution like line art.
-    const nativeMode = lineArt || !!plan.luminanceHeight;
+    const nativeMode = lineArt || !!plan.luminanceHeight || plan.printStrategy === 'layerSwap';
     const longSide = Math.max(plan.w, plan.h);
     const max = exportMax != null
       ? Math.max(80, Math.min(1024, Number(exportMax) || 300))
@@ -961,11 +975,14 @@
   // worker pool can mesh subsets in parallel; ids are assigned by the caller.
   function meshPrismObjects(plan, prisms, ew, eh, pixelSize, materials) {
     const out = [];
+    // layerSwap carries a non-uniform thickness table; z coords must use cumulative Z,
+    // not z*layerHeight (spec §3.2: first layer may differ).
+    const zOf = z => plan.layerZMm ? plan.layerZMm[z] : z * plan.layerHeight;
     for (const f of materials) {
       for (const prism of prisms[f]) {
         const positions = [];
         const indices = [];
-        meshPrism(prism.mask, ew, eh, pixelSize, prism.z0 * plan.layerHeight, prism.z1 * plan.layerHeight, positions, indices);
+        meshPrism(prism.mask, ew, eh, pixelSize, zOf(prism.z0), zOf(prism.z1), positions, indices);
         if (!indices.length) continue;
         for (let i = 0; i < positions.length; i += 3) { positions[i] += 128; positions[i + 1] += 128; }
         out.push({ filament: f, positions, indices, name: `${plan.palette[f].name} · L${prism.z0 + 1}-${prism.z1}` });
@@ -1278,7 +1295,6 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
     return {
       app: 'ChromaStack',
       engine: plan.engine,
-      lut: plan.lutKey,
       physical: { widthMm: +plan.widthMm.toFixed(2), heightMm: +plan.heightMm.toFixed(2), pixelSizeMm: +plan.pixelSize.toFixed(4) },
       exportGrid: (() => {
         const g = exportGridFor(plan);
@@ -1329,7 +1345,7 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
   function buildPlanMarkdown(plan) {
     const s = planSummary(plan);
     const lines = [];
-    lines.push(`# ${plan.engine === 'lut' ? '物理 LUT' : 'TD 立体浮雕'}混合彩绘打印计划`);
+    lines.push(`# TD 立体浮雕混合彩绘打印计划`);
     lines.push('');
     lines.push(`- 成品尺寸：${s.physical.widthMm} × ${s.physical.heightMm} mm`);
     lines.push(`- 层高：${s.layers.layerHeight} mm；纯色区 ${s.layers.flatBaseLayers || 0} 层基底 + ${s.layers.flatLayers - (s.layers.flatBaseLayers || 0)} 层纯色（共 ${s.layers.flatLayers} 层，${s.layers.flatTopMm} mm）；渐变区 ${s.layers.gradientStartLayer}–${s.layers.gradientTopLayer} 层；浮雕差 ${s.layers.reliefMm} mm`);
@@ -1388,7 +1404,7 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
     }
     lines.push('## 切片建议');
     lines.push('');
-    lines.push('- 使用 0.4 mm 喷嘴；LUT 校准线宽为 0.42 mm，层高 0.08 mm。');
+    lines.push('- 使用 0.4 mm 喷嘴；线宽 0.42 mm，层高以计划为准。');
     lines.push('- 100% 填充，关闭顶/底壳的“仅一层”之类的省料选项；保证叠色层完整。');
     lines.push('- 先用小样确认实际颜色；不同批次、温度、层高与线宽都会影响混色。');
     lines.push('- 若使用平滑/模糊皮肤，请关闭，以免破坏颜色边界。');

@@ -1,7 +1,7 @@
 /* ChromaStack planning engine.
    - Hybrid segmentation: solid direct-color regions + local layered color regions.
-   - LUT engine: pre-calibrated Bambu PLA Basic 5-layer LUTs from Lumina Studio.
    - TD engine: arbitrary filaments, Beer-Lambert hiding distance, local stack search.
+   (Physical LUT engine retired per spec v1.1 §2.2; TD calibration data preserved.)
    Sets globalThis.CS.engine. No dependencies outside CS.color. */
 (function (root) {
   'use strict';
@@ -379,20 +379,6 @@
       info.componentsBefore = actualComponents; info.componentsAfter = actualComponents;
     }
     return { printMask, sourcePrintMask, background: info, holeMap: envelope.holeMap || null };
-  }
-
-  function buildLutPalette(lut, extra) {
-    return lut.palette.map((p, i) => {
-      const hex = (extra && extra.hexOverrides && extra.hexOverrides[i]) || p.hex;
-      const td = (extra && extra.tdOverrides && extra.tdOverrides[i]) || p.td || 5;
-      const rgb = C.hexToRgb(hex);
-      return {
-        index: i, key: paletteKey(p), name: p.name, hex, brand: p.brand || 'BambuLab', material: p.material || 'PLA Basic',
-        td, tdR: td, tdG: td, tdB: td, hd: td * 0.1, hdR: td * 0.1, hdG: td * 0.1, hdB: td * 0.1, rgb,
-        lin: { r: C.srgbToLinear(rgb.r / 255), g: C.srgbToLinear(rgb.g / 255), b: C.srgbToLinear(rgb.b / 255) },
-        lab: C.hexToLab(hex), fromLut: true
-      };
-    });
   }
 
   function buildUserPalette(list) {
@@ -827,31 +813,6 @@
     const out = [];
     for (let c = 0; c < k; c++) out.push({ L: centers[c * 3], a: centers[c * 3 + 1], b: centers[c * 3 + 2] });
     return out;
-  }
-
-  function nearestLut(lab, lut) {
-    const entries = lut.entries;
-    const candidates = [];
-    for (let i = 0; i < entries.length; i++) {
-      const e = entries[i];
-      const dl = lab.L - e[0], da = lab.a - e[1], db = lab.b - e[2];
-      const d = dl * dl + da * da + db * db;
-      if (candidates.length < 12) {
-        candidates.push({ i, d });
-        if (candidates.length === 12) candidates.sort((x, y) => x.d - y.d);
-      } else if (d < candidates[11].d) {
-        candidates[11] = { i, d };
-        candidates.sort((x, y) => x.d - y.d);
-      }
-    }
-    let best = candidates[0], bestDE = Infinity;
-    for (const cand of candidates) {
-      const e = entries[cand.i];
-      const de = C.deltaE2000(lab, { L: e[0], a: e[1], b: e[2] });
-      if (de < bestDE) { bestDE = de; best = cand; }
-    }
-    const e = entries[best.i];
-    return { index: best.i, lab: { L: e[0], a: e[1], b: e[2] }, recipe: e.slice(3), deltaE: bestDE };
   }
 
   function stackTransmission(thickness, hd) {
@@ -2498,16 +2459,7 @@
     const flatLayers = Math.max(2, Math.round(flatTopMm / layerHeight));
     const reliefLayers = Math.round(reliefMm / layerHeight);
     let gradTopLayer, gradStartLayer, cl = colorLayers;
-    if (engine === 'lut') {
-      const minTop = baseLayers + cl;
-      if (startOverride > 0) {
-        gradStartLayer = Math.max(baseLayers, startOverride);
-        gradTopLayer = gradStartLayer + cl;
-      } else {
-        gradTopLayer = Math.max(minTop, flatLayers + reliefLayers);
-        gradStartLayer = gradTopLayer - cl;
-      }
-    } else if (topOverride > 0) {
+    if (topOverride > 0) {
       const desiredTop = clamp(Math.round(topOverride / layerHeight), 2, 240);
       gradStartLayer = startOverride > 0 ? Math.max(1, startOverride) : Math.max(1, desiredTop - cl);
       const maxTop = gradStartLayer + 24;
@@ -2551,27 +2503,19 @@
     // GPU7 profiling (gated by options.__profile; no effect on normal plans).
     const __prof = options.__profile ? { marks: [], last: performance.now() } : null;
     const __mark = (label) => { if (__prof) { const now = performance.now(); __prof.marks.push([label, Math.round(now - __prof.last)]); __prof.last = now; } };
-    const engine = options.engine === 'td' ? 'td' : 'lut';
-    const layerHeight = engine === 'lut' ? (options.lutLayerHeight || 0.08) : (Number(options.layerHeight) || 0.08);
-    const flatTopMm = Number(options.flatTopMm) || (engine === 'lut' ? 1.6 : 2.0);
+    // Physical LUT retired (spec v1.1 §2.2): the only spatial-mix engine is TD.
+    // TD calibration data (filamentCalibrations / calibrationV2 / profiles) is untouched.
+    const engine = 'td';
+    const layerHeight = Number(options.layerHeight) || 0.08;
+    const flatTopMm = Number(options.flatTopMm) || 2.0;
     const reliefMm = Number(options.reliefMm) || 0;
     const pixelSize = (Number(options.widthMm) || 150) / w;
     const { lab, alpha } = imageToLab(imageData);
     const { printMask, sourcePrintMask, background, holeMap } = buildPrintMask(lab, w, h, options, pixelSize);
     __mark('lab+printMask');
 
-    let lut = null, palette = null, foundation = null, colorLayers, baseLayers, baseIndex;
-    if (engine === 'lut') {
-      const key = options.lutKey || 'bambu_8';
-      const all = CS.LUT_DATA && CS.LUT_DATA.lut;
-      lut = all && all[key];
-      if (!lut) throw new Error('LUT 数据未加载');
-      palette = buildLutPalette(lut, options);
-      colorLayers = lut.colorLayers || 5;
-      baseLayers = lut.baseLayers || 10;
-      baseIndex = lut.baseIndex || 0;
-      foundation = palette[baseIndex];
-    } else {
+    let palette = null, foundation = null, colorLayers, baseLayers, baseIndex;
+    {
       palette = buildUserPalette(options.palette || []);
       if (!palette.length) throw new Error('请至少选择一种耗材');
       colorLayers = clamp(Math.round(Number(options.gradLayers) || 6), 1, 24);
@@ -2777,32 +2721,20 @@
         const fams = [];
         const predLabs = [];
         for (const center of centers) {
-          if (engine === 'lut') {
-            const m = nearestLut(center, lut);
-            const seq = m.recipe.slice().reverse();
-            fams.push({
-              targetLab: center, targetHex: C.labToHex(center), predictedLab: m.lab, predictedHex: C.labToHex(m.lab),
-              recipe: seq, lutIndex: m.index, deltaE: m.deltaE, pixelCount: 0,
-              layers: seq.length, topLayer: gradStartLayer + seq.length,
-              topMm: (gradStartLayer + seq.length) * layerHeight
-            });
-            predLabs.push(m.lab);
-          } else {
-            let opt = gamut ? matchGamut(center, gamut) : null;
-            if (!opt) {
-              opt = optimizeTdStack(center, palette, foundation, layerHeight, colorLayers);
-              opt.length = opt.seq.length;
-            }
-            fams.push({
-              targetLab: center, targetHex: C.labToHex(center), predictedLab: opt.lab, predictedHex: opt.hex,
-              recipe: opt.seq, deltaE: opt.deltaE, pixelCount: 0,
-              neutralLocked: !!opt.neutralLocked,
-              neutral: opt.neutral != null ? opt.neutral : recipeIsNeutral(opt.seq, palette),
-              layers: opt.seq.length, topLayer: gradStartLayer + opt.seq.length,
-              topMm: (gradStartLayer + opt.seq.length) * layerHeight
-            });
-            predLabs.push(opt.lab);
+          let opt = gamut ? matchGamut(center, gamut) : null;
+          if (!opt) {
+            opt = optimizeTdStack(center, palette, foundation, layerHeight, colorLayers);
+            opt.length = opt.seq.length;
           }
+          fams.push({
+            targetLab: center, targetHex: C.labToHex(center), predictedLab: opt.lab, predictedHex: opt.hex,
+            recipe: opt.seq, deltaE: opt.deltaE, pixelCount: 0,
+            neutralLocked: !!opt.neutralLocked,
+            neutral: opt.neutral != null ? opt.neutral : recipeIsNeutral(opt.seq, palette),
+            layers: opt.seq.length, topLayer: gradStartLayer + opt.seq.length,
+            topMm: (gradStartLayer + opt.seq.length) * layerHeight
+          });
+          predLabs.push(opt.lab);
         }
         return { fams, predLabs };
       };
@@ -3452,9 +3384,6 @@
     if (diagnostics.printAudit.belowMinIslands > 0) {
       warnings.push(`逐层小岛审计：${diagnostics.printAudit.belowMinIslands} 个小于 ${diagnostics.printAudit.minAreaMm2} mm² 的孤立材料块（第 ${diagnostics.printAudit.worstLayer} 层最多 ${diagnostics.printAudit.worstIslands} 个，${diagnostics.printAudit.stride > 1 ? '按 1/' + diagnostics.printAudit.stride + ' 采样' : '全分辨率'}）；可能打不出来或依赖支撑，切片预览请核对。`);
     }
-    if (engine === 'lut' && flatTopMm < (baseLayers + colorLayers) * layerHeight - 1e-6) {
-      warnings.push(`纯色区高度低于 LUT 需要的 ${((baseLayers + colorLayers) * layerHeight).toFixed(2)} mm，渐变区会自动抬高。`);
-    }
     if (engine === 'td' && gradStartLayer * layerHeight < foundation.hd * Math.log10(20)) {
       warnings.push(`渐变区基底 ${(gradStartLayer * layerHeight).toFixed(2)} mm 可能不足以遮住底色（建议 ≥ ${(foundation.hd * Math.log10(20)).toFixed(2)} mm）。`);
     }
@@ -3671,7 +3600,7 @@
       equalHeight, commonTopLayer: equalHeight ? gradTopLayer : null,
       luminanceHeight, topLayer, luminanceCurve, reliefLayers, colorLayers,
       regionOf, regionRecipes, coordination,
-      palette, foundation, foundationIndex: baseIndex, lutKey: options.lutKey || (engine === 'lut' ? 'bambu_8' : null),
+      palette, foundation, foundationIndex: baseIndex,
       flatMask, flatFilament, familyId, regionId, regionCount, families, familyPixels, nearest, residual, stds, stdT, resT,
       predicted, preview, alpha, printMask, background, holeMap, smoothLevel,
       edgeSnap: options.edgeSnap !== false, lineRepair: options.lineRepair !== false,
@@ -3762,8 +3691,6 @@
   }
 
   async function buildPlanAsync(imageData, options) {
-    const engine = options.engine === 'td' ? 'td' : 'lut';
-    if (engine !== 'td') return cpuFallback(imageData, options, 'lut-engine');
     if (!CS.gamutGpu || (options.palette || []).length === 0) return cpuFallback(imageData, options, 'no-gpu-module');
     // R5: below ~100k pixels the CPU matcher beats the GPU setup/dispatch/readback cost.
     if (imageData.width * imageData.height < 100000) return cpuFallback(imageData, options, 'small-image');
@@ -3906,6 +3833,8 @@
   function filamentAt(plan, x, y, z) {
     const i = y * plan.w + x;
     if (plan.printMask && !plan.printMask[i]) return -1;
+    // layerSwap: single global sequence; a pixel is material S[z] below its stop height.
+    if (plan.printStrategy === 'layerSwap') return z < plan.topLayer[i] ? plan.layerMaterial[z] : -1;
     // 亮度浮雕: per-pixel height field. Colour recipe/flat colour sits in the top N
     // layers; foundation fills the body below; above the pixel top is air.
     if (plan.luminanceHeight && plan.topLayer) {
@@ -3949,9 +3878,9 @@
   }
 
   CS.engine = {
-    buildPlan, buildPlanAsync, recommendPalette, buildLutPalette, buildUserPalette,
+    buildPlan, buildPlanAsync, recommendPalette, buildUserPalette,
     imageToLab, filamentAt, compositeLinear, stackTransmission, localStd,
-    autoStdThreshold, nearestLut, kmeansLab, mergeIneffectiveHeights, physicalSmoothParams,
+    autoStdThreshold, kmeansLab, mergeIneffectiveHeights, physicalSmoothParams,
     mergeSmallRegions, buildPrintMask, buildStrokeInfo, buildTdGamut, gamutPenalty, gamutScore, matchGamut, mergeCommonBases, buildFamilyAdjacency, recipeSensitivity,
     scanGamutBest, topGamutEntries, nearestGamutEntries, nearestGamutEntries94,
     buildFlatMask, sampleGradientLab, buildEdgeMask,

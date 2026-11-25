@@ -54,10 +54,28 @@
     <section class="card">
       <div class="card-head"><h2>打印结构</h2><span class="tiny">单位 mm</span></div>
       <div class="segmented" id="engineSwitch">
-        <button data-engine="lut">物理 LUT</button>
-        <button data-engine="td" class="active">TD 浮雕</button>
+        <button data-engine="td" class="active">同层多色</button>
+        <button data-engine="layerSwap">逐层换色</button>
       </div>
       <p class="hint" id="engineHint">用你实际有的耗材，在局部叠出 HueForge 式变高渐变；矩形纯色区仍然整块直印。</p>
+
+      <div id="lsPanel" hidden>
+        <div class="field"><span>全局色段顺序 <em class="tiny">允许非相邻重复；编辑后重新匹配高度</em></span>
+          <div id="lsSegments"></div>
+          <button class="btn" id="lsAddSeg">＋ 添加色段</button>
+        </div>
+        <div class="field-grid">
+          <label class="field"><span>首层厚</span><div class="input-unit"><input type="number" id="lsFirst" value="0.2" min="0.08" max="0.6" step="0.04"><i>mm</i></div></label>
+          <label class="field"><span>后续层高</span><div class="input-unit"><input type="number" id="lsRest" value="0.08" min="0.04" max="0.3" step="0.02"><i>mm</i></div></label>
+        </div>
+        <div class="field-grid">
+          <label class="field"><span>最低停止层</span><input type="number" id="lsMin" value="1" min="1" max="8" step="1"></label>
+          <label class="field"><span>空间平滑</span><input type="range" id="lsSmooth" min="0" max="2" step="0.5" value="1"></label>
+        </div>
+        <label class="field tiny"><input type="checkbox" id="lsFixHeights"> 固定当前高度，仅查看改色影响</label>
+        <button class="btn primary" id="btnLsOptimize">优化段长（保留基线）</button>
+        <div class="field"><span>换色清单</span><div id="lsChangeList" class="tiny"></div></div>
+      </div>
 
       <label class="field" id="useModeField">
         <span>用途预设 <em class="tiny">结果层面的起点，应用后仍可手动微调</em></span>
@@ -66,14 +84,6 @@
           <option value="sticker">贴纸 / 动漫：等高、黑线直印</option>
           <option value="photo">照片 / 绘画：保留渐变与浮雕</option>
           <option value="pixel">像素画 / 硬边：不吸附、不补线</option>
-        </select>
-      </label>
-
-      <label class="field" id="lutField">
-        <span>LUT 配色</span>
-        <select id="lutSelect">
-          <option value="bambu_8">拓竹 8 色宽色域（黑/白/红/黄/蓝/绿/青/品红）</option>
-          <option value="bambu_cmyw">拓竹 CMYW 4 色（单 AMS）</option>
         </select>
       </label>
 
@@ -466,7 +476,6 @@
 
 <script src="js/color.js?v=20261123m67"></script>
 <script src="js/data-filaments.js?v=20261123m67"></script>
-<script src="js/data-lut.js?v=20261123m67"></script>
 <script src="js/earcut.js?v=20261123m67"></script>
 <script src="js/optics.js?v=20261123m67"></script>
 <script src="js/height-curve.js?v=20261123m67"></script>
@@ -475,6 +484,7 @@
 <script src="js/modes.js?v=20261123m67"></script>
 <script src="js/zip.js?v=20261123m67"></script>
 <script src="js/exporter.js?v=20261123m67"></script>
+<script src="js/layer-swap.js?v=20261123m67"></script>
 <script src="js/calibration.js?v=20261123m67"></script>
 <script src="js/batch-calibration.js?v=20261123m67"></script>
 <script src="js/matrix-calibration.js?v=20261123m67"></script>

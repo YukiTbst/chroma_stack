@@ -12,11 +12,13 @@ self.onmessage = function (e) {
   const m = e.data || {};
   try {
     const palette = m.palette, lh = m.layerHeight, ew = m.ew, eh = m.eh, ps = m.pixelSize;
+    // layerSwap carries a non-uniform cumulative thickness table (spec §3.2).
+    const zOf = z => m.layerZMm ? m.layerZMm[z] : z * lh;
     const objects = [];
     const transfer = [];
     for (const t of m.tasks) {
       const positions = [], indices = [];
-      CS.exporter.meshPrism(t.mask, ew, eh, ps, t.z0 * lh, t.z1 * lh, positions, indices);
+      CS.exporter.meshPrism(t.mask, ew, eh, ps, zOf(t.z0), zOf(t.z1), positions, indices);
       if (!indices.length) continue;
       for (let i = 0; i < positions.length; i += 3) { positions[i] += 128; positions[i + 1] += 128; }
       const pos = Float64Array.from(positions), idx = Uint32Array.from(indices);

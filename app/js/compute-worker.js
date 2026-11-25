@@ -8,7 +8,7 @@
    cached worker/importScripts and the GPU path never activates. */
 const __vq = (self.location && self.location.search || '').match(/[?&]v=([^&]+)/);
 const __q = __vq ? '?v=' + __vq[1] : '';
-importScripts('color.js' + __q, 'data-filaments.js' + __q, 'data-lut.js' + __q, 'earcut.js' + __q, 'optics.js' + __q, 'height-curve.js' + __q, 'gamut-gpu.js' + __q, 'calibration-data.js' + __q, 'layer-optimizer.js' + __q, 'engine.js' + __q, 'parallel.js' + __q);
+importScripts('color.js' + __q, 'data-filaments.js' + __q, 'earcut.js' + __q, 'optics.js' + __q, 'height-curve.js' + __q, 'gamut-gpu.js' + __q, 'calibration-data.js' + __q, 'layer-optimizer.js' + __q, 'engine.js' + __q, 'parallel.js' + __q);
 
 self.onmessage = async function (e) {
   const msg = e.data || {};

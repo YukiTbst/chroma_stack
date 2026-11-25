@@ -22,7 +22,7 @@ assert.ok(app.includes('setExportEnabled(!state.dirty)'), 'export availability f
 assert.ok(app.includes('X.build3MFBlobAsync(p)'), '3MF export uses the clicked plan snapshot');
 assert.ok(app.includes("downloadBlob(blob, filenameBase(p) + '_导出预览.png')"), 'export preview filename uses the clicked plan snapshot');
 assert.ok(app.includes('const pv = exportPreviewPlan(p)'), 'export preview renders the final export grid from the same plan snapshot');
-assert.ok(app.includes('state.lutTdOverrides[state.lutKey]'), 'LUT calibration overrides are partitioned by LUT key');
+assert.ok(app.includes('state.filamentCalibrations'), 'TD calibration is partitioned/preserved per filament');
 assert.ok(app.includes("$('btnAnalyze').addEventListener('click', () => analyze())"), 'sidebar button starts calculation explicitly');
 assert.ok(app.includes("$('btnAnalyzeStage').addEventListener('click', () => analyze())"), 'stage button starts calculation explicitly');
 

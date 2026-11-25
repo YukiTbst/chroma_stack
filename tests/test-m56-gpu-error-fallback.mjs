@@ -61,7 +61,7 @@ const palette = [
 {
   const ctx = makeCtx();
   ctx.navigator = { gpu: { requestAdapter: async () => ({ requestDevice: async () => nanDevice() }) } };
-  load(ctx, ['color.js', 'data-filaments.js', 'data-lut.js', 'optics.js', 'height-curve.js', 'calibration-data.js', 'layer-optimizer.js', 'engine.js', 'gamut-gpu.js']);
+  load(ctx, ['color.js', 'data-filaments.js', 'optics.js', 'height-curve.js', 'calibration-data.js', 'layer-optimizer.js', 'engine.js', 'gamut-gpu.js']);
   const CS = ctx.CS;
   const w = 400, h = 300, n = w * h; // >= 100k so the GPU pre-warm is attempted (R5 threshold)
   const data = new Uint8ClampedArray(n * 4);
@@ -77,7 +77,7 @@ const palette = [
 {
   const ctx = makeCtx();
   ctx.navigator = { gpu: { requestAdapter: async () => ({ requestDevice: async () => nanDevice() }) } };
-  load(ctx, ['color.js', 'data-filaments.js', 'data-lut.js', 'optics.js', 'height-curve.js', 'calibration-data.js', 'layer-optimizer.js', 'engine.js', 'gamut-gpu.js']);
+  load(ctx, ['color.js', 'data-filaments.js', 'optics.js', 'height-curve.js', 'calibration-data.js', 'layer-optimizer.js', 'engine.js', 'gamut-gpu.js']);
   const CS = ctx.CS;
   const w = 80, h = 60, n = w * h; // 4800 < 100k
   const data = new Uint8ClampedArray(n * 4);

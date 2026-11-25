@@ -34,7 +34,16 @@
     previewSrc: '',
     plan: null,
     engine: 'td',
-    lutKey: 'bambu_8',
+    printStrategy: 'spatialMix',
+    lsSegments: [
+      { materialId: 'Black', layerCount: 2, locked: false },
+      { materialId: 'Jade White', layerCount: 3, locked: false },
+      { materialId: 'Red', layerCount: 2, locked: false },
+      { materialId: 'Jade White', layerCount: 2, locked: false },
+      { materialId: 'Blue', layerCount: 2, locked: false },
+      { materialId: 'Red', layerCount: 1, locked: false }
+    ],
+    lsFirst: 0.2, lsRest: 0.08, lsMin: 1, lsSmooth: 1, lsFixHeights: false, lsAnchors: [],
     widthMm: 150,
     flatTopMm: 1.6,
     reliefMm: 0.16,
@@ -68,8 +77,6 @@
     families: 192,
     foundationIndex: 1,
     tdPalette: [],
-    lutTdOverrides: {},
-    lutHexOverrides: {},
     filamentCalibrations: {},
     batchLayout: null,
     batchPalette: null,
@@ -169,6 +176,7 @@
       }, 45);
     });
     update3DModeUI();
+    bindLsPanel();
     updateEngineUI();
     renderPalette();
     renderSection(null);
@@ -207,8 +215,6 @@
 
   function restoreSettings(saved) {
     state.filamentCalibrations = saved && saved.calibrations && typeof saved.calibrations === 'object' ? saved.calibrations : {};
-    state.lutTdOverrides = saved && saved.lutTdOverrides && typeof saved.lutTdOverrides === 'object' ? saved.lutTdOverrides : {};
-    state.lutHexOverrides = saved && saved.lutHexOverrides && typeof saved.lutHexOverrides === 'object' ? saved.lutHexOverrides : {};
     state.calibrationV2 = saved && saved.calibrationV2 && typeof saved.calibrationV2 === 'object' ? saved.calibrationV2 : null;
     state.tdPalette = state.tdPalette.map(applyCalibrationRecord);
     state.backgroundHoleIds.clear();
@@ -218,7 +224,7 @@
 
   function syncControlsFromState() {
     const values = {
-      lutSelect: state.lutKey, widthMm: state.widthMm, flatTopMm: state.flatTopMm, reliefMm: state.reliefMm,
+      widthMm: state.widthMm, flatTopMm: state.flatTopMm, reliefMm: state.reliefMm,
       gradStartLayer: state.gradStartOverride == null ? 16 : state.gradStartOverride,
       gradTopMm: state.gradTopMmOverride == null ? 1.76 : state.gradTopMmOverride,
       layerHeight: state.layerHeight, gradLayers: state.gradLayers,
@@ -230,7 +236,7 @@
     };
     for (const [id, value] of Object.entries(values)) if ($(id)) $(id).value = String(value);
     $('variableHeight').checked = state.variableHeight && state.geometryMode === 'relief';
-    $('variableHeight').disabled = state.engine === 'lut' || state.geometryMode !== 'relief';
+    $('variableHeight').disabled = state.geometryMode !== 'relief';
     if ($('geometryMode')) $('geometryMode').value = state.geometryMode;
     if ($('qualityPolicy')) $('qualityPolicy').value = state.qualityPolicy;
     if ($('luminanceCurveField')) $('luminanceCurveField').hidden = state.geometryMode !== 'luminance';
@@ -242,7 +248,7 @@
     if ($('useMode')) $('useMode').value = state.useMode;
     updateEngineUI();
     renderPalette();
-    $('foundationSelect').value = String(clamp(state.foundationIndex, 0, Math.max(0, (state.engine === 'lut' ? currentLutPalette() : state.tdPalette).length - 1)));
+    $('foundationSelect').value = String(clamp(state.foundationIndex, 0, Math.max(0, (state.tdPalette).length - 1)));
     $('stdValue').textContent = state.stdThreshold > 0 ? state.stdThreshold.toFixed(1) : '自动';
     $('resValue').textContent = state.residualThreshold.toFixed(1) + ' ΔE';
     $('areaValue').textContent = state.minFlatPercent.toFixed(1) + '%';
@@ -264,7 +270,7 @@
       if (base) p.hex = base.hex;
       Object.assign(p, CS.settings.uniformTd(base ? base.td : p.td));
     }
-    state.lutTdOverrides = {}; state.lutHexOverrides = {}; state.filamentCalibrations = {};
+    state.filamentCalibrations = {};
     state.calibrationV2 = null; // lifecycle: reset clears the v2 model too (m44 item 4)
     state.plan = null;
     CS.settings.clear();
@@ -537,20 +543,14 @@
     const locks = n > 0 && state.lockMask && state.lockMask.length === n ? state.lockMask : null;
     const manualMask = locks || undefined;
     const mask = locks ? state.lockValue : undefined;
-    if (state.engine === 'lut') {
+    if (state.printStrategy === 'layerSwap') {
       return {
-        engine: 'lut', lutKey: state.lutKey, widthMm: state.widthMm,
-        flatTopMm: state.flatTopMm, reliefMm: state.reliefMm, gradStartLayerOverride: state.gradStartOverride,
-        families: state.families, stdThreshold: state.stdThreshold,
-        residualThreshold: state.residualThreshold, minFlatPercent: state.minFlatPercent, smoothLevel: state.smoothLevel, smoothMm: state.smoothMm, lineWidthMm: state.lineWidthMm, mergeDeltaE: state.mergeDeltaE,
-        lineProtect: state.lineProtect, edgeClean: state.edgeClean, vectorFlat: state.vectorFlat,
-        maskOverride: mask || undefined,
-        manualMask: manualMask || undefined,
-        edgeSnap: state.edgeSnap !== false, lineRepair: state.lineRepair !== false,
-        backgroundMode: state.backgroundMode, backgroundColor: state.backgroundColor, backgroundTolerance: state.backgroundTolerance,
-        backgroundEnvelope: state.backgroundEnvelope, backgroundEnvelopeMm: state.backgroundEnvelopeMm,
-        backgroundDeletedHoles: Array.from(state.backgroundHoleIds),
-        tdOverrides: state.lutTdOverrides[state.lutKey], hexOverrides: state.lutHexOverrides[state.lutKey]
+        engine: 'td', palette: state.tdPalette, widthMm: state.widthMm,
+        segments: state.lsSegments, firstLayerMm: state.lsFirst, layerMm: state.lsRest,
+        minLayers: state.lsMin, prefs: { smooth: state.lsSmooth },
+        anchors: state.lsAnchors || [], printMask: mask,
+        fixTopLayer: state.lsFixHeights && state.plan && state.plan.printStrategy === 'layerSwap' ? state.plan.topLayer : null,
+        boundary: { linearRgb: { r: 1, g: 1, b: 1 } }, seed: 7
       };
     }
     return {
@@ -690,7 +690,9 @@
       const t0 = Date.now();
       try {
         if (request !== state.analysisRequest) return;
-        const plan = await buildPlanSmart(image, options, request);
+        const plan = state.printStrategy === 'layerSwap'
+          ? await CS.layerSwap.buildPlan(image, options)
+          : await buildPlanSmart(image, options, request);
         if (!plan || request !== state.analysisRequest) return;
         state.plan = plan;
         state.appliedVersion = version;
@@ -730,6 +732,20 @@
     $('imageMeta').textContent = `${p.widthMm.toFixed(0)} × ${p.heightMm.toFixed(0)} mm · ${p.w} × ${p.h} px`;
     setExportEnabled(!state.dirty);
     renderPalette();
+    if (p.printStrategy === 'layerSwap') {
+      const m = p.fitMetrics || {};
+      $('structureLine').innerHTML = `<div><b>全局序列</b><span>${p.segments.length} 色段 / ${new Set(p.layerMaterialId).size} 耗材</span></div><div><b>停止高度</b><span>${p.minLayers} → ${p.maxLayers} 层</span></div><div><b>首层/后续</b><span>${p.firstLayerMm}/${p.layerHeight} mm</span></div>`;
+      $('metricDE').textContent = (m.meanDE || 0).toFixed(2);
+      $('metricP90').textContent = (m.p90 || 0).toFixed(2);
+      $('metricFamilies').textContent = String(p.segments.length);
+      $('metricSwaps').textContent = String(CS.layerSwap.changeList(p).filter(e => e.kind === 'change').length);
+      $('supportAudit').textContent = `重点区ΔE ${m.regionDE != null ? m.regionDE.toFixed(2) : '—'} · 孤立跳变 ${m.isolatedJumps || 0}`;
+      updateLayerControl(p);
+      renderLsChangeList();
+      renderStage();
+      $('planTime').textContent = `${p.w}×${p.h} px · ${p.maxLayers} 层`;
+      return;
+    }
     updateStructureFields();
     renderSection(p);
     updateFamilyList(p);
@@ -737,61 +753,44 @@
     updateLayerControl(p);
     renderLegend(p);
     updateBackgroundUI();
+    renderLsChangeList();
     renderStage();
     $('planTime').textContent = `${p.w}×${p.h} px · ${p.maxLayers} 层`;
   }
 
   /* ---------------- palette ---------------- */
-  function currentLutPalette() {
-    if (state.plan && state.plan.engine === 'lut') return state.plan.palette;
-    const lut = CS.LUT_DATA && CS.LUT_DATA.lut[state.lutKey];
-    if (!lut) return [];
-    return E.buildLutPalette(lut, { tdOverrides: state.lutTdOverrides[state.lutKey], hexOverrides: state.lutHexOverrides[state.lutKey] });
-  }
-
   function renderPalette() {
     const list = $('paletteList');
-    const isLut = state.engine === 'lut';
-    const palette = isLut ? currentLutPalette() : state.tdPalette;
+    const palette = state.tdPalette;
     list.innerHTML = '';
     palette.forEach((p, i) => {
       const item = document.createElement('div');
       item.className = 'palette-item';
-      if (isLut) {
-        item.innerHTML = `
-          <span class="swatch-wrap" style="background:${esc(p.hex)}"></span>
-          <div class="palette-info"><strong>${esc(p.name)}</strong><small>${esc(p.brand || 'BambuLab')} · ${esc(p.material || 'PLA Basic')}</small></div>
-          <div class="palette-td"><input value="${p.td != null ? p.td : ''}" disabled aria-label="TD"><span>TD</span></div>
-          <span class="palette-note">LUT</span>`;
-      } else {
-        const tdR = p.tdR != null ? p.tdR : (p.td != null ? p.td : 5);
-        const tdG = p.tdG != null ? p.tdG : (p.td != null ? p.td : 5);
-        const tdB = p.tdB != null ? p.tdB : (p.td != null ? p.td : 5);
-        const hasTri = p.tdR != null || p.tdG != null || p.tdB != null;
-        item.innerHTML = `
-          <span class="swatch-wrap"><input type="color" value="${esc(p.hex || '#808080')}" data-hex="${i}" aria-label="颜色"></span>
-          <div class="palette-info"><strong>${esc(p.name || ('耗材 ' + (i + 1)))}</strong><small>${esc(p.brand || '自定义')} · ${hasTri ? '逐通道 TD（标定值）' : '单值 TD（未逐通道标定）'}</small></div>
-          <div class="palette-td triple">
-            <div><input type="number" value="${(Number(tdR) || 5).toFixed(1)}" min="0.1" max="20" step="0.1" data-tdr="${i}" aria-label="TD R"><span>R</span></div>
-            <div><input type="number" value="${(Number(tdG) || 5).toFixed(1)}" min="0.1" max="20" step="0.1" data-tdg="${i}" aria-label="TD G"><span>G</span></div>
-            <div><input type="number" value="${(Number(tdB) || 5).toFixed(1)}" min="0.1" max="20" step="0.1" data-tdb="${i}" aria-label="TD B"><span>B</span></div>
-          </div>
-          <button class="icon-btn" data-remove="${i}" title="移除">×</button>`;
-      }
+      const tdR = p.tdR != null ? p.tdR : (p.td != null ? p.td : 5);
+      const tdG = p.tdG != null ? p.tdG : (p.td != null ? p.td : 5);
+      const tdB = p.tdB != null ? p.tdB : (p.td != null ? p.td : 5);
+      const hasTri = p.tdR != null || p.tdG != null || p.tdB != null;
+      item.innerHTML = `
+        <span class="swatch-wrap"><input type="color" value="${esc(p.hex || '#808080')}" data-hex="${i}" aria-label="颜色"></span>
+        <div class="palette-info"><strong>${esc(p.name || ('耗材 ' + (i + 1)))}</strong><small>${esc(p.brand || '自定义')} · ${hasTri ? '逐通道 TD（标定值）' : '单值 TD（未逐通道标定）'}</small></div>
+        <div class="palette-td triple">
+          <div><input type="number" value="${(Number(tdR) || 5).toFixed(1)}" min="0.1" max="20" step="0.1" data-tdr="${i}" aria-label="TD R"><span>R</span></div>
+          <div><input type="number" value="${(Number(tdG) || 5).toFixed(1)}" min="0.1" max="20" step="0.1" data-tdg="${i}" aria-label="TD G"><span>G</span></div>
+          <div><input type="number" value="${(Number(tdB) || 5).toFixed(1)}" min="0.1" max="20" step="0.1" data-tdb="${i}" aria-label="TD B"><span>B</span></div>
+        </div>
+        <button class="icon-btn" data-remove="${i}" title="移除">×</button>`;
       list.appendChild(item);
     });
     $('paletteCount').textContent = `${palette.length} 槽`;
-    $('btnRecommend').disabled = isLut || !state.imageData;
-    $('paletteHint').textContent = isLut
-      ? 'LUT 模式锁定为校准配色；切换到 TD 浮雕可使用任意耗材与 TD。'
-      : 'TD 为逐通道透光距离（R/G/B），标定后自动写入；手动修改 TD 会把三个通道设为同一值。HD ≈ TD × 0.1。';
+    $('btnRecommend').disabled = !state.imageData;
+    $('paletteHint').textContent = 'TD 为逐通道透光距离（R/G/B），标定后自动写入；手动修改 TD 会把三个通道设为同一值。HD ≈ TD × 0.1。';
     fillFoundationSelect();
   }
 
   function fillFoundationSelect() {
     const sel = $('foundationSelect');
     if (!sel) return;
-    const palette = state.engine === 'lut' ? currentLutPalette() : state.tdPalette;
+    const palette = state.tdPalette;
     const cur = clamp(state.foundationIndex, 0, Math.max(0, palette.length - 1));
     sel.innerHTML = palette.map((p, i) => `<option value="${i}">${esc(p.name)}</option>`).join('');
     sel.value = String(cur);
@@ -811,7 +810,6 @@
     if (!entry) { toast('耗材库里没有 ' + name); return; }
     const ok = addFilamentToTd(entry);
     if (!ok) return;
-    if (state.engine === 'lut') setEngine('td', false);
     clearManualEdits();
     renderPalette();
     markDirty(false);
@@ -827,7 +825,6 @@
     if (!entry) entry = { id: 'suggest-' + hex, name, hex, td: 5, brand: btn.dataset.suggestBrand || '自定义', material: btn.dataset.suggestMaterial || 'PLA' };
     const ok = addFilamentToTd(entry);
     if (!ok) return;
-    if (state.engine === 'lut') setEngine('td', false);
     clearManualEdits();
     renderPalette();
     markDirty(false);
@@ -840,7 +837,6 @@
     if (!list.length) { toast('耗材库没有可用数据'); return; }
     state.tdPalette = list;
     state.foundationIndex = Math.max(0, list.findIndex(p => /white|jade/i.test(p.name)));
-    if (state.engine === 'lut') setEngine('td', false);
     clearManualEdits();
     renderPalette();
     markDirty(false);
@@ -849,8 +845,12 @@
 
   /* ---------------- engine / fields ---------------- */
   function setEngine(engine, doAnalyze = true) {
-    if (state.engine === engine) return;
-    state.engine = engine;
+    // Physical LUT is retired. The engine switch now selects a print strategy on
+    // top of the TD engine: 'layerSwap' (逐层换色) or 'td' (同层多色 / spatialMix).
+    const strategy = engine === 'layerSwap' ? 'layerSwap' : 'spatialMix';
+    if (state.printStrategy === strategy) return;
+    state.engine = 'td';
+    state.printStrategy = strategy;
     clearManualEdits();
     updateEngineUI();
     renderPalette();
@@ -858,24 +858,100 @@
   }
 
   function updateEngineUI() {
-    const isLut = state.engine === 'lut';
-    document.querySelectorAll('#engineSwitch button').forEach(b => b.classList.toggle('active', b.dataset.engine === state.engine));
-    $('lutField').style.display = isLut ? '' : 'none';
-    $('tdLayerField').style.display = isLut ? 'none' : '';
-    $('variableField').style.display = isLut ? 'none' : '';
-    $('mergeField').style.display = isLut ? 'none' : '';
-    $('layerHeight').disabled = isLut;
-    $('gradTopMm').disabled = isLut;
-    if (isLut) $('layerHeight').value = '0.08';
-    else $('layerHeight').value = String(state.layerHeight);
-    $('engineHint').textContent = isLut
-      ? '使用拓竹 PLA Basic 实测色卡，5 层配方直接匹配，无需先标定。'
+    const activeKey = state.printStrategy === 'layerSwap' ? 'layerSwap' : 'td';
+    document.querySelectorAll('#engineSwitch button').forEach(b => b.classList.toggle('active', b.dataset.engine === activeKey));
+    const isLs = state.printStrategy === 'layerSwap';
+    $('tdLayerField').style.display = isLs ? 'none' : '';
+    $('variableField').style.display = isLs ? 'none' : '';
+    $('mergeField').style.display = isLs ? 'none' : '';
+    $('layerHeight').disabled = false;
+    $('gradTopMm').disabled = isLs;
+    $('layerHeight').value = String(state.layerHeight);
+    if ($('lsPanel')) $('lsPanel').hidden = !isLs;
+    if ($('useModeField')) $('useModeField').style.display = isLs ? 'none' : '';
+    $('engineHint').textContent = isLs
+      ? '全局一条耗材序列；每个像素打印到某个停止高度（前缀叠层）。编辑色段后重新匹配高度。'
       : '用你实际有的耗材，在局部叠出 HueForge 式变高渐变；矩形纯色区仍然整块直印。';
-    $('engineBadge').textContent = isLut ? '物理 LUT · 免标定' : 'TD 浮雕 · 自定义耗材';
-    $('paletteHint').textContent = isLut
-      ? 'LUT 模式锁定为校准配色；切换到 TD 浮雕可使用任意耗材与 TD。'
-      : 'TD 为透光距离；HD ≈ TD × 0.1。色域视图会标出当前耗材无法覆盖的区域。';
-    $('btnRecommend').disabled = isLut || !state.imageData;
+    $('engineBadge').textContent = isLs ? '逐层换色 · 全局序列' : 'TD 浮雕 · 自定义耗材';
+    $('paletteHint').textContent = 'TD 为透光距离；HD ≈ TD × 0.1。色域视图会标出当前耗材无法覆盖的区域。';
+    $('btnRecommend').disabled = !state.imageData || isLs;
+    if (isLs) renderLsPanel();
+  }
+
+  /* ---------------- layerSwap segment editor ---------------- */
+  function renderLsPanel() {
+    const wrap = $('lsSegments'); if (!wrap) return;
+    const pal = state.tdPalette;
+    let acc = 0;
+    wrap.innerHTML = state.lsSegments.map((sg, i) => {
+      const opts = pal.map(p => `<option value="${p.id != null ? p.id : p.name}" ${ (p.id != null ? p.id : p.name) === sg.materialId ? 'selected' : ''}>${p.name}</option>`).join('');
+      const start = acc; acc += sg.layerCount;
+      return `<div class="ls-seg" data-i="${i}">
+        <select data-act="mat">${opts}</select>
+        <input type="number" data-act="count" min="1" max="40" value="${sg.layerCount}">
+        <label class="tiny"><input type="checkbox" data-act="lock" ${sg.locked ? 'checked' : ''}>锁</label>
+        <span class="tiny">层 ${start + 1}–${acc}</span>
+        <button data-act="up" title="上移">↑</button><button data-act="down" title="下移">↓</button>
+        <button data-act="dup" title="复制">⧉</button><button data-act="del" title="删除">×</button>
+      </div>`;
+    }).join('');
+    $('lsFirst').value = String(state.lsFirst);
+    $('lsRest').value = String(state.lsRest);
+    $('lsMin').value = String(state.lsMin);
+    $('lsSmooth').value = String(state.lsSmooth);
+    $('lsFixHeights').checked = state.lsFixHeights;
+    renderLsChangeList();
+  }
+  function renderLsChangeList() {
+    const el = $('lsChangeList'); if (!el) return;
+    const p = state.plan;
+    if (!p || p.printStrategy !== 'layerSwap') { el.innerHTML = '<span class="tiny">计算后显示换色清单</span>'; return; }
+    const cl = CS.layerSwap.changeList(p);
+    el.innerHTML = cl.map(e => e.kind === 'first-load'
+      ? `<div>首次装料 <b>${e.materialId}</b> · 第${e.startLayer1}层 · ${e.bottomZmm.toFixed(2)}→${e.topZmm.toFixed(2)}mm</div>`
+      : `<div>打印第${e.startLayer1}层前换 <b>${e.materialId}</b> · ${e.bottomZmm.toFixed(2)}→${e.topZmm.toFixed(2)}mm（上一段末层${e.prevSegmentLastLayer1}）</div>`).join('');
+  }
+  function bindLsPanel() {
+    const wrap = $('lsSegments'); if (!wrap) return;
+    wrap.addEventListener('change', (e) => {
+      const row = e.target.closest('.ls-seg'); if (!row) return;
+      const i = +row.dataset.i; const act = e.target.dataset.act;
+      if (act === 'mat') state.lsSegments[i].materialId = e.target.value;
+      else if (act === 'count') state.lsSegments[i].layerCount = Math.max(1, Math.round(+e.target.value || 1));
+      else if (act === 'lock') state.lsSegments[i].locked = e.target.checked;
+      markDirty(false); renderLsPanel();
+    });
+    wrap.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-act]'); if (!btn) return;
+      const row = e.target.closest('.ls-seg'); const i = +row.dataset.i; const act = btn.dataset.act;
+      const s = state.lsSegments;
+      if (act === 'up' && i > 0) [s[i - 1], s[i]] = [s[i], s[i - 1]];
+      else if (act === 'down' && i < s.length - 1) [s[i + 1], s[i]] = [s[i], s[i + 1]];
+      else if (act === 'dup') s.splice(i + 1, 0, { ...s[i], locked: false });
+      else if (act === 'del' && s.length > 1) s.splice(i, 1);
+      markDirty(false); renderLsPanel();
+    });
+    $('lsAddSeg').addEventListener('click', () => { state.lsSegments.push({ materialId: state.tdPalette[0].id != null ? state.tdPalette[0].id : state.tdPalette[0].name, layerCount: 1, locked: false }); markDirty(false); renderLsPanel(); });
+    for (const [id, key] of [['lsFirst', 'lsFirst'], ['lsRest', 'lsRest'], ['lsMin', 'lsMin'], ['lsSmooth', 'lsSmooth']]) {
+      $(id).addEventListener('change', (e) => { state[key] = +e.target.value || 0; markDirty(false); });
+    }
+    $('lsFixHeights').addEventListener('change', (e) => { state.lsFixHeights = e.target.checked; renderLsPanel(); });
+    $('btnLsOptimize').addEventListener('click', async () => {
+      const p = state.plan; if (!p || p.printStrategy !== 'layerSwap') { toast('请先计算逐层换色方案'); return; }
+      showProgress('优化段长（保留基线）…');
+      setTimeout(async () => {
+        try {
+          const opt = CS.layerSwap.optimizeSegmentLengths(state.imageData, p, { maxTrials: 8 });
+          const b = opt.baseline.metrics.meanDE, best = opt.best.metrics.meanDE;
+          const msg = `基线 meanΔE ${b.toFixed(2)}；最优 ${best.toFixed(2)}（${opt.best.counts || '基线'}）。应用最优？`;
+          if (opt.best !== opt.baseline && window.confirm(msg)) {
+            state.lsSegments = opt.best.segments.map(s => ({ ...s }));
+            markDirty(false); renderLsPanel(); analyze();
+          } else toast(`保留基线（meanΔE ${b.toFixed(2)}）`);
+        } catch (err) { toast('优化失败：' + (err.message || err)); }
+        finally { hideProgress(); }
+      }, 0);
+    });
   }
 
   function updateStructureFields() {
@@ -949,7 +1025,7 @@
         const z0 = sh + li * p.layerHeight, z1 = z0 + p.layerHeight;
         out += `<rect x="${gx0}" y="${y(z1)}" width="${gw}" height="${Math.max(0.5, (z1 - z0) * scale)}" fill="${esc(p.palette[fi].hex)}" stroke="rgba(0,0,0,.08)" stroke-width=".3"/>`;
       });
-      out += `<text x="214" y="20" text-anchor="middle" fill="#7d8b84" font-size="7">${p.engine === 'lut' ? '5 色层 · 白色基底' : '等高层叠'}</text>`;
+      out += `<text x="214" y="20" text-anchor="middle" fill="#7d8b84" font-size="7">等高层叠</text>`;
     }
     const gh = p.gradTopMm;
     out += `<text x="214" y="${y(gh) - 7}" text-anchor="middle" fill="#4c5a55" font-size="8">最高 ${gh.toFixed(2)} mm</text>
@@ -1073,7 +1149,7 @@
       let tip;
       if (d && d.path === 'gpu') tip = `GPU 预热加速：色域 ${d.gamutSize} 条，色层 ${d.colorLayers}${d.opticalModel ? '，已用标定模型' : ''}；预热中心 ${d.prewarm.centers}/单元 ${d.prewarm.cells}/精确 ${d.prewarm.exacts}。其余阶段（中性约束/协调等）仍在 CPU。`;
       else if (d && d.reason) {
-        const reasons = { 'lut-engine': 'LUT 引擎', 'no-gpu-module': '无 WebGPU 模块', 'small-image': '图像小于 10 万像素（CPU 更快）', 'no-adapter': '无可用 GPU 适配器', 'all-flat': '全纯色无渐变', 'empty-gamut': '色域为空', 'no-matcher': 'GPU 匹配器创建失败', 'gpu-error': 'GPU 出错回退' };
+        const reasons = { 'no-gpu-module': '无 WebGPU 模块', 'small-image': '图像小于 10 万像素（CPU 更快）', 'no-adapter': '无可用 GPU 适配器', 'all-flat': '全纯色无渐变', 'empty-gamut': '色域为空', 'no-matcher': 'GPU 匹配器创建失败', 'gpu-error': 'GPU 出错回退' };
         tip = `CPU 计算：${reasons[d.reason] || d.reason}${d.error ? '（' + d.error + '）' : ''}`;
       } else tip = 'CPU 计算';
       $('computeEngine').title = tip;
@@ -1100,7 +1176,6 @@
     }
     const warnings = p.warnings.slice();
     if (s.toolChanges > 160) warnings.push('层内换色下界较高，实际擦料和打印时间可能明显增加；可降低“渐变配色数”或扩大纯色区。');
-    if (p.engine === 'lut' && Math.abs(p.layerHeight - 0.08) > 1e-6) warnings.push('LUT 校准层高为 0.08 mm，请勿在切片器中改成其他层高。');
     $('warningList').innerHTML = warnings.length
       ? warnings.map(w => `<li>${esc(w)}</li>`).join('')
       : '<li class="muted">暂无提醒</li>';
@@ -1246,6 +1321,13 @@
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
     const silhouette = !!(p && p.background && p.background.enabled);
+    // layerSwap has no per-region families / gamut / 3D stack; those views fall back to
+    // the finished-mix prefix preview so they never read TD-only fields.
+    if (p && p.printStrategy === 'layerSwap' && (state.view === 'regions' || state.view === 'gamut' || state.view === 'three')) {
+      const off = imageDataCanvas(new ImageData(new Uint8ClampedArray(p.preview), p.w, p.h));
+      drawDownscaled(ctx, off, cssW, cssH);
+      return;
+    }
     if (state.view === 'original' || !p) {
       drawDownscaled(ctx, state.workingCanvas, cssW, cssH);
     } else if (state.view === 'sim') {
@@ -1273,6 +1355,7 @@
       drawDownscaled(ctx, off, cssW, cssH);
       drawLayerHud(ctx, p, cssW);
     }
+    if (p && p.printStrategy === 'layerSwap') { canvas.classList.toggle('brush', false); return; }
     renderLegend(p);
     canvas.classList.toggle('brush', state.brushOn);
     if (state.brushOn) drawBrushCursor(ctx, p, cssW, cssH);
@@ -1315,6 +1398,7 @@
 
   function actualTopLayer(p, i, mask) {
     if (p.printMask && !p.printMask[i]) return 0;
+    if (p.printStrategy === 'layerSwap') return p.topLayer[i];
     // 亮度浮雕: per-pixel luminance height field.
     if (p.luminanceHeight && p.topLayer) return p.topLayer[i];
     // F02: the heightmap/height stats must follow the FINAL material source, same as
@@ -1717,7 +1801,6 @@
     $('btnSyntheticSample').addEventListener('click', (e) => { e.stopPropagation(); makeSyntheticSample(); });
 
     document.querySelectorAll('#engineSwitch button').forEach(b => b.addEventListener('click', () => setEngine(b.dataset.engine)));
-    $('lutSelect').addEventListener('change', (e) => { state.lutKey = e.target.value; clearManualEdits(); renderPalette(); markDirty(false); });
     $('widthMm').addEventListener('input', (e) => {
       state.widthMm = clamp(Number(e.target.value) || 150, 40, 400);
       state.backgroundHoleIds.clear(); state.backgroundHolePick = false;
@@ -2014,7 +2097,6 @@
       if (!entry) return;
       const ok = addFilamentToTd(entry);
       if (ok) {
-        if (state.engine === 'lut') setEngine('td', false);
         renderPalette();
         markDirty(false);
         toast(`已加入 ${entry.brand} ${entry.name}`);
@@ -2064,7 +2146,7 @@
   function filenameBase(plan) {
     const p = plan || state.plan;
     if (!p) return '叠彩_未计算';
-    return `叠彩_${p.engine === 'lut' ? 'LUT' : 'TD'}_${Math.round(p.widthMm)}x${Math.round(p.heightMm)}mm`;
+    return `叠彩_TD_${Math.round(p.widthMm)}x${Math.round(p.heightMm)}mm`;
   }
 
   // F-OUTLINE-02: render the ACTUAL export grid top surface (not the native preview),
@@ -2198,7 +2280,7 @@
       for (;;) {
         const i = nextTask++;
         if (i >= tasks.length) return;
-        results[i] = await runMeshChunk(pool, slot, { palette: paletteLite, layerHeight: p.layerHeight, ew, eh, pixelSize, tasks: [tasks[i]] }, 120000);
+        results[i] = await runMeshChunk(pool, slot, { palette: paletteLite, layerHeight: p.layerHeight, layerZMm: p.layerZMm || null, ew, eh, pixelSize, tasks: [tasks[i]] }, 120000);
       }
     })();
     try {
@@ -2338,7 +2420,7 @@
       `尺寸：${p.widthMm.toFixed(2)} × ${p.heightMm.toFixed(2)} mm`,
       `层高：${p.layerHeight} mm；纯色区 ${p.flatBaseLayers || 0} 层基底 + ${p.flatLayers - (p.flatBaseLayers || 0)} 层纯色（共 ${p.flatLayers} 层）；渐变区 ${p.gradStartLayer}–${p.gradTopLayer} 层（最高）；浮雕差 ${p.reliefMm.toFixed(2)} mm${p.variableHeight ? '；各色块顶高 '+(p.gradStartLayer*p.layerHeight).toFixed(2)+'–'+p.actualGradTopMm.toFixed(2)+' mm' : ''}`,
       (() => { const g = X.exportGridFor(p); return `导出网格：${g.width}×${g.height}${g.downscaled ? `（工作 ${p.w}×${p.h}，导出重新离散化）` : '（与工作网格一致）'}`; })(),
-      `引擎：${p.engine === 'lut' ? '物理 LUT（Bambu PLA Basic 5 层）' : 'TD 立体浮雕（自定义耗材）'}；平滑 ${p.smoothMm != null ? p.smoothMm.toFixed(2) + ' mm (≈' + (p.smoothRadiusPx || 0) + 'px, 线宽 ' + (p.lineWidthMm || 0.42).toFixed(2) + 'mm)' : (p.smoothLevel || 0) + '/4'}；层序合并 ${p.mergeDeltaE || 0} ΔE`,
+      `引擎：TD 立体浮雕（自定义耗材）；平滑 ${p.smoothMm != null ? p.smoothMm.toFixed(2) + ' mm (≈' + (p.smoothRadiusPx || 0) + 'px, 线宽 ' + (p.lineWidthMm || 0.42).toFixed(2) + 'mm)' : (p.smoothLevel || 0) + '/4'}；层序合并 ${p.mergeDeltaE || 0} ΔE`,
       '',
       '文件说明：',
       '- preview.png：最终颜色模拟图',
@@ -2346,8 +2428,7 @@
       '- print_plan.json / print_plan.md：完整配方、AMS 槽位、逐层耗材与切片建议',
       '- layer_maps/：每一层的颜色图（透明=该层没有材料）',
       '',
-      '注意：本包不含 G-code。请使用 Chrome/Edge 打开 app 导出 3MF，再导入 Bambu Studio / OrcaSlicer。',
-      'LUT 校准条件为 0.08 mm 层高、0.42 mm 线宽、白色基底；换批次/层高/线宽需重新标定。'
+      '注意：本包不含 G-code。请使用 Chrome/Edge 打开 app 导出 3MF，再导入 Bambu Studio / OrcaSlicer。'
     ].join('\n');
   }
 
@@ -2366,7 +2447,7 @@
   }
 
   function currentCalibrationPalette() {
-    return state.engine === 'lut' ? currentLutPalette() : state.tdPalette;
+    return state.tdPalette;
   }
 
   function downloadBatchPlate() {
@@ -2599,11 +2680,6 @@
         id: p.id || '', name: p.name, brand: p.brand || '', material: p.material || 'PLA',
         hex: r.hex, td: r.td, tdR, tdG, tdB, source: 'photo', score: r.score, channelState: r.channelState || null, updatedAt: Date.now()
       };
-      if (state.engine === 'lut') {
-        const tdOverrides = state.lutTdOverrides[state.lutKey] || (state.lutTdOverrides[state.lutKey] = {});
-        const hexOverrides = state.lutHexOverrides[state.lutKey] || (state.lutHexOverrides[state.lutKey] = {});
-        tdOverrides[index >= 0 ? index : r.index] = r.td; hexOverrides[index >= 0 ? index : r.index] = r.hex;
-      }
     }
     renderPalette();
     markDirty(false);
@@ -2614,11 +2690,11 @@
   /* ---------------- calibration ---------------- */
   function openCalibration() {
     if (state.dirty || state.analyzing) { toast('请先计算并应用当前修改，再进行标定'); return; }
-    const palette = state.engine === 'lut' ? currentLutPalette() : state.tdPalette;
+    const palette = state.tdPalette;
     const sel = $('calibFilament');
     sel.innerHTML = palette.map((p, i) => `<option value="${i}">${esc(p.name)} · ${esc(p.hex)}</option>`).join('');
     sel.value = '0';
-    $('calibLayer').value = String(state.engine === 'lut' ? 0.08 : state.layerHeight);
+    $('calibLayer').value = String(state.layerHeight);
     $('calibPatches').value = '10';
     $('calibResult').textContent = '—';
     openModal('calibrationModal');
@@ -2648,7 +2724,7 @@
   }
 
   function downloadCalibration() {
-    const palette = state.engine === 'lut' ? currentLutPalette() : state.tdPalette;
+    const palette = state.tdPalette;
     const i = Number($('calibFilament').value) || 0;
     const p = palette[i];
     if (!p) { toast('先选择耗材'); return; }
@@ -2670,7 +2746,7 @@
 
   function computeCalibration() {
     if (state.dirty || state.analyzing) { toast('请先计算并应用当前修改，再写入标定'); return; }
-    const palette = state.engine === 'lut' ? currentLutPalette() : state.tdPalette;
+    const palette = state.tdPalette;
     const i = Number($('calibFilament').value) || 0;
     const p = palette[i];
     if (!p) { toast('先选择耗材'); return; }
@@ -2685,16 +2761,9 @@
     }
     const HD = -d / Math.log10(T);
     const TD = clamp(HD * 10, 0.1, 20);
-    if (state.engine === 'td') {
-      Object.assign(state.tdPalette[i], CS.settings.uniformTd(Number(TD.toFixed(2))));
-      renderPalette();
-      markDirty(false);
-    } else {
-      const overrides = state.lutTdOverrides[state.lutKey] || (state.lutTdOverrides[state.lutKey] = {});
-      overrides[i] = Number(TD.toFixed(2));
-      renderPalette();
-      markDirty(false);
-    }
+    Object.assign(state.tdPalette[i], CS.settings.uniformTd(Number(TD.toFixed(2))));
+    renderPalette();
+    markDirty(false);
     $('calibResult').textContent = `T* ${(T * 100).toFixed(1)}% · HD ${HD.toFixed(3)} mm · TD ${TD.toFixed(2)}`;
     toast(`已更新 ${p.name} 的 TD 为 ${TD.toFixed(2)}`);
   }

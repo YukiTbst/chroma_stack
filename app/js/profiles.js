@@ -12,7 +12,7 @@
   const BACKUP_KEY = 'chromastack.calibration-backup.v1';
   const BASE_KEY = 'chromastack.api-base';
   const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
-  const emptyData = () => ({ calibrations: {}, lutTdOverrides: {}, lutHexOverrides: {} });
+  const emptyData = () => ({ calibrations: {} });
 
   function apiBase() {
     let base = null;

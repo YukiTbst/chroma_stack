@@ -2,11 +2,10 @@ import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 require('../app/js/color.js');
 require('../app/js/optics.js');
-require('../app/js/data-lut.js');
 require('../app/js/data-filaments.js');
 require('../app/js/engine.js');
 globalThis.earcut = require('../app/js/earcut.js');
-const { engine, LUT_DATA } = globalThis.CS;
+const { engine } = globalThis.CS;
 
 const w = 240, h = 160;
 const data = new Uint8ClampedArray(w*h*4);
@@ -25,17 +24,15 @@ for (let y=0;y<h;y++) for (let x=0;x<w;x++) {
   px(x,y,r,g,b);
 }
 const image = { width:w, height:h, data };
-for (const mode of ['lut8','lut4','td']) {
+for (const mode of ['td']) {
   const t0 = performance.now();
-  const opts = mode==='td'
-    ? { engine:'td', palette:[
-        {name:'Black',hex:'#000000',td:0.6,brand:'BambuLab Basic',material:'PLA'},
-        {name:'Jade White',hex:'#ffffff',td:5,brand:'BambuLab Basic',material:'PLA'},
-        {name:'Red',hex:'#c00d1e',td:5,brand:'BambuLab Basic',material:'PLA'},
-        {name:'Yellow',hex:'#fce300',td:6,brand:'BambuLab Basic',material:'PLA'},
-        {name:'Blue',hex:'#00358e',td:4,brand:'BambuLab Basic',material:'PLA'}],
-        foundationIndex:1, widthMm:150, flatTopMm:1.6, reliefMm:0.16, gradLayers:6, families:48, layerHeight:0.08 }
-    : { engine:'lut', lutKey: mode==='lut8'?'bambu_8':'bambu_cmyw', widthMm:150, flatTopMm:1.6, reliefMm:0.16, families:64 };
+  const opts = { engine:'td', palette:[
+      {name:'Black',hex:'#000000',td:0.6,brand:'BambuLab Basic',material:'PLA'},
+      {name:'Jade White',hex:'#ffffff',td:5,brand:'BambuLab Basic',material:'PLA'},
+      {name:'Red',hex:'#c00d1e',td:5,brand:'BambuLab Basic',material:'PLA'},
+      {name:'Yellow',hex:'#fce300',td:6,brand:'BambuLab Basic',material:'PLA'},
+      {name:'Blue',hex:'#00358e',td:4,brand:'BambuLab Basic',material:'PLA'}],
+      foundationIndex:1, widthMm:150, flatTopMm:1.6, reliefMm:0.16, gradLayers:6, families:48, layerHeight:0.08 };
   const plan = await engine.buildPlan(image, opts);
   const dt = performance.now()-t0;
   console.log(`\n=== ${mode} ${dt.toFixed(0)}ms ===`);

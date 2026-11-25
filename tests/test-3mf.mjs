@@ -3,7 +3,6 @@ import fs from 'fs';
 const require = createRequire(import.meta.url);
 require('../app/js/color.js');
 require('../app/js/optics.js');
-require('../app/js/data-lut.js');
 require('../app/js/data-filaments.js');
 require('../app/js/engine.js');
 globalThis.earcut = require('../app/js/earcut.js');
@@ -20,7 +19,14 @@ for(let y=0;y<h;y++)for(let x=0;x<w;x++){
   data[p]=r;data[p+1]=g;data[p+2]=b;data[p+3]=255;
 }
 const image={width:w,height:h,data};
-const plan=await engine.buildPlan(image,{engine:'lut',lutKey:'bambu_8',widthMm:60,flatTopMm:1.6,reliefMm:0.16,families:24});
+const palette=[
+  { name: 'Black', hex: '#000000', td: 0.6, brand: 'BambuLab Basic', material: 'PLA' },
+  { name: 'Jade White', hex: '#ffffff', td: 5, brand: 'BambuLab Basic', material: 'PLA' },
+  { name: 'Red', hex: '#c00d1e', td: 5, brand: 'BambuLab Basic', material: 'PLA' },
+  { name: 'Yellow', hex: '#fce300', td: 6, brand: 'BambuLab Basic', material: 'PLA' },
+  { name: 'Blue', hex: '#00358e', td: 4, brand: 'BambuLab Basic', material: 'PLA' }
+];
+const plan=await engine.buildPlan(image,{engine:'td',palette,foundationIndex:1,widthMm:60,flatTopMm:1.6,reliefMm:0.16,families:24});
 console.log('plan',plan.stats.meanDE, plan.flatLayers, plan.gradStartLayer, plan.gradTopLayer, plan.maxLayers);
 const out=exporter.build3MFBytes(plan,{exportMax:96});
 fs.writeFileSync('tests/sample.3mf',Buffer.from(out.bytes));

@@ -74,17 +74,14 @@ const html = fs.readFileSync(new URL('../app/index.html', import.meta.url), 'utf
 assert.ok(html.includes('id="useMode"') && html.includes('id="btnRestoreBackup"'));
 assert.ok(html.indexOf('js/modes.js') > 0 && html.indexOf('js/modes.js') < html.indexOf('js/app.js'), 'modes load before the app');
 
-/* Both engine branches must forward the new structural options. A wiring bug
-   that put them only in the LUT branch must fail here. */
+/* The TD engine branch must forward the new structural options. The physical
+   LUT engine is retired, so there is only the TD branch to check. */
 const appSrc = fs.readFileSync(new URL('../app/js/app.js', import.meta.url), 'utf8');
-const lutStart = appSrc.indexOf("if (state.engine === 'lut')");
 const tdStart = appSrc.indexOf("engine: 'td', palette: state.tdPalette");
-assert.ok(lutStart > 0 && tdStart > lutStart, 'locate both option branches');
-const lutBlock = appSrc.slice(lutStart, tdStart);
+assert.ok(tdStart > 0, 'locate the TD option branch');
 const tdBlock = appSrc.slice(tdStart, appSrc.indexOf('function updateBackgroundUI'));
 for (const key of ['manualMask', 'edgeSnap', 'lineRepair']) {
   const count = (text) => text.split(key + ':').length - 1;
-  assert.equal(count(lutBlock), 1, key + ' is forwarded exactly once in the LUT branch');
   assert.equal(count(tdBlock), 1, key + ' is forwarded exactly once in the TD branch');
 }
 console.log('all preset checks passed');

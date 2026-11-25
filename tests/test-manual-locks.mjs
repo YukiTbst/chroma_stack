@@ -78,8 +78,7 @@ const bgIdx = 10 * w + 10;
 
 function freshState() {
   return {
-    imageData: img, engine: 'td', tdPalette: palette, lutKey: 'bambu_8',
-    lutTdOverrides: {}, lutHexOverrides: {},
+    imageData: img, engine: 'td', tdPalette: palette,
     widthMm: 60, flatTopMm: 1.6, reliefMm: 0, gradStartOverride: null, gradTopMmOverride: null,
     variableHeight: true, layerHeight: 0.08, gradLayers: 6, foundationIndex: WHITE,
     families: 12, stdThreshold: STD_T, residualThreshold: 5, minFlatPercent: 0.6,

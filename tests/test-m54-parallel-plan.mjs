@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const ctx = vm.createContext({ console, setTimeout, clearTimeout, performance });
 ctx.globalThis = ctx;
-for (const f of ['color.js', 'data-filaments.js', 'data-lut.js', 'optics.js', 'height-curve.js', 'calibration-data.js', 'layer-optimizer.js', 'engine.js']) {
+for (const f of ['color.js', 'data-filaments.js', 'optics.js', 'height-curve.js', 'calibration-data.js', 'layer-optimizer.js', 'engine.js']) {
   vm.runInContext(fs.readFileSync(path.join(root, 'app', 'js', f), 'utf8'), ctx);
 }
 const CS = ctx.CS, E = CS.engine;

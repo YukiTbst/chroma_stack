@@ -10,14 +10,11 @@ const state = {
   widthMm: 75, backgroundMode: 'auto', engine: 'td', threeMode: 'stack',
   tdPalette: [{ id: 'black', name: 'Black', hex: '#000000', td: 0.6, brand: 'Test', material: 'PLA' }],
   filamentCalibrations: {},
-  lutTdOverrides: { bambu_8: { 2: 4.5 }, cmyw_4: { 0: 3.2 } },
-  lutHexOverrides: { bambu_8: { 1: '#112233' } },
   backgroundHoleIds: new Set([123, 456]),
   imageData: new Uint8ClampedArray(400), plan: { large: 'analysis-cache' }
 };
 const snapshot = settings.snapshot(state);
 assert.equal(snapshot.calibrations['id:black'].td, 0.6, 'filament TD is serialized by model ID');
-assert.deepEqual(snapshot.lutTdOverrides.bambu_8, { 2: 4.5 }, 'LUT overrides remain partitioned by key');
 assert.ok(!('widthMm' in snapshot) && !('backgroundMode' in snapshot) && !('threeMode' in snapshot), 'project parameters are not persisted');
 assert.ok(!('tdPalette' in snapshot), 'selected project palette is not persisted as a project');
 assert.ok(!('imageData' in snapshot) && !('plan' in snapshot), 'image and analysis cache are never serialized');
@@ -34,14 +31,13 @@ let cached = null;
 globalThis.CS.profiles = {
   save(data) { calls.saved.push(data); cached = data; return true; },
   cachedData() { return cached ? JSON.parse(JSON.stringify(cached)) : null; },
-  clearActive() { calls.cleared++; cached = { calibrations: {}, lutTdOverrides: {}, lutHexOverrides: {} }; return Promise.resolve(); }
+  clearActive() { calls.cleared++; cached = { calibrations: {} }; return Promise.resolve(); }
 };
 assert.equal(settings.save(state), true, 'calibration saves through the profile layer');
 assert.equal(calls.saved.length, 1, 'one push queued per save');
 assert.equal(calls.saved[0].calibrations['id:black'].td, 0.6);
 const loaded = settings.load();
 assert.equal(loaded.calibrations['id:black'].td, 0.6);
-assert.equal(loaded.lutTdOverrides.cmyw_4[0], 3.2);
 loaded.calibrations['id:black'].td = 9;
 assert.equal(state.tdPalette[0].td, 0.6, 'stored snapshots are detached copies');
 settings.clear();
