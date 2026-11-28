@@ -66,7 +66,7 @@
       parts.push('   <mesh><vertices>');
       for (let i = 0; i < pos.length; i += 3) parts.push(`    <vertex x="${round(pos[i])}" y="${round(pos[i + 1])}" z="${round(pos[i + 2])}" />`);
       parts.push('   </vertices><triangles>');
-      for (let i = 0; i < idx.length; i += 3) parts.push(`    <triangle v1="${idx[i]}" v2="${idx[i + 1]}" v3="${idx[i + 2]}" />`);
+      for (let i = 0; i < idx.length; i += 3) parts.push(`    <triangle v1="${idx[i]}" v2="${idx[i + 1]}" v3="${idx[i + 2]}" pid="1" pindex="${pindex}" />`);
       parts.push('   </triangles></mesh>');
       parts.push('  </object>');
     };
@@ -94,8 +94,8 @@
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
  <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>
- <Override PartName="/Metadata/model_settings.config" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>
- <Override PartName="/Metadata/chromastack-calibration.json" ContentType="application/json"/>
+ <Default Extension="config" ContentType="text/xml"/>
+ <Default Extension="json" ContentType="application/json"/>
 </Types>`;
     const rels = `<?xml version="1.0" encoding="UTF-8"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
@@ -108,11 +108,22 @@
       railTopMm: +(baseHeight + patches * layerHeight).toFixed(3),
       boardMm: [+boardW.toFixed(2), +boardD.toFixed(2)]
     };
+    const projectSettings = {
+      layer_height: String(layerHeight), initial_layer_print_height: String(baseHeight),
+      wall_loops: '2', sparse_infill_density: '100%',
+      printer_model: 'ChromaStack', printer_settings_id: 'ChromaStack 0.4 nozzle',
+      nozzle_diameter: ['0.4'], printable_height: '256',
+      filament_colour: ['#' + baseHex, '#' + targetHex],
+      filament_type: ['PLA', 'PLA'],
+      filament_settings_id: ['Generic PLA @ChromaStack 0.4 nozzle', 'Generic PLA @ChromaStack 0.4 nozzle'],
+      filament_vendor: ['Generic', 'Generic']
+    };
     const files = [
       { name: '[Content_Types].xml', data: contentTypes },
       { name: '_rels/.rels', data: rels },
       { name: '3D/3dmodel.model', data: parts.join('\n') },
       { name: 'Metadata/model_settings.config', data: modelSettings },
+      { name: 'Metadata/project_settings.config', data: JSON.stringify(projectSettings, null, 2) },
       { name: 'Metadata/chromastack-calibration.json', data: JSON.stringify(meta, null, 2) }
     ];
     const bytes = CS.zip.createZip(files);
