@@ -395,8 +395,19 @@
       <div class="filter-chips" id="libraryFilters">
         <button class="chip active" data-brand="BambuLab Basic">拓竹 Basic</button>
         <button class="chip" data-brand="BambuLab Matte">拓竹 Matte</button>
+        <button class="chip" data-brand="custom">自定义</button>
         <button class="chip" data-brand="">全部</button>
       </div>
+    </div>
+    <div class="library-create">
+      <span class="tiny">创建自己的耗材（不在库中）：</span>
+      <div class="field-grid">
+        <input type="text" id="cfName" placeholder="名称，如：我的哑光黑">
+        <input type="color" id="cfHex" value="#808080" aria-label="颜色">
+        <input type="number" id="cfTd" value="5" min="0.1" max="20" step="0.1" aria-label="TD">
+        <input type="text" id="cfMaterial" value="PLA" placeholder="材料">
+      </div>
+      <button class="btn small" id="btnCreateFilament">＋ 创建并加入配色</button>
     </div>
     <div class="library-list" id="libraryList"></div>
     <div class="modal-foot"><span class="tiny" id="libraryCount"></span><button class="btn" data-close="libraryModal">完成</button></div>

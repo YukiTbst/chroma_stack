@@ -109,6 +109,7 @@
     planMs: 0,
     libraryFilter: 'BambuLab Basic',
     librarySearch: '',
+    customFilaments: [],
     toastTimer: null
   };
 
@@ -176,8 +177,10 @@
       }, 45);
     });
     update3DModeUI();
+    loadCustomFilaments();
     loadLsDraft();
     bindLsPanel();
+    $('btnCreateFilament').addEventListener('click', createCustomFilament);
     updateEngineUI();
     renderPalette();
     renderSection(null);
@@ -2137,7 +2140,7 @@
     $('libraryList').addEventListener('click', (e) => {
       const btn = e.target.closest('[data-add]');
       if (!btn) return;
-      const entry = CS.FILAMENT_DB.filaments.find(f => f.id === btn.dataset.add);
+      const entry = CS.FILAMENT_DB.filaments.find(f => f.id === btn.dataset.add) || state.customFilaments.find(f => f.id === btn.dataset.add);
       if (!entry) return;
       const ok = addFilamentToTd(entry);
       if (ok) {
@@ -2159,7 +2162,7 @@
     const list = $('libraryList');
     const q = state.librarySearch.trim().toLowerCase();
     const brand = state.libraryFilter;
-    const all = CS.FILAMENT_DB.filaments;
+    const all = CS.FILAMENT_DB.filaments.concat(state.customFilaments);
     const zh = {
       'black': '黑', 'white': '白', 'jade white': '玉白 白玉', 'red': '红', 'yellow': '黄',
       'blue': '蓝', 'cyan': '青 青色', 'magenta': '品红 洋红 洋红色', 'green': '绿',
@@ -2167,7 +2170,8 @@
       'brown': '棕 棕褐', 'orange': '橙', 'pink': '粉', 'beige': '米色', 'silver': '银'
     };
     const filtered = all.filter(f => {
-      if (brand && f.brand !== brand) return false;
+      if (brand === 'custom') { if (!f.custom) return false; }
+      else if (brand && f.brand !== brand) return false;
       if (!q) return true;
       const hay = (f.name + ' ' + f.brand + ' ' + f.material + ' ' + f.hex + ' ' + (zh[f.name.toLowerCase()] || '')).toLowerCase();
       return hay.includes(q);
@@ -2180,6 +2184,29 @@
       <span class="lib-td">TD ${f.td != null ? f.td : '—'}</span>
       <button class="btn small" data-add="${esc(f.id)}">加入</button>
     </div>`).join('') || '<div class="placeholder-small">没有匹配的耗材。</div>';
+  }
+
+  /* ---------------- custom filaments ---------------- */
+  const CF_KEY = 'chromastack.customFilaments.v1';
+  function loadCustomFilaments() {
+    try { const d = JSON.parse(localStorage.getItem(CF_KEY) || '[]'); if (Array.isArray(d)) state.customFilaments = d.filter(f => f && f.id && f.hex); } catch (e) { state.customFilaments = []; }
+  }
+  function saveCustomFilaments() {
+    try { localStorage.setItem(CF_KEY, JSON.stringify(state.customFilaments)); } catch (e) { /* storage unavailable */ }
+  }
+  function createCustomFilament() {
+    const name = ($('cfName').value || '').trim();
+    if (!name) { toast('请填写耗材名称'); return; }
+    const hex = $('cfHex').value || '#808080';
+    const td = Math.max(0.1, Math.min(20, +$('cfTd').value || 5));
+    const material = ($('cfMaterial').value || 'PLA').trim();
+    if (state.customFilaments.some(f => f.name === name) || state.tdPalette.some(p => p.name === name)) { toast('已存在同名耗材'); return; }
+    const entry = { id: 'custom-' + name.toLowerCase().replace(/\s+/g, '-') + '-' + Date.now().toString(36), name, hex, td, tdR: td, tdG: td, tdB: td, brand: '自定义', material, custom: true };
+    state.customFilaments.push(entry);
+    saveCustomFilaments();
+    const ok = addFilamentToTd(entry);
+    renderLibrary(); renderPalette(); markDirty(false);
+    toast(ok ? `已创建并加入 ${name}` : `已创建 ${name}（配色槽已满，可从自定义分组加入）`);
   }
 
   /* ---------------- export ---------------- */
