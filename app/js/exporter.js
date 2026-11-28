@@ -1027,11 +1027,12 @@
   // exhaust memory mid-generation before the capacity guard fires. These helpers give a
   // guaranteed LOWER bound on the model XML byte count from vertex/triangle counts alone:
   // a vertex line `     <vertex x="…" y="…" z="…" />\n` is >= 34 bytes (31 fixed + 3 coords
-  // of >= 1 char) and a triangle line `     <triangle v1="…" v2="…" v3="…" pid="1" pindex="…" />\n`
-  // is >= 58 bytes (54 fixed + 3 indices + 1 pindex, each >= 1 char). Header/resources/build
-  // and XML-escaped names only ADD bytes, so actual >= lowerBound always: rejecting when the
-  // lower bound exceeds ZIP32 can never falsely reject a model that actually fits.
-  function modelXmlLowerBound(totalV, totalT) { return totalV * 34 + totalT * 58; }
+  // of >= 1 char) and a triangle line `     <triangle v1="…" v2="…" v3="…" />\n` is >= 39
+  // bytes (36 fixed + 3 indices of >= 1 char). Triangles carry NO pid/pindex (filament goes
+  // via object pindex + model_settings extruder); header/resources/build and XML-escaped
+  // names only ADD bytes, so actual >= lowerBound always: rejecting when the lower bound
+  // exceeds ZIP32 can never falsely reject a model that actually fits.
+  function modelXmlLowerBound(totalV, totalT) { return totalV * 34 + totalT * 39; }
   function assertModelXmlBudget(totalV, totalT) {
     if (modelXmlLowerBound(totalV, totalT) > 0xFFFFFFFF) {
       const err = new Error('模型 XML 超过 4GB（ZIP32 上限）：几何过大。请降低精度（如 2× 而非 4×）或减小成品尺寸。');
@@ -1072,7 +1073,11 @@
       yield* pushLine('    </vertices>');
       yield* pushLine('    <triangles>');
       for (let i = 0; i < obj.indices.length; i += 3) {
-        yield* pushLine(`     <triangle v1="${obj.indices[i]}" v2="${obj.indices[i + 1]}" v3="${obj.indices[i + 2]}" pid="1" pindex="${obj.filament}" />`);
+        // Filament assignment goes through object-level pindex + model_settings per-part
+        // extruder (the format proven before the GPU refactor). Per-triangle pid/pindex
+        // triggers Bambu's "standard 3MF color" dialog which re-maps by clustered color and
+        // overrides the extruder assignment (all parts fell to filament 1), so do NOT write it.
+        yield* pushLine(`     <triangle v1="${obj.indices[i]}" v2="${obj.indices[i + 1]}" v3="${obj.indices[i + 2]}" />`);
       }
       yield* pushLine('    </triangles>');
       yield* pushLine('   </mesh>');

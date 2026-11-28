@@ -78,7 +78,7 @@
       parts.push(`  <object id="${id}" type="model" pid="1" pindex="${o.pindex}" name="${escapeXml(o.name)}">`, '   <mesh><vertices>');
       for (let j = 0; j < o.pos.length; j += 3) parts.push(`    <vertex x="${round(o.pos[j])}" y="${round(o.pos[j + 1])}" z="${round(o.pos[j + 2])}" />`);
       parts.push('   </vertices><triangles>');
-      for (let j = 0; j < o.idx.length; j += 3) parts.push(`    <triangle v1="${o.idx[j]}" v2="${o.idx[j + 1]}" v3="${o.idx[j + 2]}" pid="1" pindex="${o.pindex}" />`);
+      for (let j = 0; j < o.idx.length; j += 3) parts.push(`    <triangle v1="${o.idx[j]}" v2="${o.idx[j + 1]}" v3="${o.idx[j + 2]}" />`);
       parts.push('   </triangles></mesh>', '  </object>');
     }
     const assemblyId = objects.length + 2;

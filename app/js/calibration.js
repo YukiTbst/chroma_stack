@@ -66,7 +66,7 @@
       parts.push('   <mesh><vertices>');
       for (let i = 0; i < pos.length; i += 3) parts.push(`    <vertex x="${round(pos[i])}" y="${round(pos[i + 1])}" z="${round(pos[i + 2])}" />`);
       parts.push('   </vertices><triangles>');
-      for (let i = 0; i < idx.length; i += 3) parts.push(`    <triangle v1="${idx[i]}" v2="${idx[i + 1]}" v3="${idx[i + 2]}" pid="1" pindex="${pindex}" />`);
+      for (let i = 0; i < idx.length; i += 3) parts.push(`    <triangle v1="${idx[i]}" v2="${idx[i + 1]}" v3="${idx[i + 2]}" />`);
       parts.push('   </triangles></mesh>');
       parts.push('  </object>');
     };

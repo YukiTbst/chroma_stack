@@ -17,8 +17,8 @@ assert.equal(typeof X.assertModelXmlBudget, 'function', 'assertModelXmlBudget ex
 // Lower bound is monotonic and matches the documented per-line minima.
 assert.equal(X.modelXmlLowerBound(0, 0), 0);
 assert.equal(X.modelXmlLowerBound(1, 0), 34);
-assert.equal(X.modelXmlLowerBound(0, 1), 58);
-assert.equal(X.modelXmlLowerBound(1000, 2000), 1000 * 34 + 2000 * 58);
+assert.equal(X.modelXmlLowerBound(0, 1), 39);
+assert.equal(X.modelXmlLowerBound(1000, 2000), 1000 * 34 + 2000 * 39);
 
 // Normal models pass (no throw).
 X.assertModelXmlBudget(1000, 2000);
