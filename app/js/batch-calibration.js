@@ -85,20 +85,9 @@
     parts.push(`  <object id="${assemblyId}" type="model" name="ChromaStack_Batch_Calibration"><components>`);
     for (let i = 0; i < objects.length; i++) parts.push(`   <component objectid="${i + 2}" />`);
     parts.push('  </components></object>', ' </resources>', ` <build><item objectid="${assemblyId}" /></build></model>`);
-    const modelSettings = `<?xml version="1.0" encoding="UTF-8"?>\n<config>\n <object id="${assemblyId}">\n  <metadata key="name" value="ChromaStack Batch Calibration"/>\n  <metadata key="extruder" value="1"/>\n${objects.map((o, i) => `  <part id="${i + 2}" subtype="normal_part"><metadata key="name" value="${escapeXml(o.name)}"/><metadata key="extruder" value="${o.pindex + 1}"/></part>`).join('\n')}\n </object>\n <plate><metadata key="plater_id" value="1"/><metadata key="plater_name" value=""/><metadata key="locked" value="false"/><metadata key="filament_map_mode" value="Auto For Flush"/><model_instance><metadata key="object_id" value="${assemblyId}"/><metadata key="instance_id" value="0"/><metadata key="identify_id" value="1"/></model_instance></plate>\n <assemble>\n  <assemble_item object_id="${assemblyId}" instance_id="0" transform="1 0 0 0 1 0 0 0 1 0 0 0" offset="0 0 0" />\n </assemble>\n</config>`;
-    // Colored filament slots so Bambu/Orca auto-creates AMS entries instead of leaving
-    // every object uncolored for manual assignment.
-    const projectSettings = {
-      layer_height: String(layout.baseHeight || 0.08),
-      initial_layer_print_height: String(layout.baseHeight || 0.08),
-      wall_loops: '2', sparse_infill_density: '100%',
-      printer_model: 'ChromaStack', printer_settings_id: 'ChromaStack 0.4 nozzle',
-      nozzle_diameter: ['0.4'], printable_height: '256',
-      filament_colour: palette.map(p => p.hex),
-      filament_type: palette.map(() => 'PLA'),
-      filament_settings_id: palette.map(() => 'Generic PLA @ChromaStack 0.4 nozzle'),
-      filament_vendor: palette.map(p => /Bambu/i.test(p.brand || '') ? 'Bambu Lab' : 'Generic')
-    };
+    const modelSettings = `<?xml version="1.0" encoding="UTF-8"?>\n<config>\n <object id="${assemblyId}">\n  <metadata key="name" value="ChromaStack Batch Calibration"/>\n  <metadata key="extruder" value="1"/>\n${objects.map((o, i) => `  <part id="${i + 2}" subtype="normal_part"><metadata key="name" value="${escapeXml(o.name)}"/><metadata key="extruder" value="${o.pindex + 1}"/></part>`).join('\n')}\n </object>\n <plate><metadata key="plater_id" value="1"/><metadata key="plater_name" value=""/><metadata key="locked" value="false"/><model_instance><metadata key="object_id" value="${assemblyId}"/><metadata key="instance_id" value="0"/></model_instance></plate>\n <assemble>\n  <assemble_item object_id="${assemblyId}" instance_id="0" transform="1 0 0 0 1 0 0 0 1 0 0 0" offset="0 0 0" />\n </assemble>\n</config>`;
+    // No project_settings.config: with it Bambu remaps every part to filament 1. Standard
+    // 3MF import honours object pindex + per-part extruder, so objects get distinct filaments.
     const contentTypes = `<?xml version="1.0" encoding="UTF-8"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\n <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>\n <Default Extension="png" ContentType="image/png"/>\n <Default Extension="config" ContentType="text/xml"/>\n <Default Extension="json" ContentType="application/json"/>\n</Types>`;
     const rels = `<?xml version="1.0" encoding="UTF-8"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n <Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>\n</Relationships>`;
     const files = [
@@ -106,7 +95,6 @@
       { name: '_rels/.rels', data: rels },
       { name: '3D/3dmodel.model', data: parts.join('\n') },
       { name: 'Metadata/model_settings.config', data: modelSettings },
-      { name: 'Metadata/project_settings.config', data: JSON.stringify(projectSettings, null, 2) },
       { name: 'Metadata/chromastack-batch-calibration.json', data: JSON.stringify({ app: 'ChromaStack Batch Calibration', layout, palette, printMode: layout.printMode, note: layout.note }, null, 2) }
     ];
     return { bytes: CS.zip.createZip(files), meta: { layout, palette, printMode: layout.printMode } };

@@ -111,36 +111,16 @@
     parts.push(`  <object id="${aid}" type="model" name="ChromaStack_Combo_Calibration"><components>`);
     objects.forEach((o, i) => parts.push(`   <component objectid="${i + 2}" />`));
     parts.push('  </components></object>', ' </resources>', ` <build><item objectid="${aid}" /></build></model>`);
-    const config = `<?xml version="1.0" encoding="UTF-8"?>\n<config>\n <object id="${aid}">\n  <metadata key="name" value="ChromaStack Combo Calibration"/>\n  <metadata key="extruder" value="1"/>\n${objects.map((o, i) => `  <part id="${i + 2}" subtype="normal_part"><metadata key="name" value="${escapeXml(o.name)}"/><metadata key="extruder" value="${o.pindex + 1}"/></part>`).join('\n')}\n </object>\n <plate>\n  <metadata key="plater_id" value="1"/>\n  <metadata key="plater_name" value=""/>\n  <metadata key="locked" value="false"/>\n  <metadata key="filament_map_mode" value="Auto For Flush"/>\n  <model_instance>\n   <metadata key="object_id" value="${aid}"/>\n   <metadata key="instance_id" value="0"/>\n   <metadata key="identify_id" value="1"/>\n  </model_instance>\n </plate>\n <assemble>\n  <assemble_item object_id="${aid}" instance_id="0" transform="1 0 0 0 1 0 0 0 1 0 0 0" offset="0 0 0" />\n </assemble>\n</config>`;
+    const config = `<?xml version="1.0" encoding="UTF-8"?>\n<config>\n <object id="${aid}">\n  <metadata key="name" value="ChromaStack Combo Calibration"/>\n  <metadata key="extruder" value="1"/>\n${objects.map((o, i) => `  <part id="${i + 2}" subtype="normal_part"><metadata key="name" value="${escapeXml(o.name)}"/><metadata key="extruder" value="${o.pindex + 1}"/></part>`).join('\n')}\n </object>\n <plate>\n  <metadata key="plater_id" value="1"/>\n  <metadata key="plater_name" value=""/>\n  <metadata key="locked" value="false"/>\n  <model_instance>\n   <metadata key="object_id" value="${aid}"/>\n   <metadata key="instance_id" value="0"/>\n  </model_instance>\n </plate>\n <assemble>\n  <assemble_item object_id="${aid}" instance_id="0" transform="1 0 0 0 1 0 0 0 1 0 0 0" offset="0 0 0" />\n </assemble>\n</config>`;
     const ct = `<?xml version="1.0" encoding="UTF-8"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\n <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>\n <Default Extension="config" ContentType="text/xml"/>\n <Default Extension="json" ContentType="application/json"/>\n</Types>`;
     const rels = `<?xml version="1.0" encoding="UTF-8"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n <Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>\n</Relationships>`;
-    const ps = manifest.printSettings || { nozzleDiameter: 0.4, lineWidth: 0.42, layerHeight: manifest.layerHeight, initialLayerHeight: manifest.firstLayer, amsSlots: palette.map((p, i) => i + 1), filaments: palette };
-    // JSON project profile (same convention as the main exporter): without it Bambu
-    // reports "配置无效，仅加载几何" and drops part-to-extruder assignments.
-    const projectSettings = JSON.stringify({
-      layer_height: String(ps.layerHeight),
-      initial_layer_print_height: String(ps.initialLayerHeight),
-      wall_loops: '2',
-      top_shell_layers: '3',
-      bottom_shell_layers: '2',
-      sparse_infill_density: '15%',
-      brim_type: 'outer_only',
-      brim_width: '3',
-      printer_model: 'ChromaStack',
-      printer_settings_id: 'ChromaStack ' + ps.nozzleDiameter + ' nozzle',
-      nozzle_diameter: [String(ps.nozzleDiameter)],
-      line_width: String(ps.lineWidth),
-      printable_height: '180',
-      filament_colour: palette.map(p => p.hex),
-      filament_type: palette.map(() => 'PLA'),
-      filament_settings_id: palette.map(() => 'Generic PLA @ChromaStack ' + ps.nozzleDiameter + ' nozzle'),
-      filament_vendor: palette.map(p => /Bambu/i.test(p.brand || '') ? 'Bambu Lab' : 'Generic')
-    }, null, 2);
+    // No Metadata/project_settings.config: with it Bambu treats the file as a project and
+    // remaps every part to filament 1, ignoring the per-part extruder. Without it the
+    // standard-3MF import honours object pindex + per-part extruder.
     const files = [
       { name: '[Content_Types].xml', data: ct }, { name: '_rels/.rels', data: rels },
       { name: '3D/3dmodel.model', data: parts.join('\n') },
       { name: 'Metadata/model_settings.config', data: config },
-      { name: 'Metadata/project_settings.config', data: projectSettings },
       { name: 'Metadata/chromastack-combo-calibration.json', data: JSON.stringify({ app: 'ChromaStack Combo Calibration', manifest, palette }, null, 2) }
     ];
     return { bytes: CS.zip.createZip(files), meta: { manifest, palette } };

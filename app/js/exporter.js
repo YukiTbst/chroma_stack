@@ -1157,17 +1157,19 @@
   <metadata key="name" value="ChromaStack Model"/>
   <metadata key="extruder" value="1"/>
   <metadata face_count="${assemblyFaces}"/>
-${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part"><metadata key="name" value="${escapeXml(obj.name)}"/><metadata key="extruder" value="${obj.filament + 1}"/><mesh_stat face_count="${obj.indices.length / 3}" edges_fixed="0" degenerate_facets="0" facets_removed="0" facets_reversed="0" backwards_edges="0"/></part>`).join('\n')}
+${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
+   <metadata key="name" value="${escapeXml(obj.name)}"/>
+   <metadata key="extruder" value="${obj.filament + 1}"/>
+   <mesh_stat face_count="${obj.indices.length / 3}" edges_fixed="0" degenerate_facets="0" facets_removed="0" facets_reversed="0" backwards_edges="0"/>
+  </part>`).join('\n')}
  </object>
  <plate>
   <metadata key="plater_id" value="1"/>
   <metadata key="plater_name" value=""/>
   <metadata key="locked" value="false"/>
-  <metadata key="filament_map_mode" value="Auto For Flush"/>
   <model_instance>
    <metadata key="object_id" value="${assemblyId}"/>
    <metadata key="instance_id" value="0"/>
-   <metadata key="identify_id" value="1"/>
   </model_instance>
  </plate>
  <assemble>
@@ -1175,27 +1177,11 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part"><metadata key
  </assemble>
 </config>`;
 
-    // Minimal Bambu/Orca project profile. Without it Bambu Studio reports
-    // "3mf 文件配置无效，仅加载几何数据" and drops every part-to-extruder
-    // assignment. ChromaStack is not a printer preset on purpose: the studio
-    // keeps the user's current machine and only takes the filament colours,
-    // layer height and infill from here.
-    const projectSettings = {
-      layer_height: String(plan.layerHeight),
-      // P1-03: first layer uses the planned first-layer thickness, not the repeat height.
-      initial_layer_print_height: String(plan.firstLayerMm != null ? plan.firstLayerMm : plan.layerHeight),
-      wall_loops: '2',
-      sparse_infill_density: '100%',
-      printer_model: 'ChromaStack',
-      printer_settings_id: 'ChromaStack 0.4 nozzle',
-      nozzle_diameter: ['0.4'],
-      printable_height: '256',
-      filament_colour: palette.map(p => p.hex),
-      filament_type: palette.map(() => 'PLA'),
-      filament_settings_id: palette.map(() => 'Generic PLA @ChromaStack 0.4 nozzle'),
-      filament_vendor: palette.map(p => /Bambu/i.test(p.brand || '') ? 'Bambu Lab' : 'Generic')
-    };
-
+    // Do NOT emit Metadata/project_settings.config. Empirically (pre-GPU exports that
+    // assigned a different filament per object) it must be absent: with it present Bambu
+    // treats the file as a project and remaps every part to filament 1, ignoring the
+    // per-part extruder in model_settings. Without it Bambu imports as a standard 3MF and
+    // honours object pindex + per-part extruder (colors default, user maps once).
     const contentTypes = `<?xml version="1.0" encoding="UTF-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
@@ -1238,7 +1224,6 @@ ${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part"><metadata key
       { name: '_rels/.rels', data: rels },
       modelEntry,
       { name: 'Metadata/model_settings.config', data: modelSettings },
-      { name: 'Metadata/project_settings.config', data: JSON.stringify(projectSettings, null, 2) },
       { name: 'Metadata/chromastack.json', data: JSON.stringify(meta, null, 2) }
     ];
     return { files, meta, objects: componentMeta, ew, eh, pixelSize, exportDownscaled: grid.downscaled, exportChange: plane.changeStats };

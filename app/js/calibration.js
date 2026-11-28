@@ -108,22 +108,13 @@
       railTopMm: +(baseHeight + patches * layerHeight).toFixed(3),
       boardMm: [+boardW.toFixed(2), +boardD.toFixed(2)]
     };
-    const projectSettings = {
-      layer_height: String(layerHeight), initial_layer_print_height: String(baseHeight),
-      wall_loops: '2', sparse_infill_density: '100%',
-      printer_model: 'ChromaStack', printer_settings_id: 'ChromaStack 0.4 nozzle',
-      nozzle_diameter: ['0.4'], printable_height: '256',
-      filament_colour: ['#' + baseHex, '#' + targetHex],
-      filament_type: ['PLA', 'PLA'],
-      filament_settings_id: ['Generic PLA @ChromaStack 0.4 nozzle', 'Generic PLA @ChromaStack 0.4 nozzle'],
-      filament_vendor: ['Generic', 'Generic']
-    };
+    // No project_settings.config: keeps Bambu on the standard-3MF path so object pindex +
+    // per-part extruder assign distinct filaments (project_settings remaps all to 1).
     const files = [
       { name: '[Content_Types].xml', data: contentTypes },
       { name: '_rels/.rels', data: rels },
       { name: '3D/3dmodel.model', data: parts.join('\n') },
       { name: 'Metadata/model_settings.config', data: modelSettings },
-      { name: 'Metadata/project_settings.config', data: JSON.stringify(projectSettings, null, 2) },
       { name: 'Metadata/chromastack-calibration.json', data: JSON.stringify(meta, null, 2) }
     ];
     const bytes = CS.zip.createZip(files);

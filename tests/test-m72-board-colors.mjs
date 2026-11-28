@@ -40,8 +40,7 @@ function assertFormat(files, label, slotCount) {
   const ms = files['Metadata/model_settings.config'];
   const ext = (ms.match(/<metadata key="extruder" value="\d+"\/>/g) || []).length;
   assert.ok(ext >= slotCount, label + ' per-part extruder entries');
-  const ps = JSON.parse(files['Metadata/project_settings.config']);
-  assert.equal(ps.filament_colour.length, slotCount, label + ' colored filament slots');
+  assert.ok(!('Metadata/project_settings.config' in files), label + ' NO project_settings (would remap parts to filament 1)');
 }
 
 // batch board
@@ -72,7 +71,8 @@ function assertFormat(files, label, slotCount) {
   const files = readStoreZip(out.bytes);
   const model = files['3D/3dmodel.model'];
   assert.equal((model.match(/<triangle [^>]*pindex=/g) || []).length, 0, 'painting triangles no pindex');
-  const ps = JSON.parse(files['Metadata/project_settings.config']);
-  assert.equal(ps.filament_colour.length, palette.length, 'painting colored slots');
+  assert.ok(!('Metadata/project_settings.config' in files), 'painting NO project_settings');
+  const ext = (files['Metadata/model_settings.config'].match(/<metadata key="extruder" value="\d+"\/>/g) || []).length;
+  assert.ok(ext > 0, 'painting per-part extruder entries');
 }
-console.log('m72 passed: object-level pindex + per-part extruder + colored slots; no per-triangle pindex');
+console.log('m72 passed: object-level pindex + per-part extruder; no per-triangle pindex; no project_settings');

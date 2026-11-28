@@ -40,19 +40,16 @@ const segs = [{ materialId: palette[0].id, layerCount: 2 }, { materialId: palett
     assert.ok(Math.abs(p.preview[i * 4 + 2] - Math.round(want.b * 255)) <= 1, 'P1-02 B channel');
   }
 }
-// P1-03: exported project_settings initial_layer_print_height == firstLayerMm; unzip assert.
+// P1-03: NO project_settings.config (it remaps all parts to filament 1); the first-layer /
+// repeat-height contract lives in chromastack.json (layerZMm) instead.
 {
   const image = img(16, 12, (x, y) => [x * 12 % 255, 80, 80]);
   const p = LS.buildPlan(image, { ...base, segments: segs });
   const out = X.build3MFBytes(p);
-  const cfg = out.files.find(f => f.name === 'Metadata/project_settings.config');
-  const txt = typeof cfg.data === 'string' ? cfg.data : Buffer.from(cfg.data).toString('utf8');
-  const j = JSON.parse(txt);
-  assert.equal(j.initial_layer_print_height, '0.2', 'P1-03 first layer config');
-  assert.equal(j.layer_height, '0.08', 'repeat layer config');
+  assert.ok(!out.files.some(f => f.name === 'Metadata/project_settings.config'), 'no project_settings (would remap to filament 1)');
   const meta = JSON.parse(typeof out.files.find(f => f.name === 'Metadata/chromastack.json').data === 'string' ? out.files.find(f => f.name === 'Metadata/chromastack.json').data : Buffer.from(out.files.find(f => f.name === 'Metadata/chromastack.json').data).toString('utf8'));
   assert.equal(meta.printStrategy, 'layerSwap', 'P1-04 metadata strategy');
-  assert.ok(Array.isArray(meta.layerZMm) && Math.abs(meta.layerZMm[1] - 0.2) < 1e-9, 'metadata layerZMm');
+  assert.ok(Array.isArray(meta.layerZMm) && Math.abs(meta.layerZMm[1] - 0.2) < 1e-9, 'metadata layerZMm first layer 0.2');
   assert.ok(Array.isArray(meta.changeList), 'metadata changeList');
 }
 // P1-04: planSummary works for layerSwap (no families crash).
