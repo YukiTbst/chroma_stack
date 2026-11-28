@@ -1157,11 +1157,7 @@
   <metadata key="name" value="ChromaStack Model"/>
   <metadata key="extruder" value="1"/>
   <metadata face_count="${assemblyFaces}"/>
-${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part">
-   <metadata key="name" value="${escapeXml(obj.name)}"/>
-   <metadata key="extruder" value="${obj.filament + 1}"/>
-   <mesh_stat face_count="${obj.indices.length / 3}" edges_fixed="0" degenerate_facets="0" facets_removed="0" facets_reversed="0" backwards_edges="0"/>
-  </part>`).join('\n')}
+${objects.map(obj => `  <part id="${obj.id}" subtype="normal_part"><metadata key="name" value="${escapeXml(obj.name)}"/><metadata key="extruder" value="${obj.filament + 1}"/><mesh_stat face_count="${obj.indices.length / 3}" edges_fixed="0" degenerate_facets="0" facets_removed="0" facets_reversed="0" backwards_edges="0"/></part>`).join('\n')}
  </object>
  <plate>
   <metadata key="plater_id" value="1"/>
